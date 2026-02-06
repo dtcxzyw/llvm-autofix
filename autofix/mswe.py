@@ -41,7 +41,9 @@ from autofix.mini import (
   ReachToolBudget,
   RunStats,
 )
+from autofix.tools.bash import FORBIDDEN_TOOLS
 from autofix.tools.test import TestTool
+from autofix.utils import bashlex
 
 # TODO: remove duplicates with main.py
 console = get_boxed_console(debug_mode=False)
@@ -50,29 +52,6 @@ console = get_boxed_console(debug_mode=False)
 def panic(msg: str):
   console.print(f"Error: {msg}", color="red")
   exit(1)
-
-
-# TODO: add other tools that do not require permission
-FORBIDDEN_TOOLS = [
-  "which",
-  "sudo",
-  "rm",
-  "curl",
-  "wget",
-  "git",
-  "ssh",
-  "scp",
-  "ftp",
-  "telnet",
-  "ping",
-  "traceroute",
-  "nslookup",
-  "dig",
-  "nmap",
-  "apt",
-  "apt-get",
-  "dpkg",
-]
 
 
 # TODO: Python etc can also edit files ...
@@ -296,11 +275,12 @@ class MyAgent(DefaultAgent):
     if self.edit_budget == 0:
       raise ReachToolBudget("edit")
     tool = (action["action"] or "").split(" ", maxsplit=1)[0]
-    if tool in FORBIDDEN_TOOLS:
-      return {
-        "output": "Error: You do not have permission to use this tool.",
-        "returncode": 1,
-      }
+    for subtool in bashlex.get_commands(tool):
+      if subtool in FORBIDDEN_TOOLS:
+        return {
+          "output": f"Error: You do not have permission to use tool {subtool}",
+          "returncode": 1,
+        }
     if tool == "submit-patch":
       self.test_budget -= 1
       errmsg = self._test_submission()
