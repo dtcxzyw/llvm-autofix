@@ -1,0 +1,2510 @@
+Issue ID: 112068
+Issue Type: miscompilation
+Issue Commit: b24acc06e1d465b3e3e4e28515dd437f6a7454f2
+Issue Title: [InstCombine] `noundef` attribute should be dropped after setting `is_zero_poison` to true
+Issue Labels: ['miscompilation', 'llvm:instcombine']
+Checking out the issue's environment ...
+Building LLVM and try reproducing the issue ...
+Issue reproduced successfully.
+╭─ Reproducer [MainThread@4040910] ────────────────────────────────────────────────────────────────────────────────────────────╮
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {                                                                         │
+│ entry:                                                                                                                       │
+│   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1 false)                                                                  │
+│   %res = shl i32 %x, %cttz                                                                                                   │
+│   ret i32 %res                                                                                                               │
+│ }                                                                                                                            │
+│                                                                                                                              │
+│ ; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)                                     │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                                                                                │
+│                                                                                                                              │
+│ attributes #0 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }                                   │
+│                                                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Reproducing Log [MainThread@4040910] ───────────────────────────────────────────────────────────────────────────────────────╮
+│ $ opt < %s -passes=instcombine -S                                                                                            │
+│ --- src ---                                                                                                                  │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {                                                                         │
+│ entry:                                                                                                                       │
+│   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1 false)                                                                  │
+│   %res = shl i32 %x, %cttz                                                                                                   │
+│   ret i32 %res                                                                                                               │
+│ }                                                                                                                            │
+│                                                                                                                              │
+│ ; Function Attrs: nocallback nosync nounwind speculatable willreturn memory(none)                                            │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                                                                                │
+│                                                                                                                              │
+│ attributes #0 = { nocallback nosync nounwind speculatable willreturn memory(none) }                                          │
+│                                                                                                                              │
+│                                                                                                                              │
+│ --- tgt ---                                                                                                                  │
+│ ; ModuleID = '<stdin>'                                                                                                       │
+│ source_filename = "<stdin>"                                                                                                  │
+│                                                                                                                              │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {                                                                         │
+│ entry:                                                                                                                       │
+│   %cttz = call noundef range(i32 0, 33) i32 @llvm.cttz.i32(i32 %y, i1 true)                                                  │
+│   %res = shl i32 %x, %cttz                                                                                                   │
+│   ret i32 %res                                                                                                               │
+│ }                                                                                                                            │
+│                                                                                                                              │
+│ ; Function Attrs: nocallback nosync nounwind speculatable willreturn memory(none)                                            │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                                                                                │
+│                                                                                                                              │
+│ attributes #0 = { nocallback nosync nounwind speculatable willreturn memory(none) }                                          │
+│                                                                                                                              │
+│                                                                                                                              │
+│ --- log ---                                                                                                                  │
+│                                                                                                                              │
+│ ----------------------------------------                                                                                     │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {                                                                         │
+│ entry:                                                                                                                       │
+│   %cttz = cttz i32 %y, 0                                                                                                     │
+│   assume_welldefined i32 %cttz                                                                                               │
+│   %res = shl i32 %x, %cttz                                                                                                   │
+│   ret i32 %res                                                                                                               │
+│ }                                                                                                                            │
+│ =>                                                                                                                           │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {                                                                         │
+│ entry:                                                                                                                       │
+│   %cttz = cttz i32 %y, 1                                                                                                     │
+│   %#range_0_%cttz = !range i32 %cttz, i32 0, i32 33                                                                          │
+│   assume_welldefined i32 %#range_0_%cttz                                                                                     │
+│   %res = shl i32 %x, %#range_0_%cttz                                                                                         │
+│   ret i32 %res                                                                                                               │
+│ }                                                                                                                            │
+│ Transformation doesn't verify!                                                                                               │
+│                                                                                                                              │
+│ ERROR: Source is more defined than target                                                                                    │
+│                                                                                                                              │
+│ Example:                                                                                                                     │
+│ i32 %x = poison                                                                                                              │
+│ i32 %y = #x00000000 (0)                                                                                                      │
+│                                                                                                                              │
+│ Source:                                                                                                                      │
+│ i32 %cttz = #x00000020 (32)                                                                                                  │
+│ i32 %res = poison                                                                                                            │
+│                                                                                                                              │
+│ Target:                                                                                                                      │
+│ i32 %cttz = poison                                                                                                           │
+│ i32 %#range_0_%cttz = poison                                                                                                 │
+│ void = UB triggered!                                                                                                         │
+│                                                                                                                              │
+│                                                                                                                              │
+│ Summary:                                                                                                                     │
+│   0 correct transformations                                                                                                  │
+│   1 incorrect transformations                                                                                                │
+│   0 failed-to-prove transformations                                                                                          │
+│   0 Alive2 errors                                                                                                            │
+│                                                                                                                              │
+│                                                                                                                              │
+│ --- opt_stderr ---                                                                                                           │
+│                                                                                                                              │
+│                                                                                                                              │
+│                                                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Debugging process with ASLR disabled
+Tmux detected.
+GDB Python path: /usr/share/gdb/python:/llvm-autofix:/llvm-autofix-deps/py3_venv/lib/python3.12/site-packages:/usr/lib/python312.zip:/usr/lib/python3.12:/usr/lib/python3.12/lib-dynload:/usr/local/lib/python3.12/dist-packages:/usr/lib/python3/dist-packages
+GDB Python version: 3.12.3
+Expected Python version: 3.12.3
+Reproducing the issue with debugger...
+Adding breakpoints
+Setting breakpoint at Instruction::clone ... succeeded
+Setting breakpoint at Instruction::replaceSuccessorWith ... succeeded
+Setting breakpoint at Instruction::setSuccessor ... succeeded
+Setting breakpoint at User::setOperand ... succeeded
+Setting breakpoint at ::eraseFromParent ... succeeded
+Setting breakpoint at Use::set ... succeeded
+Setting breakpoint at Use::operator= ... succeeded
+Setting breakpoint at User::replaceUsesOfWith ... succeeded
+Setting breakpoint at Value::replaceAllUsesWith ... succeeded
+Setting breakpoint at InstCombiner::InsertNewInstBefore ... succeeded
+Setting breakpoint at InstCombiner::InsertNewInstWith ... succeeded
+Setting breakpoint at InstCombiner::replaceInstUsesWith ... succeeded
+Setting breakpoint at InstCombiner::replaceOperand ... succeeded
+Setting breakpoint at InstCombiner::replaceUse ... succeeded
+Setting breakpoint at SwitchInst::addCase ... succeeded
+Setting breakpoint at SwitchInst::removeCase ... succeeded
+Setting breakpoint at BinaryOperator::swapOperands ... succeeded
+Setting breakpoint at BranchInst::swapSuccessors ... succeeded
+Setting breakpoint at BranchInst::setCondition ... succeeded
+Setting breakpoint at BranchInst::setSuccessor ... succeeded
+Setting breakpoint at SwitchInst::setCondition ... succeeded
+Setting breakpoint at SwitchInst::setDefaultDest ... succeeded
+Setting breakpoint at SwitchInst::setSuccessor ... succeeded
+Setting breakpoint at CmpInst::swapOperands ... succeeded
+Setting breakpoint at ICmpInst::swapOperands ... succeeded
+Setting breakpoint at FCmpInst::swapOperands ... succeeded
+Setting breakpoint at CmpInst::setPredicate ... succeeded
+Setting breakpoint at PHINode::addIncoming ... succeeded
+Setting breakpoint at PHINode::setIncomingValue ... succeeded
+Setting breakpoint at PHINode::addIncoming ... succeeded
+Setting breakpoint at *Inst::Create ... succeeded
+Setting breakpoint at *Inst::operator new ... succeeded
+Setting breakpoint at *BinaryOperator::Create ... succeeded
+Setting breakpoint at *IRBuilderBase::Create ... succeeded
+Number of breakpoints: 681
+Time used in setting up breakpoints: 518.15s
+Parsing frames and their symbols ...
+(frame 0) llvm/include/llvm/Transforms/InstCombine/InstCombiner.h:420 in llvm::InstCombiner::replaceOperand
+(frame 1) llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp:509 in foldCttzCtlz
+(frame 2) llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp:2132 in llvm::InstCombinerImpl::visitCallInst
+(frame 3) llvm/include/llvm/IR/InstVisitor.h:222 in llvm::InstVisitor<llvm::InstCombinerImpl, llvm::Instruction*>::visitIntrinsicInst
+(frame 4) llvm/include/llvm/IR/InstVisitor.h:290 in llvm::InstVisitor<llvm::InstCombinerImpl, llvm::Instruction*>::delegateCallInst
+(frame 5) llvm/include/llvm/IR/Instruction.def:209 in llvm::InstVisitor<llvm::InstCombinerImpl, llvm::Instruction*>::visitCall
+(frame 6) llvm/include/llvm/IR/Instruction.def:209 in llvm::InstVisitor<llvm::InstCombinerImpl, llvm::Instruction*>::visit
+(frame 7) llvm/lib/Transforms/InstCombine/InstructionCombining.cpp:5186 in llvm::InstCombinerImpl::run
+(frame 8) llvm/lib/Transforms/InstCombine/InstructionCombining.cpp:5503 in combineInstructionsOverFunction
+(frame 9) llvm/lib/Transforms/InstCombine/InstructionCombining.cpp:5566 in llvm::InstCombinePass::run
+The cached breakpoint function:
+llvm::InstCombiner::replaceOperand
+Transform pass: instcombine
+Analysis passes: aa-eval
+Running opt with the reproducer to collect verbose log ...
+Options: ['--passes=aa-eval,instcombine', '-S',
+'-aa-pipeline=basic-aa', '-print-all-alias-modref-info',
+'--debug-only=instcombine']
+╭─ Opt Verbose Log [MainThread@4040910] ───────────────────────╮
+│ $ /llvm-autofix/build/llvm-build/112068/bin/opt              │
+│ --passes=aa-eval,instcombine -S -aa-pipeline=basic-aa        │
+│ -print-all-alias-modref-info --debug-only=instcombine        │
+│ /tmp/reprod_q0wmb341.ll                                      │
+│ Function: shl_cttz_false_noundef: 0 pointers, 1 call sites   │
+│                                                              │
+│                                                              │
+│ INSTCOMBINE ITERATION #1 on shl_cttz_false_noundef           │
+│ ADD:   ret i32 %res                                          │
+│ ADD:   %res = shl i32 %x, %cttz                              │
+│ ADD:   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1    │
+│ false)                                                       │
+│ IC: Visiting:   %cttz = call noundef i32 @llvm.cttz.i32(i32  │
+│ %y, i1 false)                                                │
+│ IC: Mod =   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y,  │
+│ i1 false)                                                    │
+│     New =   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y,  │
+│ i1 true)                                                     │
+│ ADD:   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1    │
+│ true)                                                        │
+│ IC: Visiting:   %cttz = call noundef i32 @llvm.cttz.i32(i32  │
+│ %y, i1 true)                                                 │
+│ IC: Mod =   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y,  │
+│ i1 true)                                                     │
+│     New =   %cttz = call noundef range(i32 0, 33) i32        │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│ ADD:   %cttz = call noundef range(i32 0, 33) i32             │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│ IC: Visiting:   %cttz = call noundef range(i32 0, 33) i32    │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│ IC: Visiting:   %res = shl i32 %x, %cttz                     │
+│ IC: Visiting:   ret i32 %res                                 │
+│                                                              │
+│                                                              │
+│ INSTCOMBINE ITERATION #2 on shl_cttz_false_noundef           │
+│ ADD:   ret i32 %res                                          │
+│ ADD:   %res = shl i32 %x, %cttz                              │
+│ ADD:   %cttz = call noundef range(i32 0, 33) i32             │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│ IC: Visiting:   %cttz = call noundef range(i32 0, 33) i32    │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│ IC: Visiting:   %res = shl i32 %x, %cttz                     │
+│ IC: Visiting:   ret i32 %res                                 │
+│ ; ModuleID = '/tmp/reprod_q0wmb341.ll'                       │
+│ source_filename = "/tmp/reprod_q0wmb341.ll"                  │
+│                                                              │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {         │
+│ entry:                                                       │
+│   %cttz = call noundef range(i32 0, 33) i32                  │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│   %res = shl i32 %x, %cttz                                   │
+│   ret i32 %res                                               │
+│ }                                                            │
+│                                                              │
+│ ; Function Attrs: nocallback nofree nosync nounwind          │
+│ speculatable willreturn memory(none)                         │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                │
+│                                                              │
+│ attributes #0 = { nocallback nofree nosync nounwind          │
+│ speculatable willreturn memory(none) }                       │
+│ ===== Alias Analysis Evaluator Report =====                  │
+│   Alias Analysis Evaluator Summary: No pointers!             │
+│   Alias Analysis Mod/Ref Evaluator Summary: no mod/ref!      │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+Registering tool: find250 (budget=250)
+Registering tool: grep250 (budget=250)
+Registering tool: list250 (budget=250)
+Registering tool: read250 (budget=250)
+Registering tool: edit (budget=25)
+Registering tool: code (budget=250)
+Registering tool: docs (budget=250)
+Registering tool: langref (budget=250)
+Registering tool: reset (budget=25)
+Registering tool: preview (budget=25)
+Registering tool: test (budget=25)
+Registering tool: debug (budget=250)
+Registering tool: eval (budget=250)
+Registering tool: stop (budget=250)
+Analyzing the issue to gather required information ...
+╭─ User [MainThread@4040910] ──────────────────────────────────╮
+│ You are a senior LLVM maintainer, responsible for the        │
+│ `instcombine` module. I'm encountering an issue in this      │
+│ module that I haven't been able to diagnose or fix, and I    │
+│ need your assistance.                                        │
+│                                                              │
+│ ## Reproducer ##                                             │
+│                                                              │
+│ ```llvm                                                      │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {         │
+│ entry:                                                       │
+│   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1 false)  │
+│   %res = shl i32 %x, %cttz                                   │
+│   ret i32 %res                                               │
+│ }                                                            │
+│                                                              │
+│ ; Function Attrs: nocallback nofree nosync nounwind          │
+│ speculatable willreturn memory(none)                         │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                │
+│                                                              │
+│ attributes #0 = { nocallback nofree nosync nounwind          │
+│ speculatable willreturn memory(none) }                       │
+│                                                              │
+│ ```                                                          │
+│                                                              │
+│ ## Symptom ##                                                │
+│                                                              │
+│ ```                                                          │
+│ --- src ---                                                  │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {         │
+│ entry:                                                       │
+│   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1 false)  │
+│   %res = shl i32 %x, %cttz                                   │
+│   ret i32 %res                                               │
+│ }                                                            │
+│                                                              │
+│ ; Function Attrs: nocallback nosync nounwind speculatable    │
+│ willreturn memory(none)                                      │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                │
+│                                                              │
+│ attributes #0 = { nocallback nosync nounwind speculatable    │
+│ willreturn memory(none) }                                    │
+│                                                              │
+│                                                              │
+│ --- tgt ---                                                  │
+│ ; ModuleID = '<stdin>'                                       │
+│ source_filename = "<stdin>"                                  │
+│                                                              │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {         │
+│ entry:                                                       │
+│   %cttz = call noundef range(i32 0, 33) i32                  │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│   %res = shl i32 %x, %cttz                                   │
+│   ret i32 %res                                               │
+│ }                                                            │
+│                                                              │
+│ ; Function Attrs: nocallback nosync nounwind speculatable    │
+│ willreturn memory(none)                                      │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                │
+│                                                              │
+│ attributes #0 = { nocallback nosync nounwind speculatable    │
+│ willreturn memory(none) }                                    │
+│                                                              │
+│                                                              │
+│ --- log ---                                                  │
+│                                                              │
+│ ----------------------------------------                     │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {         │
+│ entry:                                                       │
+│   %cttz = cttz i32 %y, 0                                     │
+│   assume_welldefined i32 %cttz                               │
+│   %res = shl i32 %x, %cttz                                   │
+│   ret i32 %res                                               │
+│ }                                                            │
+│ =>                                                           │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {         │
+│ entry:                                                       │
+│   %cttz = cttz i32 %y, 1                                     │
+│   %#range_0_%cttz = !range i32 %cttz, i32 0, i32 33          │
+│   assume_welldefined i32 %#range_0_%cttz                     │
+│   %res = shl i32 %x, %#range_0_%cttz                         │
+│   ret i32 %res                                               │
+│ }                                                            │
+│ Transformation doesn't verify!                               │
+│                                                              │
+│ ERROR: Source is more defined than target                    │
+│                                                              │
+│ Example:                                                     │
+│ i32 %x = poison                                              │
+│ i32 %y = #x00000000 (0)                                      │
+│                                                              │
+│ Source:                                                      │
+│ i32 %cttz = #x00000020 (32)                                  │
+│ i32 %res = poison                                            │
+│                                                              │
+│ Target:                                                      │
+│ i32 %cttz = poison                                           │
+│ i32 %#range_0_%cttz = poison                                 │
+│ void = UB triggered!                                         │
+│                                                              │
+│                                                              │
+│ Summary:                                                     │
+│   0 correct transformations                                  │
+│   1 incorrect transformations                                │
+│   0 failed-to-prove transformations                          │
+│   0 Alive2 errors                                            │
+│                                                              │
+│                                                              │
+│ --- opt_stderr ---                                           │
+│                                                              │
+│                                                              │
+│                                                              │
+│ ```                                                          │
+│                                                              │
+│ ## Initial Observations ##                                   │
+│                                                              │
+│ The reproducer is already minimized. Based on my experience  │
+│ in debugging these bugs, the issue is likely introduced by   │
+│ the *first transformation*, or due to incorrect analysis     │
+│ information feeding into it.                                 │
+│ Here, the *first transformation* means the *first            │
+│ transformation point* that modifies the IR in the pass       │
+│ regardless of whether it's in the `instcombine` module or    │
+│ other modules.                                               │
+│ #### Opt Information ####                                    │
+│                                                              │
+│ To gather more insight, I ran `opt` to inspect both the      │
+│ transformations and the analysis results. Below are the      │
+│ command and the resulting log:                               │
+│                                                              │
+│ ```bash                                                      │
+│ $ bin/opt --passes=aa-eval,instcombine -S                    │
+│ -aa-pipeline=basic-aa -print-all-alias-modref-info           │
+│ --debug-only=instcombine /tmp/reprod_q0wmb341.ll             │
+│ Function: shl_cttz_false_noundef: 0 pointers, 1 call sites   │
+│                                                              │
+│                                                              │
+│ INSTCOMBINE ITERATION #1 on shl_cttz_false_noundef           │
+│ ADD:   ret i32 %res                                          │
+│ ADD:   %res = shl i32 %x, %cttz                              │
+│ ADD:   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1    │
+│ false)                                                       │
+│ IC: Visiting:   %cttz = call noundef i32 @llvm.cttz.i32(i32  │
+│ %y, i1 false)                                                │
+│ IC: Mod =   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y,  │
+│ i1 false)                                                    │
+│     New =   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y,  │
+│ i1 true)                                                     │
+│ ADD:   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1    │
+│ true)                                                        │
+│ IC: Visiting:   %cttz = call noundef i32 @llvm.cttz.i32(i32  │
+│ %y, i1 true)                                                 │
+│ IC: Mod =   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y,  │
+│ i1 true)                                                     │
+│     New =   %cttz = call noundef range(i32 0, 33) i32        │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│ ADD:   %cttz = call noundef range(i32 0, 33) i32             │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│ IC: Visiting:   %cttz = call noundef range(i32 0, 33) i32    │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│ IC: Visiting:   %res = shl i32 %x, %cttz                     │
+│ IC: Visiting:   ret i32 %res                                 │
+│                                                              │
+│                                                              │
+│ INSTCOMBINE ITERATION #2 on shl_cttz_false_noundef           │
+│ ADD:   ret i32 %res                                          │
+│ ADD:   %res = shl i32 %x, %cttz                              │
+│ ADD:   %cttz = call noundef range(i32 0, 33) i32             │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│ IC: Visiting:   %cttz = call noundef range(i32 0, 33) i32    │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│ IC: Visiting:   %res = shl i32 %x, %cttz                     │
+│ IC: Visiting:   ret i32 %res                                 │
+│ ; ModuleID = '/tmp/reprod_q0wmb341.ll'                       │
+│ source_filename = "/tmp/reprod_q0wmb341.ll"                  │
+│                                                              │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {         │
+│ entry:                                                       │
+│   %cttz = call noundef range(i32 0, 33) i32                  │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│   %res = shl i32 %x, %cttz                                   │
+│   ret i32 %res                                               │
+│ }                                                            │
+│                                                              │
+│ ; Function Attrs: nocallback nofree nosync nounwind          │
+│ speculatable willreturn memory(none)                         │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                │
+│                                                              │
+│ attributes #0 = { nocallback nofree nosync nounwind          │
+│ speculatable willreturn memory(none) }                       │
+│ ===== Alias Analysis Evaluator Report =====                  │
+│   Alias Analysis Evaluator Summary: No pointers!             │
+│   Alias Analysis Mod/Ref Evaluator Summary: no mod/ref!      │
+│                                                              │
+│ ```                                                          │
+│                                                              │
+│ From this log, I identified the first transformation point   │
+│ as:                                                          │
+│                                                              │
+│ ```                                                          │
+│ llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp::foldCt │
+│ tzCtlz()                                                     │
+│ ```                                                          │
+│                                                              │
+│ Here is the relevant backtrace at the moment of the          │
+│ transformation:                                              │
+│                                                              │
+│ ```stack                                                     │
+│ (frame 1)                                                    │
+│ llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp:509 in  │
+│ foldCttzCtlz                                                 │
+│ (frame 2)                                                    │
+│ llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp:2132 in │
+│ llvm::InstCombinerImpl::visitCallInst                        │
+│ (frame 3) llvm/include/llvm/IR/InstVisitor.h:222 in          │
+│ llvm::InstVisitor<llvm::InstCombinerImpl,                    │
+│ llvm::Instruction*>::visitIntrinsicInst                      │
+│ (frame 4) llvm/include/llvm/IR/InstVisitor.h:290 in          │
+│ llvm::InstVisitor<llvm::InstCombinerImpl,                    │
+│ llvm::Instruction*>::delegateCallInst                        │
+│ (frame 5) llvm/include/llvm/IR/Instruction.def:209 in        │
+│ llvm::InstVisitor<llvm::InstCombinerImpl,                    │
+│ llvm::Instruction*>::visitCall                               │
+│ (frame 6) llvm/include/llvm/IR/Instruction.def:209 in        │
+│ llvm::InstVisitor<llvm::InstCombinerImpl,                    │
+│ llvm::Instruction*>::visit                                   │
+│ (frame 7)                                                    │
+│ llvm/lib/Transforms/InstCombine/InstructionCombining.cpp:518 │
+│ 6 in llvm::InstCombinerImpl::run                             │
+│ (frame 8)                                                    │
+│ llvm/lib/Transforms/InstCombine/InstructionCombining.cpp:550 │
+│ 3 in combineInstructionsOverFunction                         │
+│ (frame 9)                                                    │
+│ llvm/lib/Transforms/InstCombine/InstructionCombining.cpp:556 │
+│ 6 in llvm::InstCombinePass::run                              │
+│ ```                                                          │
+│                                                              │
+│ #### Debugger Information ####                               │
+│                                                              │
+│ I also attached a debugger (it's gdb) so you can inspect the │
+│ program state at the transformation point.                   │
+│ For convenience, I started the debugger and paused execution │
+│ at that point.                                               │
+│                                                              │
+│ To use debugger, call the tool `debug` or `eval`. Call       │
+│ `eval` to evaluate expressions in the context of the paused  │
+│ frame. Call `debug` to execute debugger commands. Note, you  │
+│ should call `eval` as long as it suffices, as it provides a  │
+│ more controlled interface.                                   │
+│                                                              │
+│ ## Instructions for Analysis ##                              │
+│                                                              │
+│ Please help me determine the root cause of the issue based   │
+│ on the information provided above.                           │
+│ You may use the logs supplied, and you may request or infer  │
+│ any additional context you find necessary using the          │
+│ available tools.                                             │
+│                                                              │
+│ Once you identify the issue and the corresponding fix,use    │
+│ the `stop` tool to specify the *edit point(s)* along with    │
+│ detailed reasoning. Follow this structure:                   │
+│                                                              │
+│ 1. **Understanding the Issue**: Explain what the problem is  │
+│ and why it manifests.                                        │
+│ 2. **Analyzing `opt`'s Log**: Highlight any relevant         │
+│ transformations, analysis results, or unexpected behavior    │
+│ observed in the `opt` output.                                │
+│ 3. **Root Cause Analysis**: Connect the observations to the  │
+│ underlying cause in the code.                                │
+│ 4. **Proposed Edit Point(s)**                                │
+│    + Each edit point should be at least 1 lines long         │
+│    + NOTICE (on assertion failure): Assertion failures       │
+│ typically indicate earlier errors in execution. Assume all   │
+│ assertions are correct and investigate preceding code or     │
+│ conditions. Edit points can contain but cannot be limited to │
+│ assertion statements.                                        │
+│ 5. **Conclusion**: Summarize the fix and its expected        │
+│ effect.                                                      │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'code[250]', 'docs[250]',
+'langref[250]', 'debug[250]', 'eval[250]', 'stop[250]']
+╭─ User [MainThread@4040910] ──────────────────────────────────╮
+│ ## Available Tools ##                                        │
+│                                                              │
+│ You have access to the following 10 tools to help you        │
+│ complete your task:                                          │
+│                                                              │
+│ [                                                            │
+│   {                                                          │
+│     "name": "find250",                                       │
+│     "description": "Find all files following a specified     │
+│ pattern (e.g., `src/**/*.cpp`, `**/*.h`) in the specified    │
+│ directory. The results will be sorted alphabetically and     │
+│ only 250 results will be returned starting from a given      │
+│ index.",                                                     │
+│     "parameters": {                                          │
+│       "k": {                                                 │
+│         "type": "integer",                                   │
+│         "required": true,                                    │
+│         "description": "The index to start returning the     │
+│ results from (1-based index). For example, when k=10, it     │
+│ will return the 10th result and the next 249 results."       │
+│       },                                                     │
+│       "pattern": {                                           │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The pattern of the files."           │
+│       },                                                     │
+│       "directory": {                                         │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "Find files in this directory (a      │
+│ relative path starting with llvm/)."                         │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "grep250",                                       │
+│     "description": "Print lines that match a specified       │
+│ pattern in the llvm/ directory. This is exactly the same     │
+│ `grep` command in Linux, but with results being sorted       │
+│ alphabetically, and only returns 250 results starting from a │
+│ given index.",                                               │
+│     "parameters": {                                          │
+│       "k": {                                                 │
+│         "type": "integer",                                   │
+│         "required": true,                                    │
+│         "description": "The index to start returning the     │
+│ results from (1-based index). For example, when k=10, it     │
+│ will return the 10th result and the next 249 results."       │
+│       },                                                     │
+│       "args": {                                              │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The arguments including options,     │
+│ patterns, and files. NOTICE: ensure the pattern to search is │
+│ wrapped in single quotes (i.e., '...'), e.g., `-nRI          │
+│ 'test-pattern'`."                                            │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "list250",                                       │
+│     "description": "List up to 250 contents of a directory.  │
+│ All contents of the directory will be sorted alphabetically  │
+│ and only up to 250 of them are returned starting from a      │
+│ given index.",                                               │
+│     "parameters": {                                          │
+│       "directory": {                                         │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The relative path (starting with     │
+│ llvm/) to the directory to list."                            │
+│       },                                                     │
+│       "k": {                                                 │
+│         "type": "integer",                                   │
+│         "required": true,                                    │
+│         "description": "The index to start returning the     │
+│ contents from (1-based index). For example, when k=10, it    │
+│ will return the 10th content and the next 249 results."      │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "read250",                                       │
+│     "description": "Read the next 250 lines of content of a  │
+│ file starting a specific line.",                             │
+│     "parameters": {                                          │
+│       "file": {                                              │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The relative path to the file to     │
+│ read. The path should start with llvm/."                     │
+│       },                                                     │
+│       "position": {                                          │
+│         "type": "integer",                                   │
+│         "required": true,                                    │
+│         "description": "The line number to start reading     │
+│ from (1-based index)."                                       │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "code",                                          │
+│     "description": "Obtain the source code of a function in  │
+│ LLVM. You should assume that all functions called by the     │
+│ function to obtain source code are correctly implemented",   │
+│     "parameters": {                                          │
+│       "func": {                                              │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "Name of the function"                │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "docs",                                          │
+│     "description": "Obtain the documentation of a function   │
+│ in LLVM",                                                    │
+│     "parameters": {                                          │
+│       "func": {                                              │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "Name of the function"                │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "langref",                                       │
+│     "description": "Get the detailed description of an LLVM  │
+│ instruction/intrinsic from the LLVM Language Reference       │
+│ Manual.",                                                    │
+│     "parameters": {                                          │
+│       "inst": {                                              │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The instruction/intrinsic that you'd │
+│ like to get the description for.\nFor instructions, please   │
+│ provide the instruction name (e.g., `add`, `mul`,            │
+│ etc.).\nFor intrinsics, please provide the intrinsic name    │
+│ (e.g., `llvm.sadd.with.overflow`, `llvm.memcpy`, etc.).\nDo  │
+│ not include type mangling suffix or operands in the name."   │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "debug",                                         │
+│     "description": "Execute a GDB command and obtain the     │
+│ results from gdb, stdout, and stderr.\nInitially the         │
+│ debugger is stopped at the first transformation/crash        │
+│ breakpoint.\nNote that you are not allowed to start a new    │
+│ session or close the current session (i.e., executing        │
+│ run/start/quit/exit).\nShell commands (shell/make/pipe) are  │
+│ also forbidden due to security reasons.",                    │
+│     "parameters": {                                          │
+│       "cmd": {                                               │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The GDB command"                     │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "eval",                                          │
+│     "description": "Evaluate an expression in the debugger   │
+│ and obtain its value. Please make sure that you have set the │
+│ correct frame in the debugger before using this tool.",      │
+│     "parameters": {                                          │
+│       "expr": {                                              │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The expression that you'd like to    │
+│ evaluate and obtain its value"                               │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "stop",                                          │
+│     "description": "Stop process and return the found edit   │
+│ points for fixing the issue",                                │
+│     "parameters": {                                          │
+│       "edit_points": {                                       │
+│         "type": "list[tuple[int,int,string]]",               │
+│         "required": true,                                    │
+│         "description": "A list of edit points with each      │
+│ being a tuple of the one-indexed starting line number        │
+│ (included), the ending line number (included), and the       │
+│ relative path of the file to edit (starting with llvm/)."    │
+│       },                                                     │
+│       "thoughts": {                                          │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The detailed thoughts for diagnosing │
+│ the issue including step-by-step \"1. Understanding the      │
+│ Issue\", 2. \"Analyzing `opt`'s Log\", 3. \"Root Cause       │
+│ Analysis\", 4. \"Proposed Edit Points(s)\", and 5.           │
+│ \"Conclusion\"."                                             │
+│       }                                                      │
+│     }                                                        │
+│   }                                                          │
+│ ]                                                            │
+│                                                              │
+│ ### Tool Call Format ###                                     │
+│                                                              │
+│ When using a tool, return a JSON object strictly following   │
+│ below format:                                                │
+│                                                              │
+│ <tool_call>                                                  │
+│ {                                                            │
+│   "name": <tool_name>,                                       │
+│   "args": <tool_args>                                        │
+│ }                                                            │
+│ </tool_call>                                                 │
+│                                                              │
+│ For example:                                                 │
+│                                                              │
+│ <tool_call>                                                  │
+│ {                                                            │
+│   "name": "get_weather",                                     │
+│   "args": {                                                  │
+│     "location": "New York",                                  │
+│     "date": "2023-10-01",                                    │
+│     "celsius": true                                          │
+│   }                                                          │
+│ }                                                            │
+│ </tool_call>                                                 │
+│                                                              │
+│ ### Key Requirements ###                                     │
+│                                                              │
+│ 1. ALWAYS wrap your response with "<tool_call>" and          │
+│ "</tool_call>" as shown above so that I know you are calling │
+│ a tool.                                                      │
+│ 2. Content inside "<tool_call>" and "</tool_call>" MUST be a │
+│ valid JSON object. Put all other content outside of these    │
+│ tags.                                                        │
+│ 3. The "args" field MUST also be a valid JSON object. It is  │
+│ NOT a string that represents a JSON object.                  │
+│ 4. Only call ONE tool in each of your response. Do NOT call  │
+│ multiple tools at the same time.                             │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #0, chat statistics so far: {'chat_rounds': 1,
+'input_tokens': 0, 'cached_tokens': 0, 'output_tokens': 0,
+'total_tokens': 0}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'code[250]', 'docs[250]',
+'langref[250]', 'debug[250]', 'eval[250]', 'stop[250]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ stop({"edit_points": [[509, 517,                             │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp"]],    │
+│ "thoughts": "An incorrect transformation in `instcombine` is │
+│ causing a miscompilation. The transformation changes         │
+│ `llvm.cttz.i32(..., i1 false)` to `llvm.cttz.i32(..., i1     │
+│ true)`, which is not always safe. This change is problematic │
+│ when the result of `cttz` is used as a shift amount, as it   │
+│ can introduce undefined behavior.\n\n### 1. Understanding    │
+│ the Issue\n\nThe core of the problem lies in the differing   │
+│ semantics of `llvm.cttz` based on its second argument,       │
+│ `is_zero_poison`.\n\n-   `llvm.cttz(val,                     │
+│ is_zero_poison=false)`: If `val` is 0, the result is the     │
+│ bitwidth of the type (e.g., 32 for `i32`).\n-                │
+│ `llvm.cttz(val, is_zero_poison=true)`: If `val` is 0, the    │
+│ operation has undefined behavior, and the result is          │
+│ `poison`.\n\nThe transformation in `instcombine` changes     │
+│ `is_zero_poison` from `false` to `true`. Let's analyze the   │
+│ impact with the provided reproducer:\n\n-   **Original       │
+│ IR**:\n    -   `%cttz = call noundef i32 @llvm.cttz.i32(i32  │
+│ %y, i1 false)`\n    -   `%res = shl i32 %x, %cttz`\n    -    │
+│ If `%y` is 0, `%cttz` becomes 32.\n    -   `shl i32 %x, 32`  │
+│ is undefined behavior because the shift amount is equal to   │
+│ the bitwidth. The result `%res` is `poison`.\n\n-            │
+│ **Transformed IR**:\n    -   `%cttz = call noundef i32       │
+│ @llvm.cttz.i32(i32 %y, i1 true)`\n    -   `%res = shl i32    │
+│ %x, %cttz`\n    -   If `%y` is 0, the `cttz` call itself has │
+│ undefined behavior, and `%cttz` becomes `poison`.\n    -     │
+│ `shl i32 %x, poison` results in `%res` being                 │
+│ `poison`.\n\nWhile in this specific case both paths lead to  │
+│ a `poison` result for `%res`, the *reason* for the undefined │
+│ behavior is different. The original IR has UB in the `shl`,  │
+│ while the transformed IR has UB in the `cttz` call. This     │
+│ distinction is critical. The Alive2 tool correctly           │
+│ identifies this discrepancy, flagging that the source is     │
+│ more defined than the target because the `cttz` call in the  │
+│ source is always well-defined, whereas in the target it is   │
+│ not.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log        │
+│ confirms that the transformation occurs in                   │
+│ `instcombine`:\n\n```\nIC: Visiting:   %cttz = call noundef  │
+│ i32 @llvm.cttz.i32(i32 %y, i1 false)\nIC: Mod =   %cttz =    │
+│ call noundef i32 @llvm.cttz.i32(i32 %y, i1 false)\n    New = │
+│ %cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1           │
+│ true)\n```\n\nThis happens within `foldCttzCtlz` in          │
+│ `InstCombineCalls.cpp`. The transformation is applied        │
+│ because the `noundef` attribute is present on the `cttz`     │
+│ call. The logic incorrectly assumes that if the result of    │
+│ `cttz` is `noundef`, then the input to `cttz` cannot be      │
+│ zero, making it safe to set `is_zero_poison` to `true`.      │
+│ However, this assumption is flawed. The `noundef` attribute  │
+│ only guarantees that if the operation *would* be undefined,  │
+│ the result is `poison`; it does not constrain the input      │
+│ values.\n\n### 3. Root Cause Analysis\n\nThe root cause is   │
+│ an incorrect assumption in `foldCttzCtlz`. The code checks   │
+│ for the `noundef` attribute on the `cttz` call and uses this │
+│ to justify changing `is_zero_poison` to                      │
+│ `true`.\n\n```cpp\n//                                        │
+│ llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp:509\nif │
+│ (CI.isNoundef()) {\n  // If the result of cttz is noundef,   │
+│ then the input can't be zero.\n  // We can strengthen this   │
+│ to setting the is_zero_poison flag.\n  if                    │
+│ (!isZeroPoison(CI)) {\n                                      │
+│ CI.getArgOperand(1)->setName(\"\");\n    CI.setArgOperand(1, │
+│ ConstantInt::getTrue(CI.getContext()));\n    return &CI;\n   │
+│ }\n}\n```\n\nThis logic is faulty because `noundef` does not │
+│ imply the input is non-zero. It only means that if the input │
+│ *is* zero, the resulting value is `poison` instead of being  │
+│ a specific bit-pattern or causing a trap. When the `cttz`    │
+│ result is used in an operation like `shl`, where a specific  │
+│ value (the bitwidth) can cause UB, changing the `cttz`       │
+│ behavior for a zero input from returning bitwidth to         │
+│ returning `poison` is not equivalent.\n\nThe fix is to       │
+│ remove this incorrect optimization. The `noundef` attribute  │
+│ on a `cttz` call is not a strong enough condition to permit  │
+│ this transformation.\n\n### 4. Proposed Edit Point(s)\n\nThe │
+│ incorrect optimization should be removed from                │
+│ `foldCttzCtlz`.\n\n**File**:                                 │
+│ `llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp`\n\n`` │
+│ `cpp\n// Edit from line 509 to 517\nif (CI.isNoundef()) {\n  │
+│ // If the result of cttz is noundef, then the input can't be │
+│ zero.\n  // We can strengthen this to setting the            │
+│ is_zero_poison flag.\n  if (!isZeroPoison(CI)) {\n           │
+│ CI.getArgOperand(1)->setName(\"\");\n    CI.setArgOperand(1, │
+│ ConstantInt::getTrue(CI.getContext()));\n    return &CI;\n   │
+│ }\n}\n```\n\nThis block of code should be deleted            │
+│ entirely.\n\n### 5. Conclusion\n\nThe transformation that    │
+│ changes `is_zero_poison` from `false` to `true` based on the │
+│ `noundef` attribute is incorrect and leads to                │
+│ miscompilations by altering the nature of undefined behavior │
+│ in the program. By removing this faulty logic from           │
+│ `foldCttzCtlz`, we ensure that `instcombine` no longer       │
+│ performs this unsafe optimization, thus resolving the        │
+│ issue."})                                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ User [MainThread@4040910] ──────────────────────────────────╮
+│ {                                                            │
+│   "edit_points": [                                           │
+│     [                                                        │
+│       509,                                                   │
+│       517,                                                   │
+│       "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp" │
+│     ]                                                        │
+│   ],                                                         │
+│   "thoughts": "An incorrect transformation in `instcombine`  │
+│ is causing a miscompilation. The transformation changes      │
+│ `llvm.cttz.i32(..., i1 false)` to `llvm.cttz.i32(..., i1     │
+│ true)`, which is not always safe. This change is problematic │
+│ when the result of `cttz` is used as a shift amount, as it   │
+│ can introduce undefined behavior.\n\n### 1. Understanding    │
+│ the Issue\n\nThe core of the problem lies in the differing   │
+│ semantics of `llvm.cttz` based on its second argument,       │
+│ `is_zero_poison`.\n\n-   `llvm.cttz(val,                     │
+│ is_zero_poison=false)`: If `val` is 0, the result is the     │
+│ bitwidth of the type (e.g., 32 for `i32`).\n-                │
+│ `llvm.cttz(val, is_zero_poison=true)`: If `val` is 0, the    │
+│ operation has undefined behavior, and the result is          │
+│ `poison`.\n\nThe transformation in `instcombine` changes     │
+│ `is_zero_poison` from `false` to `true`. Let's analyze the   │
+│ impact with the provided reproducer:\n\n-   **Original       │
+│ IR**:\n    -   `%cttz = call noundef i32 @llvm.cttz.i32(i32  │
+│ %y, i1 false)`\n    -   `%res = shl i32 %x, %cttz`\n    -    │
+│ If `%y` is 0, `%cttz` becomes 32.\n    -   `shl i32 %x, 32`  │
+│ is undefined behavior because the shift amount is equal to   │
+│ the bitwidth. The result `%res` is `poison`.\n\n-            │
+│ **Transformed IR**:\n    -   `%cttz = call noundef i32       │
+│ @llvm.cttz.i32(i32 %y, i1 true)`\n    -   `%res = shl i32    │
+│ %x, %cttz`\n    -   If `%y` is 0, the `cttz` call itself has │
+│ undefined behavior, and `%cttz` becomes `poison`.\n    -     │
+│ `shl i32 %x, poison` results in `%res` being                 │
+│ `poison`.\n\nWhile in this specific case both paths lead to  │
+│ a `poison` result for `%res`, the *reason* for the undefined │
+│ behavior is different. The original IR has UB in the `shl`,  │
+│ while the transformed IR has UB in the `cttz` call. This     │
+│ distinction is critical. The Alive2 tool correctly           │
+│ identifies this discrepancy, flagging that the source is     │
+│ more defined than the target because the `cttz` call in the  │
+│ source is always well-defined, whereas in the target it is   │
+│ not.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log        │
+│ confirms that the transformation occurs in                   │
+│ `instcombine`:\n\n```\nIC: Visiting:   %cttz = call noundef  │
+│ i32 @llvm.cttz.i32(i32 %y, i1 false)\nIC: Mod =   %cttz =    │
+│ call noundef i32 @llvm.cttz.i32(i32 %y, i1 false)\n    New = │
+│ %cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1           │
+│ true)\n```\n\nThis happens within `foldCttzCtlz` in          │
+│ `InstCombineCalls.cpp`. The transformation is applied        │
+│ because the `noundef` attribute is present on the `cttz`     │
+│ call. The logic incorrectly assumes that if the result of    │
+│ `cttz` is `noundef`, then the input to `cttz` cannot be      │
+│ zero, making it safe to set `is_zero_poison` to `true`.      │
+│ However, this assumption is flawed. The `noundef` attribute  │
+│ only guarantees that if the operation *would* be undefined,  │
+│ the result is `poison`; it does not constrain the input      │
+│ values.\n\n### 3. Root Cause Analysis\n\nThe root cause is   │
+│ an incorrect assumption in `foldCttzCtlz`. The code checks   │
+│ for the `noundef` attribute on the `cttz` call and uses this │
+│ to justify changing `is_zero_poison` to                      │
+│ `true`.\n\n```cpp\n//                                        │
+│ llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp:509\nif │
+│ (CI.isNoundef()) {\n  // If the result of cttz is noundef,   │
+│ then the input can't be zero.\n  // We can strengthen this   │
+│ to setting the is_zero_poison flag.\n  if                    │
+│ (!isZeroPoison(CI)) {\n                                      │
+│ CI.getArgOperand(1)->setName(\"\");\n    CI.setArgOperand(1, │
+│ ConstantInt::getTrue(CI.getContext()));\n    return &CI;\n   │
+│ }\n}\n```\n\nThis logic is faulty because `noundef` does not │
+│ imply the input is non-zero. It only means that if the input │
+│ *is* zero, the resulting value is `poison` instead of being  │
+│ a specific bit-pattern or causing a trap. When the `cttz`    │
+│ result is used in an operation like `shl`, where a specific  │
+│ value (the bitwidth) can cause UB, changing the `cttz`       │
+│ behavior for a zero input from returning bitwidth to         │
+│ returning `poison` is not equivalent.\n\nThe fix is to       │
+│ remove this incorrect optimization. The `noundef` attribute  │
+│ on a `cttz` call is not a strong enough condition to permit  │
+│ this transformation.\n\n### 4. Proposed Edit Point(s)\n\nThe │
+│ incorrect optimization should be removed from                │
+│ `foldCttzCtlz`.\n\n**File**:                                 │
+│ `llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp`\n\n`` │
+│ `cpp\n// Edit from line 509 to 517\nif (CI.isNoundef()) {\n  │
+│ // If the result of cttz is noundef, then the input can't be │
+│ zero.\n  // We can strengthen this to setting the            │
+│ is_zero_poison flag.\n  if (!isZeroPoison(CI)) {\n           │
+│ CI.getArgOperand(1)->setName(\"\");\n    CI.setArgOperand(1, │
+│ ConstantInt::getTrue(CI.getContext()));\n    return &CI;\n   │
+│ }\n}\n```\n\nThis block of code should be deleted            │
+│ entirely.\n\n### 5. Conclusion\n\nThe transformation that    │
+│ changes `is_zero_poison` from `false` to `true` based on the │
+│ `noundef` attribute is incorrect and leads to                │
+│ miscompilations by altering the nature of undefined behavior │
+│ in the program. By removing this faulty logic from           │
+│ `foldCttzCtlz`, we ensure that `instcombine` no longer       │
+│ performs this unsafe optimization, thus resolving the        │
+│ issue."                                                      │
+│ }                                                            │
+╰──────────────────────────────────────────────────────────────╯
+Generating patch for edit points:
+llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp:509-517 ...
+╭─ User [MainThread@4040910] ──────────────────────────────────╮
+│ You are an expert LLVM developer. I'm encountering an LLVM   │
+│ bug that I haven't been able to fix.                         │
+│ Your goal is to generate a patch that fixes the LLVM bug     │
+│ based on the information below.                              │
+│                                                              │
+│ ## Bug Information ##                                        │
+│                                                              │
+│ ### Reproducer ###                                           │
+│                                                              │
+│ ```llvm                                                      │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {         │
+│ entry:                                                       │
+│   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1 false)  │
+│   %res = shl i32 %x, %cttz                                   │
+│   ret i32 %res                                               │
+│ }                                                            │
+│                                                              │
+│ ; Function Attrs: nocallback nofree nosync nounwind          │
+│ speculatable willreturn memory(none)                         │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                │
+│                                                              │
+│ attributes #0 = { nocallback nofree nosync nounwind          │
+│ speculatable willreturn memory(none) }                       │
+│                                                              │
+│ ```                                                          │
+│                                                              │
+│ ### Symptom ###                                              │
+│                                                              │
+│ ```                                                          │
+│ --- src ---                                                  │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {         │
+│ entry:                                                       │
+│   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1 false)  │
+│   %res = shl i32 %x, %cttz                                   │
+│   ret i32 %res                                               │
+│ }                                                            │
+│                                                              │
+│ ; Function Attrs: nocallback nosync nounwind speculatable    │
+│ willreturn memory(none)                                      │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                │
+│                                                              │
+│ attributes #0 = { nocallback nosync nounwind speculatable    │
+│ willreturn memory(none) }                                    │
+│                                                              │
+│                                                              │
+│ --- tgt ---                                                  │
+│ ; ModuleID = '<stdin>'                                       │
+│ source_filename = "<stdin>"                                  │
+│                                                              │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {         │
+│ entry:                                                       │
+│   %cttz = call noundef range(i32 0, 33) i32                  │
+│ @llvm.cttz.i32(i32 %y, i1 true)                              │
+│   %res = shl i32 %x, %cttz                                   │
+│   ret i32 %res                                               │
+│ }                                                            │
+│                                                              │
+│ ; Function Attrs: nocallback nosync nounwind speculatable    │
+│ willreturn memory(none)                                      │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                │
+│                                                              │
+│ attributes #0 = { nocallback nosync nounwind speculatable    │
+│ willreturn memory(none) }                                    │
+│                                                              │
+│                                                              │
+│ --- log ---                                                  │
+│                                                              │
+│ ----------------------------------------                     │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {         │
+│ entry:                                                       │
+│   %cttz = cttz i32 %y, 0                                     │
+│   assume_welldefined i32 %cttz                               │
+│   %res = shl i32 %x, %cttz                                   │
+│   ret i32 %res                                               │
+│ }                                                            │
+│ =>                                                           │
+│ define i32 @shl_cttz_false_noundef(i32 %x, i32 %y) {         │
+│ entry:                                                       │
+│   %cttz = cttz i32 %y, 1                                     │
+│   %#range_0_%cttz = !range i32 %cttz, i32 0, i32 33          │
+│   assume_welldefined i32 %#range_0_%cttz                     │
+│   %res = shl i32 %x, %#range_0_%cttz                         │
+│   ret i32 %res                                               │
+│ }                                                            │
+│ Transformation doesn't verify!                               │
+│                                                              │
+│ ERROR: Source is more defined than target                    │
+│                                                              │
+│ Example:                                                     │
+│ i32 %x = poison                                              │
+│ i32 %y = #x00000000 (0)                                      │
+│                                                              │
+│ Source:                                                      │
+│ i32 %cttz = #x00000020 (32)                                  │
+│ i32 %res = poison                                            │
+│                                                              │
+│ Target:                                                      │
+│ i32 %cttz = poison                                           │
+│ i32 %#range_0_%cttz = poison                                 │
+│ void = UB triggered!                                         │
+│                                                              │
+│                                                              │
+│ Summary:                                                     │
+│   0 correct transformations                                  │
+│   1 incorrect transformations                                │
+│   0 failed-to-prove transformations                          │
+│   0 Alive2 errors                                            │
+│                                                              │
+│                                                              │
+│ --- opt_stderr ---                                           │
+│                                                              │
+│                                                              │
+│                                                              │
+│ ```                                                          │
+│                                                              │
+│ ### Root Cause Analysis ###                                  │
+│                                                              │
+│ -------------------- BEGIN --------------------              │
+│ An incorrect transformation in `instcombine` is causing a    │
+│ miscompilation. The transformation changes                   │
+│ `llvm.cttz.i32(..., i1 false)` to `llvm.cttz.i32(..., i1     │
+│ true)`, which is not always safe. This change is problematic │
+│ when the result of `cttz` is used as a shift amount, as it   │
+│ can introduce undefined behavior.                            │
+│                                                              │
+│ ### 1. Understanding the Issue                               │
+│                                                              │
+│ The core of the problem lies in the differing semantics of   │
+│ `llvm.cttz` based on its second argument, `is_zero_poison`.  │
+│                                                              │
+│ -   `llvm.cttz(val, is_zero_poison=false)`: If `val` is 0,   │
+│ the result is the bitwidth of the type (e.g., 32 for `i32`). │
+│ -   `llvm.cttz(val, is_zero_poison=true)`: If `val` is 0,    │
+│ the operation has undefined behavior, and the result is      │
+│ `poison`.                                                    │
+│                                                              │
+│ The transformation in `instcombine` changes `is_zero_poison` │
+│ from `false` to `true`. Let's analyze the impact with the    │
+│ provided reproducer:                                         │
+│                                                              │
+│ -   **Original IR**:                                         │
+│     -   `%cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1  │
+│ false)`                                                      │
+│     -   `%res = shl i32 %x, %cttz`                           │
+│     -   If `%y` is 0, `%cttz` becomes 32.                    │
+│     -   `shl i32 %x, 32` is undefined behavior because the   │
+│ shift amount is equal to the bitwidth. The result `%res` is  │
+│ `poison`.                                                    │
+│                                                              │
+│ -   **Transformed IR**:                                      │
+│     -   `%cttz = call noundef i32 @llvm.cttz.i32(i32 %y, i1  │
+│ true)`                                                       │
+│     -   `%res = shl i32 %x, %cttz`                           │
+│     -   If `%y` is 0, the `cttz` call itself has undefined   │
+│ behavior, and `%cttz` becomes `poison`.                      │
+│     -   `shl i32 %x, poison` results in `%res` being         │
+│ `poison`.                                                    │
+│                                                              │
+│ While in this specific case both paths lead to a `poison`    │
+│ result for `%res`, the *reason* for the undefined behavior   │
+│ is different. The original IR has UB in the `shl`, while the │
+│ transformed IR has UB in the `cttz` call. This distinction   │
+│ is critical. The Alive2 tool correctly identifies this       │
+│ discrepancy, flagging that the source is more defined than   │
+│ the target because the `cttz` call in the source is always   │
+│ well-defined, whereas in the target it is not.               │
+│                                                              │
+│ ### 2. Analyzing `opt`'s Log                                 │
+│                                                              │
+│ The `opt` log confirms that the transformation occurs in     │
+│ `instcombine`:                                               │
+│                                                              │
+│ ```                                                          │
+│ IC: Visiting:   %cttz = call noundef i32 @llvm.cttz.i32(i32  │
+│ %y, i1 false)                                                │
+│ IC: Mod =   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y,  │
+│ i1 false)                                                    │
+│     New =   %cttz = call noundef i32 @llvm.cttz.i32(i32 %y,  │
+│ i1 true)                                                     │
+│ ```                                                          │
+│                                                              │
+│ This happens within `foldCttzCtlz` in                        │
+│ `InstCombineCalls.cpp`. The transformation is applied        │
+│ because the `noundef` attribute is present on the `cttz`     │
+│ call. The logic incorrectly assumes that if the result of    │
+│ `cttz` is `noundef`, then the input to `cttz` cannot be      │
+│ zero, making it safe to set `is_zero_poison` to `true`.      │
+│ However, this assumption is flawed. The `noundef` attribute  │
+│ only guarantees that if the operation *would* be undefined,  │
+│ the result is `poison`; it does not constrain the input      │
+│ values.                                                      │
+│                                                              │
+│ ### 3. Root Cause Analysis                                   │
+│                                                              │
+│ The root cause is an incorrect assumption in `foldCttzCtlz`. │
+│ The code checks for the `noundef` attribute on the `cttz`    │
+│ call and uses this to justify changing `is_zero_poison` to   │
+│ `true`.                                                      │
+│                                                              │
+│ ```cpp                                                       │
+│ // llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp:509  │
+│ if (CI.isNoundef()) {                                        │
+│   // If the result of cttz is noundef, then the input can't  │
+│ be zero.                                                     │
+│   // We can strengthen this to setting the is_zero_poison    │
+│ flag.                                                        │
+│   if (!isZeroPoison(CI)) {                                   │
+│     CI.getArgOperand(1)->setName("");                        │
+│     CI.setArgOperand(1,                                      │
+│ ConstantInt::getTrue(CI.getContext()));                      │
+│     return &CI;                                              │
+│   }                                                          │
+│ }                                                            │
+│ ```                                                          │
+│                                                              │
+│ This logic is faulty because `noundef` does not imply the    │
+│ input is non-zero. It only means that if the input *is*      │
+│ zero, the resulting value is `poison` instead of being a     │
+│ specific bit-pattern or causing a trap. When the `cttz`      │
+│ result is used in an operation like `shl`, where a specific  │
+│ value (the bitwidth) can cause UB, changing the `cttz`       │
+│ behavior for a zero input from returning bitwidth to         │
+│ returning `poison` is not equivalent.                        │
+│                                                              │
+│ The fix is to remove this incorrect optimization. The        │
+│ `noundef` attribute on a `cttz` call is not a strong enough  │
+│ condition to permit this transformation.                     │
+│                                                              │
+│ ### 4. Proposed Edit Point(s)                                │
+│                                                              │
+│ The incorrect optimization should be removed from            │
+│ `foldCttzCtlz`.                                              │
+│                                                              │
+│ **File**:                                                    │
+│ `llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp`       │
+│                                                              │
+│ ```cpp                                                       │
+│ // Edit from line 509 to 517                                 │
+│ if (CI.isNoundef()) {                                        │
+│   // If the result of cttz is noundef, then the input can't  │
+│ be zero.                                                     │
+│   // We can strengthen this to setting the is_zero_poison    │
+│ flag.                                                        │
+│   if (!isZeroPoison(CI)) {                                   │
+│     CI.getArgOperand(1)->setName("");                        │
+│     CI.setArgOperand(1,                                      │
+│ ConstantInt::getTrue(CI.getContext()));                      │
+│     return &CI;                                              │
+│   }                                                          │
+│ }                                                            │
+│ ```                                                          │
+│                                                              │
+│ This block of code should be deleted entirely.               │
+│                                                              │
+│ ### 5. Conclusion                                            │
+│                                                              │
+│ The transformation that changes `is_zero_poison` from        │
+│ `false` to `true` based on the `noundef` attribute is        │
+│ incorrect and leads to miscompilations by altering the       │
+│ nature of undefined behavior in the program. By removing     │
+│ this faulty logic from `foldCttzCtlz`, we ensure that        │
+│ `instcombine` no longer performs this unsafe optimization,   │
+│ thus resolving the issue.                                    │
+│ --------------------  END  --------------------              │
+│                                                              │
+│ ## Suspected Code Locations ##                               │
+│                                                              │
+│ Code shown below (including their files and line numbers)    │
+│ are the *likely* source of the bug. However, the actual fix  │
+│ may involve other parts of the codebase as well.             │
+│ You should use the provided tools to explore the codebase    │
+│ for more context and edit the codebase as needed to fix the  │
+│ bug.                                                         │
+│                                                              │
+│ -------------------- BEGIN --------------------              │
+│ ```cpp                                                       │
+│ //                                                           │
+│ llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp:509-517 │
+│ 504   }                                                      │
+│ 505                                                          │
+│ 506   // If ctlz/cttz is only used as a shift amount, set    │
+│ is_zero_poison to true.                                      │
+│ 507   if (II.hasOneUse() && match(Op1, m_Zero()) &&          │
+│ 508       match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))                                           │
+│ 509     return IC.replaceOperand(II, 1,                      │
+│ IC.Builder.getTrue());                                       │
+│ 510                                                          │
+│ 511   Constant *C;                                           │
+│ 512                                                          │
+│ 513   if (IsTZ) {                                            │
+│ 514     // cttz(-x) -> cttz(x)                               │
+│ 515     if (match(Op0, m_Neg(m_Value(X))))                   │
+│ 516       return IC.replaceOperand(II, 0, X);                │
+│ 517                                                          │
+│ 518     // cttz(-x & x) -> cttz(x)                           │
+│ 519     if (match(Op0, m_c_And(m_Neg(m_Value(X)),            │
+│ m_Deferred(X))))                                             │
+│ 520       return IC.replaceOperand(II, 0, X);                │
+│ 521                                                          │
+│ 522     // cttz(sext(x)) -> cttz(zext(x))                    │
+│                                                              │
+│ ```                                                          │
+│ --------------------  END  --------------------              │
+│                                                              │
+│ ## Instructions for Fixing ##                                │
+│                                                              │
+│ You should create a clean, minimal patch that properly       │
+│ addresses the root cause while maintaining LLVM's code       │
+│ quality standards. Follow these steps:                       │
+│                                                              │
+│ 1. **Analyze**: Analyze the provided information to fully    │
+│ understand the bug's cause and effect. You may use provided  │
+│ tools to explore the codebase for more context.              │
+│ 2. **Propose a Fix**: Outline your proposed solution.        │
+│ Explain your reasoning and the specific changes you intend   │
+│ to make.                                                     │
+│ 3. **Implement**: Use the `edit` tool to apply your proposed │
+│ changes to the code.                                         │
+│ 4. **Verify**: Use the `test` tool to confirm that your      │
+│ patch:                                                       │
+│      + Is syntactically correct and does not introduce new   │
+│ syntax errors.                                               │
+│      + Is valid and does not modify any assertions in the    │
+│ code.                                                        │
+│      + Fixes the original issue shown in the reproducer.     │
+│      + Does not introduce any new regressions.               │
+│ 5. **Iterate**: If verification fails, analyze the failure,  │
+│ revise your proposal, and repeat the implementation and      │
+│ verification steps until all tests pass.                     │
+│ 6. **Submit**: Provide the final, clean patch for review.    │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[25]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[25]', 'preview[25]',
+'test[25]']
+╭─ User [MainThread@4040910] ──────────────────────────────────╮
+│ ## Available Tools ##                                        │
+│                                                              │
+│ You have access to the following 11 tools to help you        │
+│ complete your task:                                          │
+│                                                              │
+│ [                                                            │
+│   {                                                          │
+│     "name": "find250",                                       │
+│     "description": "Find all files following a specified     │
+│ pattern (e.g., `src/**/*.cpp`, `**/*.h`) in the specified    │
+│ directory. The results will be sorted alphabetically and     │
+│ only 250 results will be returned starting from a given      │
+│ index.",                                                     │
+│     "parameters": {                                          │
+│       "k": {                                                 │
+│         "type": "integer",                                   │
+│         "required": true,                                    │
+│         "description": "The index to start returning the     │
+│ results from (1-based index). For example, when k=10, it     │
+│ will return the 10th result and the next 249 results."       │
+│       },                                                     │
+│       "pattern": {                                           │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The pattern of the files."           │
+│       },                                                     │
+│       "directory": {                                         │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "Find files in this directory (a      │
+│ relative path starting with llvm/)."                         │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "grep250",                                       │
+│     "description": "Print lines that match a specified       │
+│ pattern in the llvm/ directory. This is exactly the same     │
+│ `grep` command in Linux, but with results being sorted       │
+│ alphabetically, and only returns 250 results starting from a │
+│ given index.",                                               │
+│     "parameters": {                                          │
+│       "k": {                                                 │
+│         "type": "integer",                                   │
+│         "required": true,                                    │
+│         "description": "The index to start returning the     │
+│ results from (1-based index). For example, when k=10, it     │
+│ will return the 10th result and the next 249 results."       │
+│       },                                                     │
+│       "args": {                                              │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The arguments including options,     │
+│ patterns, and files. NOTICE: ensure the pattern to search is │
+│ wrapped in single quotes (i.e., '...'), e.g., `-nRI          │
+│ 'test-pattern'`."                                            │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "list250",                                       │
+│     "description": "List up to 250 contents of a directory.  │
+│ All contents of the directory will be sorted alphabetically  │
+│ and only up to 250 of them are returned starting from a      │
+│ given index.",                                               │
+│     "parameters": {                                          │
+│       "directory": {                                         │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The relative path (starting with     │
+│ llvm/) to the directory to list."                            │
+│       },                                                     │
+│       "k": {                                                 │
+│         "type": "integer",                                   │
+│         "required": true,                                    │
+│         "description": "The index to start returning the     │
+│ contents from (1-based index). For example, when k=10, it    │
+│ will return the 10th content and the next 249 results."      │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "read250",                                       │
+│     "description": "Read the next 250 lines of content of a  │
+│ file starting a specific line.",                             │
+│     "parameters": {                                          │
+│       "file": {                                              │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The relative path to the file to     │
+│ read. The path should start with llvm/."                     │
+│       },                                                     │
+│       "position": {                                          │
+│         "type": "integer",                                   │
+│         "required": true,                                    │
+│         "description": "The line number to start reading     │
+│ from (1-based index)."                                       │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "edit",                                          │
+│     "description": "Edit a file to replace text within a     │
+│ file with new text.",                                        │
+│     "parameters": {                                          │
+│       "file": {                                              │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The relative path of the file to     │
+│ edit (starting with llvm/)."                                 │
+│       },                                                     │
+│       "old": {                                               │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The *exact* code snippet to be       │
+│ replaced in the file."                                       │
+│       },                                                     │
+│       "new": {                                               │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The new code snippet."               │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "code",                                          │
+│     "description": "Obtain the source code of a function in  │
+│ LLVM. You should assume that all functions called by the     │
+│ function to obtain source code are correctly implemented",   │
+│     "parameters": {                                          │
+│       "func": {                                              │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "Name of the function"                │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "docs",                                          │
+│     "description": "Obtain the documentation of a function   │
+│ in LLVM",                                                    │
+│     "parameters": {                                          │
+│       "func": {                                              │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "Name of the function"                │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "langref",                                       │
+│     "description": "Get the detailed description of an LLVM  │
+│ instruction/intrinsic from the LLVM Language Reference       │
+│ Manual.",                                                    │
+│     "parameters": {                                          │
+│       "inst": {                                              │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The instruction/intrinsic that you'd │
+│ like to get the description for.\nFor instructions, please   │
+│ provide the instruction name (e.g., `add`, `mul`,            │
+│ etc.).\nFor intrinsics, please provide the intrinsic name    │
+│ (e.g., `llvm.sadd.with.overflow`, `llvm.memcpy`, etc.).\nDo  │
+│ not include type mangling suffix or operands in the name."   │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "reset",                                         │
+│     "description": "Checkout the original file from the      │
+│ repository.",                                                │
+│     "parameters": {                                          │
+│       "file": {                                              │
+│         "type": "string",                                    │
+│         "required": true,                                    │
+│         "description": "The relative path of the file to     │
+│ edit (starting with llvm/)."                                 │
+│       }                                                      │
+│     }                                                        │
+│   },                                                         │
+│   {                                                          │
+│     "name": "preview",                                       │
+│     "description": "Preview the changes made by the current  │
+│ patch.",                                                     │
+│     "parameters": {}                                         │
+│   },                                                         │
+│   {                                                          │
+│     "name": "test",                                          │
+│     "description": "Check if the patch fixes the original    │
+│ issue and passes all regression tests.\nThis tool is very    │
+│ expensive. Please use it if you are ready.",                 │
+│     "parameters": {}                                         │
+│   }                                                          │
+│ ]                                                            │
+│                                                              │
+│ ### Tool Call Format ###                                     │
+│                                                              │
+│ When using a tool, return a JSON object strictly following   │
+│ below format:                                                │
+│                                                              │
+│ <tool_call>                                                  │
+│ {                                                            │
+│   "name": <tool_name>,                                       │
+│   "args": <tool_args>                                        │
+│ }                                                            │
+│ </tool_call>                                                 │
+│                                                              │
+│ For example:                                                 │
+│                                                              │
+│ <tool_call>                                                  │
+│ {                                                            │
+│   "name": "get_weather",                                     │
+│   "args": {                                                  │
+│     "location": "New York",                                  │
+│     "date": "2023-10-01",                                    │
+│     "celsius": true                                          │
+│   }                                                          │
+│ }                                                            │
+│ </tool_call>                                                 │
+│                                                              │
+│ ### Key Requirements ###                                     │
+│                                                              │
+│ 1. ALWAYS wrap your response with "<tool_call>" and          │
+│ "</tool_call>" as shown above so that I know you are calling │
+│ a tool.                                                      │
+│ 2. Content inside "<tool_call>" and "</tool_call>" MUST be a │
+│ valid JSON object. Put all other content outside of these    │
+│ tags.                                                        │
+│ 3. The "args" field MUST also be a valid JSON object. It is  │
+│ NOT a string that represents a JSON object.                  │
+│ 4. Only call ONE tool in each of your response. Do NOT call  │
+│ multiple tools at the same time.                             │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #0, chat statistics so far: {'chat_rounds': 2,
+'input_tokens': 4664, 'cached_tokens': 0, 'output_tokens': 3096,
+'total_tokens': 8758}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[25]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[25]', 'preview[25]',
+'test[25]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new":     │
+│ ""})                                                         │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Replaced successfully.                                       │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #1, chat statistics so far: {'chat_rounds': 3,
+'input_tokens': 9517, 'cached_tokens': 0, 'output_tokens': 3584,
+'total_tokens': 15100}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[24]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[25]', 'preview[25]',
+'test[25]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ test({})                                                     │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ FAILURE                                                      │
+│                                                              │
+│ Command '['bin/llvm-lit', '--no-progress-bar', '-j', '128',  │
+│ '--max-failures', '1', '--order', 'lexical', '-sv',          │
+│ 'llvm/test/Transforms/InstCombine']' returned non-zero exit  │
+│ status 1.                                                    │
+│ -- Testing: 1646 tests, 128 workers --                       │
+│ FAIL: LLVM :: Transforms/InstCombine/shift-cttz-ctlz.ll      │
+│ (1314 of 1646)                                               │
+│ ******************** TEST 'LLVM ::                           │
+│ Transforms/InstCombine/shift-cttz-ctlz.ll' FAILED            │
+│ ********************                                         │
+│ Exit Code: 1                                                 │
+│                                                              │
+│ Command Output (stderr):                                     │
+│ --                                                           │
+│ RUN: at line 2: bin/opt <                                    │
+│ llvm/test/Transforms/InstCombine/shift-cttz-ctlz.ll          │
+│ -passes=instcombine -S | bin/FileCheck                       │
+│ llvm/test/Transforms/InstCombine/shift-cttz-ctlz.ll          │
+│ + bin/opt -passes=instcombine -S                             │
+│ + bin/FileCheck                                              │
+│ llvm/test/Transforms/InstCombine/shift-cttz-ctlz.ll          │
+│ llvm/test/Transforms/InstCombine/shift-cttz-ctlz.ll:8:15:    │
+│ error: CHECK-NEXT: expected string not found in input        │
+│ ; CHECK-NEXT: [[CTTZ:%.*]] = call range(i32 0, 33) i32       │
+│ @llvm.cttz.i32(i32 [[Y]], i1 true)                           │
+│               ^                                              │
+│ <stdin>:5:7: note: scanning from here                        │
+│ entry:                                                       │
+│       ^                                                      │
+│ <stdin>:5:7: note: with "Y" equal to "%y"                    │
+│ entry:                                                       │
+│       ^                                                      │
+│ <stdin>:6:2: note: possible intended match here              │
+│  %cttz = call range(i32 0, 33) i32 @llvm.cttz.i32(i32 %y, i1 │
+│ false)                                                       │
+│  ^                                                           │
+│ llvm/test/Transforms/InstCombine/shift-cttz-ctlz.ll:24:15:   │
+│ error: CHECK-NEXT: expected string not found in input        │
+│ ; CHECK-NEXT: [[CTTZ:%.*]] = call range(i32 0, 33) i32       │
+│ @llvm.cttz.i32(i32 [[Y]], i1 true)                           │
+│               ^                                              │
+│ <stdin>:12:7: note: scanning from here                       │
+│ entry:                                                       │
+│       ^                                                      │
+│ <stdin>:12:7: note: with "Y" equal to "%y"                   │
+│ entry:                                                       │
+│       ^                                                      │
+│ <stdin>:13:10: note: possible intended match here            │
+│  %cttz = call noundef range(i32 0, 33) i32                   │
+│ @llvm.cttz.i32(i32 %y, i1 false)                             │
+│          ^                                                   │
+│ llvm/test/Transforms/InstCombine/shift-cttz-ctlz.ll:38:15:   │
+│ error: CHECK-NEXT: expected string not found in input        │
+│ ; CHECK-NEXT: [[CTTZ:%.*]] = call range(i32 0, 33) i32       │
+│ @llvm.ctlz.i32(i32 [[Y]], i1 true)                           │
+│               ^                                              │
+│ <stdin>:19:7: note: scanning from here                       │
+│ entry:                                                       │
+│       ^                                                      │
+│ <stdin>:19:7: note: with "Y" equal to "%y"                   │
+│ entry:                                                       │
+│       ^                                                      │
+│ <stdin>:20:2: note: possible intended match here             │
+│  %cttz = call range(i32 0, 33) i32 @llvm.ctlz.i32(i32 %y, i1 │
+│ false)                                                       │
+│  ^                                                           │
+│ llvm/test/Transforms/InstCombine/shift-cttz-ctlz.ll:52:15:   │
+│ error: CHECK-NEXT: expected string not found in input        │
+│ ; CHECK-NEXT: [[CTTZ:%.*]] = call range(i32 0, 33) i32       │
+│ @llvm.cttz.i32(i32 [[Y]], i1 true)                           │
+│               ^                                              │
+│ <stdin>:26:7: note: scanning from here                       │
+│ entry:                                                       │
+│       ^                                                      │
+│ <stdin>:26:7: note: with "Y" equal to "%y"                   │
+│ entry:                                                       │
+│       ^                                                      │
+│ <stdin>:27:2: note: possible intended match here             │
+│  %cttz = call range(i32 0, 33) i32 @llvm.cttz.i32(i32 %y, i1 │
+│ false)                                                       │
+│  ^                                                           │
+│ llvm/test/Transforms/InstCombine/shift-cttz-ctlz.ll:66:15:   │
+│ error: CHECK-NEXT: expected string not found in input        │
+│ ; CHECK-NEXT: [[CTTZ:%.*]] = call range(i32 0, 33) i32       │
+│ @llvm.cttz.i32(i32 [[Y]], i1 true)                           │
+│               ^                                              │
+│ <stdin>:33:7: note: scanning from here                       │
+│ entry:                                                       │
+│       ^                                                      │
+│ <stdin>:33:7: note: with "Y" equal to "%y"                   │
+│ entry:                                                       │
+│       ^                                                      │
+│ <stdin>:34:2: note: possible intended match here             │
+│  %cttz = call range(i32 0, 33) i32 @llvm.cttz.i32(i32 %y, i1 │
+│ false)                                                       │
+│  ^                                                           │
+│                                                              │
+│ Input file: <stdin>                                          │
+│ Check file:                                                  │
+│ llvm/test/Transforms/InstCombine/shift-cttz-ctlz.ll          │
+│                                                              │
+│ -dump-input=help explains the following input dump.          │
+│                                                              │
+│ Input was:                                                   │
+│ <<<<<<                                                       │
+│            1: ; ModuleID = '<stdin>'                         │
+│            2: source_filename = "<stdin>"                    │
+│            3:                                                │
+│            4: define i32 @shl_cttz_false(i32 %x, i32 %y) {   │
+│            5: entry:                                         │
+│ next:8'0            X error: no match found                  │
+│ next:8'1              with "Y" equal to "%y"                 │
+│            6:  %cttz = call range(i32 0, 33) i32             │
+│ @llvm.cttz.i32(i32 %y, i1 false)                             │
+│ next:8'0                                                     │
+│ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ │
+│ ~~~~~~~~                                                     │
+│ next:8'2       ?                                             │
+│ possible intended match                                      │
+│            7:  %res = shl i32 %x, %cttz                      │
+│ next:8'0      ~~~~~~~~~~~~~~~~~~~~~~~~~~                     │
+│            8:  ret i32 %res                                  │
+│ next:8'0      ~~~~~~~~~~~~~~                                 │
+│            9: }                                              │
+│ next:8'0      ~~                                             │
+│           10:                                                │
+│ next:8'0      ~                                              │
+│           11: define i32 @shl_cttz_false_noundef(i32 %x, i32 │
+│ %y) {                                                        │
+│ next:8'0      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~            │
+│           12: entry:                                         │
+│ next:24'0           X error: no match found                  │
+│ next:24'1             with "Y" equal to "%y"                 │
+│           13:  %cttz = call noundef range(i32 0, 33) i32     │
+│ @llvm.cttz.i32(i32 %y, i1 false)                             │
+│ next:24'0                                                    │
+│ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ │
+│ ~~~~~~~~~~~~~~~~                                             │
+│ next:24'2              ?                                     │
+│ possible intended match                                      │
+│           14:  %res = shl i32 %x, %cttz                      │
+│ next:24'0     ~~~~~~~~~~~~~~~~~~~~~~~~~~                     │
+│           15:  ret i32 %res                                  │
+│ next:24'0     ~~~~~~~~~~~~~~                                 │
+│           16: }                                              │
+│ next:24'0     ~~                                             │
+│           17:                                                │
+│ next:24'0     ~                                              │
+│           18: define i32 @shl_ctlz_false(i32 %x, i32 %y) {   │
+│ next:24'0     ~~~~~~~~~~~~~~~~~~~~~~~~~~~                    │
+│           19: entry:                                         │
+│ next:38'0           X error: no match found                  │
+│ next:38'1             with "Y" equal to "%y"                 │
+│           20:  %cttz = call range(i32 0, 33) i32             │
+│ @llvm.ctlz.i32(i32 %y, i1 false)                             │
+│ next:38'0                                                    │
+│ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ │
+│ ~~~~~~~~                                                     │
+│ next:38'2      ?                                             │
+│ possible intended match                                      │
+│           21:  %res = shl i32 %x, %cttz                      │
+│ next:38'0     ~~~~~~~~~~~~~~~~~~~~~~~~~~                     │
+│           22:  ret i32 %res                                  │
+│ next:38'0     ~~~~~~~~~~~~~~                                 │
+│           23: }                                              │
+│ next:38'0     ~~                                             │
+│           24:                                                │
+│ next:38'0     ~                                              │
+│           25: define i32 @lshr_cttz_false(i32 %x, i32 %y) {  │
+│ next:38'0     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~                   │
+│           26: entry:                                         │
+│ next:52'0           X error: no match found                  │
+│ next:52'1             with "Y" equal to "%y"                 │
+│           27:  %cttz = call range(i32 0, 33) i32             │
+│ @llvm.cttz.i32(i32 %y, i1 false)                             │
+│ next:52'0                                                    │
+│ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ │
+│ ~~~~~~~~                                                     │
+│ next:52'2      ?                                             │
+│ possible intended match                                      │
+│           28:  %res = lshr i32 %x, %cttz                     │
+│ next:52'0     ~~~~~~~~~~~~~~~~~~~~~~~~~~~                    │
+│           29:  ret i32 %res                                  │
+│ next:52'0     ~~~~~~~~~~~~~~                                 │
+│           30: }                                              │
+│ next:52'0     ~~                                             │
+│           31:                                                │
+│ next:52'0     ~                                              │
+│           32: define i32 @ashr_cttz_false(i32 %x, i32 %y) {  │
+│ next:52'0     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~                   │
+│           33: entry:                                         │
+│ next:66'0           X error: no match found                  │
+│ next:66'1             with "Y" equal to "%y"                 │
+│           34:  %cttz = call range(i32 0, 33) i32             │
+│ @llvm.cttz.i32(i32 %y, i1 false)                             │
+│ next:66'0                                                    │
+│ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ │
+│ ~~~~~~~~                                                     │
+│ next:66'2      ?                                             │
+│ possible intended match                                      │
+│           35:  %res = ashr i32 %x, %cttz                     │
+│ next:66'0     ~~~~~~~~~~~~~~~~~~~~~~~~~~~                    │
+│           36:  ret i32 %res                                  │
+│ next:66'0     ~~~~~~~~~~~~~~                                 │
+│           37: }                                              │
+│ next:66'0     ~~                                             │
+│           38:                                                │
+│ next:66'0     ~                                              │
+│           39: define i32 @shl_cttz_false_multiuse(i32 %x,    │
+│ i32 %y) {                                                    │
+│ next:66'0     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~           │
+│            .                                                 │
+│            .                                                 │
+│            .                                                 │
+│ >>>>>>                                                       │
+│                                                              │
+│ --                                                           │
+│                                                              │
+│ ********************                                         │
+│ warning: reached maximum number of test failures, skipping   │
+│ remaining tests                                              │
+│ ********************                                         │
+│ Failed Tests (1):                                            │
+│   LLVM :: Transforms/InstCombine/shift-cttz-ctlz.ll          │
+│                                                              │
+│                                                              │
+│ Testing Time: 3.95s                                          │
+│                                                              │
+│ Total Discovered Tests: 1646                                 │
+│   Skipped    :  341 (20.72%)                                 │
+│   Unsupported:   36 (2.19%)                                  │
+│   Passed     : 1268 (77.04%)                                 │
+│   Failed     :    1 (0.06%)                                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #2, chat statistics so far: {'chat_rounds': 4,
+'input_tokens': 14517, 'cached_tokens': 4061, 'output_tokens':
+3799, 'total_tokens': 21315}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[24]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[25]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ reset({"file":                                               │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp"})     │
+╰──────────────────────────────────────────────────────────────╯
+Updated 1 path from 90860af5c82c
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Checked out                                                  │
+│ llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp from    │
+│ commit b24acc06e1d465b3e3e4e28515dd437f6a7454f2.             │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #3, chat statistics so far: {'chat_rounds': 5,
+'input_tokens': 22231, 'cached_tokens': 8129, 'output_tokens':
+4150, 'total_tokens': 30256}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[24]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is only valid if the call │
+│ is noundef.\n  if (II.isNoundef() && II.hasOneUse() &&       │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());"})           │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Replaced successfully.                                       │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #4, chat statistics so far: {'chat_rounds': 6,
+'input_tokens': 30041, 'cached_tokens': 14223, 'output_tokens':
+4956, 'total_tokens': 39873}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[23]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not valid if the call  │
+│ is noundef.\n  if (!II.isNoundef() && II.hasOneUse() &&      │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());"})           │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #5, chat statistics so far: {'chat_rounds': 7,
+'input_tokens': 38114, 'cached_tokens': 20311, 'output_tokens':
+5557, 'total_tokens': 49546}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[22]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not valid if the call  │
+│ is noundef.\n  if (!II.isNoundef() && II.hasOneUse() &&      │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());"})           │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #6, chat statistics so far: {'chat_rounds': 8,
+'input_tokens': 46459, 'cached_tokens': 26394, 'output_tokens':
+6239, 'total_tokens': 59574}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[21]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  if (CI.isNoundef()) {\n    // If the result of     │
+│ cttz is noundef, then the input can't be zero.\n    // We    │
+│ can strengthen this to setting the is_zero_poison flag.\n    │
+│ if (!isZeroPoison(CI)) {\n                                   │
+│ CI.getArgOperand(1)->setName(\"\");\n                        │
+│ CI.setArgOperand(1,                                          │
+│ ConstantInt::getTrue(CI.getContext()));\n      return &CI;\n │
+│ }\n  }", "new": ""})                                         │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #7, chat statistics so far: {'chat_rounds': 9,
+'input_tokens': 55076, 'cached_tokens': 34498, 'output_tokens':
+6737, 'total_tokens': 69690}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[20]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #8, chat statistics so far: {'chat_rounds': 10,
+'input_tokens': 63867, 'cached_tokens': 42595, 'output_tokens':
+7477, 'total_tokens': 80220}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[19]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #9, chat statistics so far: {'chat_rounds': 11,
+'input_tokens': 72981, 'cached_tokens': 50686, 'output_tokens':
+8181, 'total_tokens': 91038}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[18]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #10, chat statistics so far: {'chat_rounds': 12,
+'input_tokens': 82418, 'cached_tokens': 58772, 'output_tokens':
+8694, 'total_tokens': 101989}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[17]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #11, chat statistics so far: {'chat_rounds': 13,
+'input_tokens': 92178, 'cached_tokens': 66853, 'output_tokens':
+9161, 'total_tokens': 113214}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[16]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #12, chat statistics so far: {'chat_rounds': 14,
+'input_tokens': 102261, 'cached_tokens': 74930, 'output_tokens':
+9471, 'total_tokens': 123607}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[15]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #13, chat statistics so far: {'chat_rounds': 15,
+'input_tokens': 112667, 'cached_tokens': 83003, 'output_tokens':
+9781, 'total_tokens': 134323}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[14]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #14, chat statistics so far: {'chat_rounds': 16,
+'input_tokens': 123396, 'cached_tokens': 93089, 'output_tokens':
+10091, 'total_tokens': 145362}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[13]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #15, chat statistics so far: {'chat_rounds': 17,
+'input_tokens': 134448, 'cached_tokens': 103171,
+'output_tokens': 10401, 'total_tokens': 156724}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[12]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #16, chat statistics so far: {'chat_rounds': 18,
+'input_tokens': 145823, 'cached_tokens': 113248,
+'output_tokens': 10711, 'total_tokens': 168409}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[11]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #17, chat statistics so far: {'chat_rounds': 19,
+'input_tokens': 157521, 'cached_tokens': 123321,
+'output_tokens': 11021, 'total_tokens': 180417}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[10]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #18, chat statistics so far: {'chat_rounds': 20,
+'input_tokens': 169542, 'cached_tokens': 133390,
+'output_tokens': 11331, 'total_tokens': 192748}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[9]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #19, chat statistics so far: {'chat_rounds': 21,
+'input_tokens': 181886, 'cached_tokens': 143456,
+'output_tokens': 11641, 'total_tokens': 205402}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[8]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #20, chat statistics so far: {'chat_rounds': 22,
+'input_tokens': 194553, 'cached_tokens': 155531,
+'output_tokens': 11951, 'total_tokens': 218379}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[7]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #21, chat statistics so far: {'chat_rounds': 23,
+'input_tokens': 207543, 'cached_tokens': 167602,
+'output_tokens': 12261, 'total_tokens': 231679}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[6]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #22, chat statistics so far: {'chat_rounds': 24,
+'input_tokens': 220856, 'cached_tokens': 179669,
+'output_tokens': 12871, 'total_tokens': 246601}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[5]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #23, chat statistics so far: {'chat_rounds': 25,
+'input_tokens': 234492, 'cached_tokens': 191733,
+'output_tokens': 13594, 'total_tokens': 261959}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[4]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #24, chat statistics so far: {'chat_rounds': 26,
+'input_tokens': 248451, 'cached_tokens': 191733,
+'output_tokens': 14398, 'total_tokens': 277723}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[3]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #25, chat statistics so far: {'chat_rounds': 27,
+'input_tokens': 262733, 'cached_tokens': 191733,
+'output_tokens': 14916, 'total_tokens': 293521}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[2]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  if (CI.isNoundef()) {\n    // If the result of     │
+│ cttz is noundef, then the input can't be zero.\n    // We    │
+│ can strengthen this to setting the is_zero_poison flag.\n    │
+│ if (!isZeroPoison(CI)) {\n                                   │
+│ CI.getArgOperand(1)->setName(\"\");\n                        │
+│ CI.setArgOperand(1,                                          │
+│ ConstantInt::getTrue(CI.getContext()));\n      return &CI;\n │
+│ }\n  }", "new": ""})                                         │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@4040910] ───╮
+│ Error: The `old` text is not found in file.                  │
+╰──────────────────────────────────────────────────────────────╯
+Executing round #26, chat statistics so far: {'chat_rounds': 28,
+'input_tokens': 277338, 'cached_tokens': 205796,
+'output_tokens': 15660, 'total_tokens': 309869}
+Remaining tools: ['find250[250]', 'grep250[250]',
+'list250[250]', 'read250[250]', 'edit[1]', 'code[250]',
+'docs[250]', 'langref[250]', 'reset[24]', 'preview[25]',
+'test[24]']
+╭─ Function Call (id = <no-id>) [MainThread@4040910] ──────────╮
+│ edit({"file":                                                │
+│ "llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp",      │
+│ "old": "  // If ctlz/cttz is only used as a shift amount,    │
+│ set is_zero_poison to true.\n  if (II.hasOneUse() &&         │
+│ match(Op1, m_Zero()) &&\n      match(II.user_back(),         │
+│ m_Shift(m_Value(), m_Specific(&II))))\n    return            │
+│ IC.replaceOperand(II, 1, IC.Builder.getTrue());", "new": "   │
+│ // If ctlz/cttz is only used as a shift amount, set          │
+│ is_zero_poison to true.\n  // This is not safe if the call   │
+│ is noundef, because that can change the\n  // location of    │
+│ UB. With noundef, cttz(0, false) is well-defined (returns\n  │
+│ // bitwidth), but cttz(0, true) is UB.\n  if                 │
+│ (!II.isNoundef() && II.hasOneUse() && match(Op1, m_Zero())   │
+│ &&\n      match(II.user_back(), m_Shift(m_Value(),           │
+│ m_Specific(&II))))\n    return IC.replaceOperand(II, 1,      │
+│ IC.Builder.getTrue());"})                                    │
+╰──────────────────────────────────────────────────────────────╯
+Generation statistics saved to
+/tmp/112068-gem25pro-12120551.json.
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/llvm-autofix/autofix/main.py", line 843, in <module>
+    main()
+  File "/llvm-autofix/autofix/main.py", line 818, in main
+    raise e
+  File "/llvm-autofix/autofix/main.py", line 802, in main
+    stats.patch = autofix(
+                  ^^^^^^^^
+  File "/llvm-autofix/autofix/main.py", line 629, in autofix
+    return run_mini_agent(
+           ^^^^^^^^^^^^^^^
+  File "/llvm-autofix/autofix/main.py", line 469, in run_mini_agent
+    return patch_and_fix(
+           ^^^^^^^^^^^^^^
+  File "/llvm-autofix/autofix/main.py", line 325, in patch_and_fix
+    return agent.run(
+           ^^^^^^^^^^
+  File "/llvm-autofix/autofix/lms/generic.py", line 159, in run
+    result = self._handle_tool_call(answer_content, tool_call_handler)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/llvm-autofix/autofix/lms/generic.py", line 261, in _handle_tool_call
+    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/llvm-autofix/autofix/main.py", line 317, in tool_call_callback
+    ensure_tools_available(agent, ["test", "edit"])
+  File "/llvm-autofix/autofix/main.py", line 214, in ensure_tools_available
+    raise ReachToolBudget(f"Tools [{', '.join(unavailable_tools)}] are out of budget.")
+ReachToolBudget: Tools [edit] are out of budget.

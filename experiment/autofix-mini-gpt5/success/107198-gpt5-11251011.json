@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "107198",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/107198-gpt5-11251011.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 19b95cf473e9..f82177867acc 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -7781,13 +7781,21 @@ unsigned BoUpSLP::canMapToVector(Type *T) const {\n \n   while (isa<StructType, ArrayType, FixedVectorType>(EltTy)) {\n     if (auto *ST = dyn_cast<StructType>(EltTy)) {\n+      // Reject empty structs - nothing to vectorize and would require\n+      // dereferencing an invalid iterator below.\n+      if (ST->getNumElements() == 0)\n+        return 0;\n       // Check that struct is homogeneous.\n+      Type *FirstTy = ST->getElementType(0);\n       for (const auto *Ty : ST->elements())\n-        if (Ty != *ST->element_begin())\n+        if (Ty != FirstTy)\n           return 0;\n       N *= ST->getNumElements();\n-      EltTy = *ST->element_begin();\n+      EltTy = FirstTy;\n     } else if (auto *AT = dyn_cast<ArrayType>(EltTy)) {\n+      // Reject zero-length arrays.\n+      if (AT->getNumElements() == 0)\n+        return 0;\n       N *= AT->getNumElements();\n       EltTy = AT->getElementType();\n     } else {\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 96297,
+  "output_tokens": 5294,
+  "cached_tokens": 51968,
+  "total_tokens": 101591,
+  "chat_rounds": 11,
+  "total_time_sec": 143.34177422523499,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::canMapToVector",
+    7789
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      7782,
+      7796
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs inside BoUpSLP::canMapToVector at the first transformation point. The reproducer uses nested aggregate types containing empty struct types ({}). In the implementation of canMapToVector, when the type being inspected is an empty StructType, the code unconditionally dereferences *ST->element_begin() after attempting to check homogeneity. For an empty struct, element_begin() == element_end(); dereferencing it is undefined behavior and leads to a segmentation fault.\n\n2. Analyzing opt's Log:\nThe log shows the SLP pass begins analyzing blocks and crashes before emitting any vectorization remarks. The backtrace pinpoints the crash at line 7789 (start of function body, but really due to later dereference). No IR transformation has occurred yet; this is purely an analysis helper invoked while considering vectorization of insertvalue/extractvalue patterns. The function vectorizeInsertValueInst calls canMapToVector on an aggregate operand that includes empty structs, triggering the bad dereference.\n\n3. Root Cause Analysis:\ncanMapToVector assumes that any StructType has at least one element. It uses *ST->element_begin() both in the homogeneity check and to set EltTy:\n  for (const auto *Ty : ST->elements())\n    if (Ty != *ST->element_begin()) return 0;\n  N *= ST->getNumElements();\n  EltTy = *ST->element_begin();\nFor empty structs, ST->getNumElements() == 0 and element_begin() yields an iterator equal to end(). Dereferencing causes UB and manifests as a SIGSEGV. Arrays with zero elements would also produce invalid behavior later (N becomes 0 and passed to getWidenedType, which expects a positive VF). Therefore the function must reject zero-element aggregates early.\n\n4. Proposed Edit Points:\nEdit file llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp lines 7782-7796 (within canMapToVector) to add guards for empty StructType and zero-length ArrayType before dereferencing or multiplying, returning 0 to indicate it cannot be mapped to a vector.\nConcrete change (illustrative):\nInsert after dyn_cast checks:\n  if (auto *ST = dyn_cast<StructType>(EltTy)) {\n    if (ST->getNumElements() == 0)\n      return 0; // Cannot vectorize empty struct.\n    for (const auto *Ty : ST->elements())\n      if (Ty != ST->getElementType(0))\n        return 0;\n    N *= ST->getNumElements();\n    EltTy = ST->getElementType(0);\n  } else if (auto *AT = dyn_cast<ArrayType>(EltTy)) {\n    if (AT->getNumElements() == 0)\n      return 0; // Reject zero-length array.\n    N *= AT->getNumElements();\n    EltTy = AT->getElementType();\n  } else { ... }\nThis replaces uses of *ST->element_begin() with getElementType(0) after confirming element count > 0, and adds early returns for empty aggregates.\n\n5. Conclusion:\nThe crash is due to dereferencing the first element of an empty struct in canMapToVector. Adding explicit checks for zero-element StructType and ArrayType prevents undefined behavior and correctly reports that such aggregates cannot be mapped to a vector, avoiding the segmentation fault during SLP analysis.\n",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 19b95cf473e9..f82177867acc 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -7781,13 +7781,21 @@ unsigned BoUpSLP::canMapToVector(Type *T) const {\n \n   while (isa<StructType, ArrayType, FixedVectorType>(EltTy)) {\n     if (auto *ST = dyn_cast<StructType>(EltTy)) {\n+      // Reject empty structs - nothing to vectorize and would require\n+      // dereferencing an invalid iterator below.\n+      if (ST->getNumElements() == 0)\n+        return 0;\n       // Check that struct is homogeneous.\n+      Type *FirstTy = ST->getElementType(0);\n       for (const auto *Ty : ST->elements())\n-        if (Ty != *ST->element_begin())\n+        if (Ty != FirstTy)\n           return 0;\n       N *= ST->getNumElements();\n-      EltTy = *ST->element_begin();\n+      EltTy = FirstTy;\n     } else if (auto *AT = dyn_cast<ArrayType>(EltTy)) {\n+      // Reject zero-length arrays.\n+      if (AT->getNumElements() == 0)\n+        return 0;\n       N *= AT->getNumElements();\n       EltTy = AT->getElementType();\n     } else {\n"
+  ]
+}

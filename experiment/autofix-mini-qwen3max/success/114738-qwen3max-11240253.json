@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "114738",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/114738-qwen3max-11240253.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 427b8bd0e75a..09bb7250af9f 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -19490,8 +19490,7 @@ public:\n         // To prevent poison from leaking across what used to be sequential,\n         // safe, scalar boolean logic operations, the reduction operand must be\n         // frozen.\n-        if ((isBoolLogicOp(RdxRootInst) ||\n-             (AnyBoolLogicOp && VL.size() != TrackedVals.size())) &&\n+        if ((isBoolLogicOp(RdxRootInst) || AnyBoolLogicOp) &&\n             !isGuaranteedNotToBePoison(VectorizedRoot))\n           VectorizedRoot = Builder.CreateFreeze(VectorizedRoot);\n \n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 624681,
+  "output_tokens": 5046,
+  "cached_tokens": 215680,
+  "total_tokens": 629727,
+  "chat_rounds": 41,
+  "total_time_sec": 812.409551858902,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "operator()",
+    13295
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      19493,
+      19496
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\n\nThe issue manifests when the SLP vectorizer attempts to vectorize a horizontal reduction of boolean comparisons that feed into select instructions representing logical OR operations. The source code correctly handles poison propagation through sequential scalar operations, where if some inputs are poison but others are true, the final result can still be non-poison (true). However, the vectorized version creates a vector containing poison elements and then applies a vector reduce.or operation, which returns poison if any element is poison. This violates the poison semantics of the original scalar code.\n\n2. Analyzing `opt`'s Log:\n\nFrom the opt log, we can see that:\n- The SLP vectorizer identifies the four icmp instructions (%cmp4, %cmp2, %cmp3, %cmp) as candidates for vectorization\n- It determines this is a horizontal reduction with cost -5\n- The transformation creates insertelement instructions to build a <4 x i32> vector, then performs a vector comparison, and finally uses llvm.vector.reduce.or.v4i1\n- The debug output shows AnyBoolLogicOp = true, indicating the pass recognizes this involves boolean logic operations\n- However, the freeze insertion logic at lines 19493-19496 is not being triggered because the condition `(isBoolLogicOp(RdxRootInst) || (AnyBoolLogicOp && VL.size() != TrackedVals.size()))` evaluates to false\n\nSpecifically:\n- RdxRootInst is %ret = or i1 %sel3, %sel4, which is not a select instruction, so isBoolLogicOp(RdxRootInst) returns false\n- VL.size() == TrackedVals.size() (both are 4), so the second part of the condition is also false\n\n3. Root Cause Analysis:\n\nThe root cause is in the poison handling logic for boolean reductions. The current code only inserts a freeze instruction when either:\n1. The reduction root itself is a boolean logic op (select representing AND/OR), OR\n2. There's a mismatch between VL.size() and TrackedVals.size()\n\nHowever, in this case, the reduction root is an actual 'or' instruction, not a select, and the sizes match. But the vectorized operands themselves may contain poison from the original scalar comparisons, and the vector reduce.or will propagate this poison even when the original scalar logic would not.\n\nThe issue is that for ANY boolean reduction (whether the root is an actual binary op like 'or' or a select-based logical op), when we're dealing with boolean values that might be poison, we need to freeze the vectorized result before reduction to maintain the original poison semantics.\n\n4. Proposed Edit Point(s):\n\nThe fix is to modify the condition at lines 19493-19496 to also account for cases where we have boolean reductions (not just boolean logic ops via select). Since we already have AnyBoolLogicOp = true in this case, and we know we're dealing with boolean values (i1 type), we should freeze the vectorized root whenever we have boolean operations and the vectorized root might be poison.\n\nThe corrected condition should check if we're dealing with boolean types and AnyBoolLogicOp is true, regardless of whether the root instruction itself is a boolean logic op.\n\n5. Conclusion:\n\nBy modifying the freeze condition to properly handle boolean reductions where the root is a binary boolean operation (like 'or') rather than just select-based boolean logic operations, we ensure that poison doesn't leak inappropriately from the vectorized form. This maintains the semantic equivalence between the scalar and vectorized versions while preserving the performance benefits of vectorization.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 427b8bd0e75a..09bb7250af9f 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -19490,8 +19490,7 @@ public:\n         // To prevent poison from leaking across what used to be sequential,\n         // safe, scalar boolean logic operations, the reduction operand must be\n         // frozen.\n-        if ((isBoolLogicOp(RdxRootInst) ||\n-             (AnyBoolLogicOp && VL.size() != TrackedVals.size())) &&\n+        if ((isBoolLogicOp(RdxRootInst) || AnyBoolLogicOp) &&\n             !isGuaranteedNotToBePoison(VectorizedRoot))\n           VectorizedRoot = Builder.CreateFreeze(VectorizedRoot);\n \n"
+  ]
+}

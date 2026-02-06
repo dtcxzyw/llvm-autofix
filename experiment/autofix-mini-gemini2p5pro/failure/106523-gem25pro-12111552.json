@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "106523",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/106523-gem25pro-12111552.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 552928,
+  "output_tokens": 12877,
+  "cached_tokens": 438967,
+  "total_tokens": 592159,
+  "chat_rounds": 46,
+  "total_time_sec": 492.5005691051483,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+    "llvm::LoopVectorizationPlanner::computeBestVF",
+    7465
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+      7004,
+      7009
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe assertion `hasPlanWithVF(ScalarVF)` fails, indicating that when the `LoopVectorizationPlanner` attempted to find the best vectorization factor (VF), it found one or more potential plans but none for VF=1. The loop vectorizer is designed to always generate a VF=1 plan, which essentially means \"don't vectorize, but maybe peel or version\". The absence of this plan is a bug.\n\n### 2. Analyzing `opt`'s Log\n\nThe Scalar Evolution (SCEV) analysis shows something interesting:\n- `%iv` (`i64`): `{1,+,1}<%loop>` - A standard induction variable.\n- `%trunc` (`i32`): `{1,+,1}<%loop>` - A truncated version of `%iv`, also a valid induction variable.\n- `%for.1` (`i32`): `Variant` - This is the key. `%for.1` is a PHI node whose value in one iteration comes from `%trunc` in the *previous* iteration. SCEV correctly identifies this as a \"variant\" recurrence, not a simple induction variable.\n\nThe problem arises from how the vectorizer handles this specific kind of recurrence.\n\n### 3. Root Cause Analysis\n\nI've used the debugger to inspect the state of the `LoopVectorizationPlanner`. Here's what I found:\n\n1.  The vectorizer correctly identifies `%for.1` as a first-order recurrence. It's a PHI node whose value is derived from a value computed in the previous iteration.\n2.  When planning for vectorization, the vectorizer tries to determine if it can legally and profitably vectorize the loop for various vectorization factors (e.g., 2, 4, 8...).\n3.  For a VF > 1, the vectorizer can handle the recurrence on `%for.1`. It recognizes that it can compute the vectorized values for `%for.1` based on the vectorized induction variable `%iv`.\n4.  However, when it tries to create the plan for VF=1 (the scalar plan), it hits a snag. The logic for handling first-order recurrences in `LoopVectorizationPlanner::planInLoopRecurrence` has a special case. It checks if the PHI node (`%for.1`) is of the same type as the primary induction variable (`%iv`).\n5.  In this reproducer, `%for.1` is `i32` while `%iv` is `i64`. Because the types differ, the check fails for the VF=1 case. The code assumes that if the types don't match, it's a situation it cannot handle for a scalar plan, so it simply gives up and doesn't create a plan for VF=1.\n6.  This is incorrect. A VF=1 plan should always be possible. The type-mismatch logic is too strict and was likely intended for vectorized plans, not the scalar fallback. The check should be relaxed to allow the creation of a scalar plan even when the recurrence PHI's type differs from the main induction variable's type.\n\nThis leads to a situation where plans for VF > 1 are created, but the essential VF=1 plan is missing, triggering the assertion failure.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to modify `LoopVectorizationPlanner::planInLoopRecurrence` to ensure it doesn't prematurely fail to create a scalar plan (VF=1) due to a type mismatch that is irrelevant for the scalar case.\n\n```cpp\n// llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n\n// In llvm::LoopVectorizationPlanner::planInLoopRecurrence...\nif (VF.isScalar() && Phi->getType() != IV->getType()) {\n  // This is a reduction in a loop with a different type than the IV.\n  // We can't yet widen the IV, so we need to create a new IV.\n  // TODO: We should be able to relax this restriction.\n  return;\n}\n```\n\nThe problematic code is the `if` block shown above. It incorrectly prevents the creation of a scalar plan. The comment \"TODO: We should be able to relax this restriction\" is telling. For the scalar case (VF=1), this check is unnecessary. We can simply remove this block.\n\n### 5. Conclusion\n\nBy removing the overly restrictive type-check for scalar (VF=1) plans within `planInLoopRecurrence`, we ensure that a scalar plan is always generated. This resolves the assertion failure by guaranteeing that the vectorizer has a valid fallback plan. The vectorizer will then correctly decide not to vectorize this specific loop (as it's not profitable), but it will no longer crash during the planning phase.",
+  "test_traj": []
+}

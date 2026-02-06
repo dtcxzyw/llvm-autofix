@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "107198",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/107198-qwen3max-11201808.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 19b95cf473e9..dd437ae449f6 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -7781,6 +7781,9 @@ unsigned BoUpSLP::canMapToVector(Type *T) const {\n \n   while (isa<StructType, ArrayType, FixedVectorType>(EltTy)) {\n     if (auto *ST = dyn_cast<StructType>(EltTy)) {\n+      // Empty structs cannot be mapped to vectors.\n+      if (ST->getNumElements() == 0)\n+        return 0;\n       // Check that struct is homogeneous.\n       for (const auto *Ty : ST->elements())\n         if (Ty != *ST->element_begin())\n@@ -7788,6 +7791,9 @@ unsigned BoUpSLP::canMapToVector(Type *T) const {\n       N *= ST->getNumElements();\n       EltTy = *ST->element_begin();\n     } else if (auto *AT = dyn_cast<ArrayType>(EltTy)) {\n+      // Empty arrays cannot be mapped to vectors.\n+      if (AT->getNumElements() == 0)\n+        return 0;\n       N *= AT->getNumElements();\n       EltTy = AT->getElementType();\n     } else {\n@@ -7799,6 +7805,9 @@ unsigned BoUpSLP::canMapToVector(Type *T) const {\n \n   if (!isValidElementType(EltTy))\n     return 0;\n+  // If MinVecRegSize > MaxVecRegSize, vectorization isn't feasible for this target.\n+  if (MinVecRegSize > MaxVecRegSize)\n+    return 0;\n   uint64_t VTSize = DL->getTypeStoreSizeInBits(getWidenedType(EltTy, N));\n   if (VTSize < MinVecRegSize || VTSize > MaxVecRegSize ||\n       VTSize != DL->getTypeStoreSizeInBits(T))\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 322154,
+  "output_tokens": 2957,
+  "cached_tokens": 55808,
+  "total_tokens": 325111,
+  "chat_rounds": 27,
+  "total_time_sec": 246.60666918754578,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::canMapToVector",
+    7789
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      7802,
+      7805
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The SLP vectorizer is crashing with a segmentation fault in the `canMapToVector` function when processing an `insertvalue` instruction with complex nested struct types. The crash occurs because the function attempts to calculate vector sizes that don't make sense for the given data layout constraints.\n\n2. Analyzing `opt`'s Log: The log shows that the SLP vectorizer is analyzing the function and crashes during the `vectorizeInsertValueInst` call. The debugger reveals that `MinVecRegSize` is 128 and `MaxVecRegSize` is 32, which creates an impossible condition where the minimum vector register size is larger than the maximum.\n\n3. Root Cause Analysis: In the `canMapToVector` function at lines 7802-7805, there's a check that compares `VTSize` against both `MinVecRegSize` and `MaxVecRegSize`. However, when `MinVecRegSize > MaxVecRegSize` (which happens when the target has no vector registers or very small ones), this creates an impossible condition that can lead to undefined behavior. The specific issue is that the function doesn't handle the case where the calculated `VTSize` might be valid but falls outside the inverted range.\n\n4. Proposed Edit Point(s): The fix should ensure that we only perform the size validation when `MinVecRegSize <= MaxVecRegSize`. If `MinVecRegSize > MaxVecRegSize`, it indicates that vectorization isn't feasible for this target, so we should return 0 early.\n\n5. Conclusion: By adding a guard condition to check if `MinVecRegSize <= MaxVecRegSize` before performing the vector size validation, we prevent the crash and properly handle targets with no viable vector register sizes. This ensures that `canMapToVector` returns 0 (indicating the type cannot be mapped to a vector) when vectorization isn't possible due to target constraints.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 19b95cf473e9..cfb5d1dc8630 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -7799,6 +7799,9 @@ unsigned BoUpSLP::canMapToVector(Type *T) const {\n \n   if (!isValidElementType(EltTy))\n     return 0;\n+  // If MinVecRegSize > MaxVecRegSize, vectorization isn't feasible for this target.\n+  if (MinVecRegSize > MaxVecRegSize)\n+    return 0;\n   uint64_t VTSize = DL->getTypeStoreSizeInBits(getWidenedType(EltTy, N));\n   if (VTSize < MinVecRegSize || VTSize > MaxVecRegSize ||\n       VTSize != DL->getTypeStoreSizeInBits(T))\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 19b95cf473e9..dd437ae449f6 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -7781,6 +7781,9 @@ unsigned BoUpSLP::canMapToVector(Type *T) const {\n \n   while (isa<StructType, ArrayType, FixedVectorType>(EltTy)) {\n     if (auto *ST = dyn_cast<StructType>(EltTy)) {\n+      // Empty structs cannot be mapped to vectors.\n+      if (ST->getNumElements() == 0)\n+        return 0;\n       // Check that struct is homogeneous.\n       for (const auto *Ty : ST->elements())\n         if (Ty != *ST->element_begin())\n@@ -7788,6 +7791,9 @@ unsigned BoUpSLP::canMapToVector(Type *T) const {\n       N *= ST->getNumElements();\n       EltTy = *ST->element_begin();\n     } else if (auto *AT = dyn_cast<ArrayType>(EltTy)) {\n+      // Empty arrays cannot be mapped to vectors.\n+      if (AT->getNumElements() == 0)\n+        return 0;\n       N *= AT->getNumElements();\n       EltTy = AT->getElementType();\n     } else {\n@@ -7799,6 +7805,9 @@ unsigned BoUpSLP::canMapToVector(Type *T) const {\n \n   if (!isValidElementType(EltTy))\n     return 0;\n+  // If MinVecRegSize > MaxVecRegSize, vectorization isn't feasible for this target.\n+  if (MinVecRegSize > MaxVecRegSize)\n+    return 0;\n   uint64_t VTSize = DL->getTypeStoreSizeInBits(getWidenedType(EltTy, N));\n   if (VTSize < MinVecRegSize || VTSize > MaxVecRegSize ||\n       VTSize != DL->getTypeStoreSizeInBits(T))\n"
+  ]
+}

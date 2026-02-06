@@ -1,0 +1,40 @@
+{
+  "command": {
+    "issue": "111887",
+    "model": "gpt-4o",
+    "driver": "openai-generic",
+    "stats": "/tmp/111887-gpt4o-12072340.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 5012445,
+  "output_tokens": 7486,
+  "cached_tokens": 4879616,
+  "total_tokens": 5019931,
+  "chat_rounds": 157,
+  "total_time_sec": 496.9228115081787,
+  "trans_point": [
+    "llvm/include/llvm/IR/Value.h",
+    "llvm::Value::getType",
+    255
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      18668,
+      18668
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The crash occurs due to a null pointer dereference when calling `getUnderlyingObject` on a `nullptr` value. This happens because the value `V` passed to `generateKeySubkey` is invalid (`<badref>`).\n\n2. **Analyzing `opt`'s Log**: The log shows that the SLP vectorizer is analyzing horizontal reductions and attempting to vectorize them. The issue arises during the processing of reduction values, specifically when `generateKeySubkey` is called with an invalid value.\n\n3. **Root Cause Analysis**: The root cause is that the value `V` being processed is not properly validated before being passed to `generateKeySubkey`. This leads to a null pointer dereference when `getUnderlyingObject` is called on `V`.\n\n4. **Proposed Edit Points(s)**:\n   - Add a null check for `V` before calling `generateKeySubkey` in the `matchAssociativeReduction` function at line 18668 in `SLPVectorizer.cpp`. This ensures that invalid values are not processed further.\n\n5. **Conclusion**: Adding a null check for `V` will prevent the crash by ensuring that only valid values are passed to `generateKeySubkey`. This fix addresses the immediate issue and improves the robustness of the code.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 94de520a2715..3d780029b081 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -18664,6 +18664,7 @@ public:\n       // Add reduction values. The values are sorted for better vectorization\n       // results.\n       for (Value *V : PossibleRedVals) {\n+        if (!V) continue; // Skip invalid values.\n         size_t Key, Idx;\n         std::tie(Key, Idx) = generateKeySubkey(V, &TLI, GenerateLoadsSubkey,\n                                                /*AllowAlternate=*/false);\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 94de520a2715..7534942eba74 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -18605,7 +18605,7 @@ public:\n             !isVectorizable(RdxKind, EdgeInst) ||\n             (R.isAnalyzedReductionRoot(EdgeInst) &&\n              all_of(EdgeInst->operands(), IsaPred<Constant>))) {\n-          PossibleReducedVals.push_back(EdgeVal);\n+          if (EdgeVal) PossibleReducedVals.push_back(EdgeVal);\n           continue;\n         }\n         ReductionOps.push_back(EdgeInst);\n@@ -18664,6 +18664,7 @@ public:\n       // Add reduction values. The values are sorted for better vectorization\n       // results.\n       for (Value *V : PossibleRedVals) {\n+        if (!V) continue; // Skip invalid values.\n         size_t Key, Idx;\n         std::tie(Key, Idx) = generateKeySubkey(V, &TLI, GenerateLoadsSubkey,\n                                                /*AllowAlternate=*/false);\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 94de520a2715..0475abdd13c3 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -7089,7 +7089,8 @@ static std::pair<size_t, size_t> generateKeySubkey(\n     Value *V, const TargetLibraryInfo *TLI,\n     function_ref<hash_code(size_t, LoadInst *)> LoadsSubkeyGenerator,\n     bool AllowAlternate) {\n-  hash_code Key = hash_value(V->getValueID() + 2);\n+  if (!V) return std::make_pair(0, 0); // Ensure V is valid.\n+hash_code Key = hash_value(V->getValueID() + 2);\n   hash_code SubKey = hash_value(0);\n   // Sort the loads by the distance between the pointers.\n   if (auto *LI = dyn_cast<LoadInst>(V)) {\n@@ -18605,7 +18606,7 @@ public:\n             !isVectorizable(RdxKind, EdgeInst) ||\n             (R.isAnalyzedReductionRoot(EdgeInst) &&\n              all_of(EdgeInst->operands(), IsaPred<Constant>))) {\n-          PossibleReducedVals.push_back(EdgeVal);\n+          if (EdgeVal) PossibleReducedVals.push_back(EdgeVal);\n           continue;\n         }\n         ReductionOps.push_back(EdgeInst);\n@@ -18664,6 +18665,7 @@ public:\n       // Add reduction values. The values are sorted for better vectorization\n       // results.\n       for (Value *V : PossibleRedVals) {\n+        if (!V) continue; // Skip invalid values.\n         size_t Key, Idx;\n         std::tie(Key, Idx) = generateKeySubkey(V, &TLI, GenerateLoadsSubkey,\n                                                /*AllowAlternate=*/false);\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 94de520a2715..b9a1fbdc605e 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -7089,13 +7089,14 @@ static std::pair<size_t, size_t> generateKeySubkey(\n     Value *V, const TargetLibraryInfo *TLI,\n     function_ref<hash_code(size_t, LoadInst *)> LoadsSubkeyGenerator,\n     bool AllowAlternate) {\n-  hash_code Key = hash_value(V->getValueID() + 2);\n+  if (!V) return std::make_pair(0, 0); // Ensure V is valid.\n+hash_code Key = hash_value(V->getValueID() + 2);\n   hash_code SubKey = hash_value(0);\n   // Sort the loads by the distance between the pointers.\n   if (auto *LI = dyn_cast<LoadInst>(V)) {\n     Key = hash_combine(LI->getType(), hash_value(Instruction::Load), Key);\n     if (LI->isSimple())\n-      SubKey = hash_value(LoadsSubkeyGenerator(Key, LI));\n+      if (LI) SubKey = hash_value(LoadsSubkeyGenerator(Key, LI));\n     else\n       Key = SubKey = hash_value(LI);\n   } else if (isVectorLikeInstWithConstOps(V)) {\n@@ -18605,7 +18606,7 @@ public:\n             !isVectorizable(RdxKind, EdgeInst) ||\n             (R.isAnalyzedReductionRoot(EdgeInst) &&\n              all_of(EdgeInst->operands(), IsaPred<Constant>))) {\n-          PossibleReducedVals.push_back(EdgeVal);\n+          if (EdgeVal) PossibleReducedVals.push_back(EdgeVal);\n           continue;\n         }\n         ReductionOps.push_back(EdgeInst);\n@@ -18664,6 +18665,7 @@ public:\n       // Add reduction values. The values are sorted for better vectorization\n       // results.\n       for (Value *V : PossibleRedVals) {\n+        if (!V) continue; // Skip invalid values.\n         size_t Key, Idx;\n         std::tie(Key, Idx) = generateKeySubkey(V, &TLI, GenerateLoadsSubkey,\n                                                /*AllowAlternate=*/false);\n",
+    "",
+    ""
+  ]
+}

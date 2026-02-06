@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "148052",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/148052-qwen3max-12060330.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 804, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 5072946,
+  "output_tokens": 5884,
+  "cached_tokens": 2546304,
+  "total_tokens": 5078830,
+  "chat_rounds": 88,
+  "total_time_sec": 1485.431955575943,
+  "trans_point": [
+    "llvm/include/llvm/IR/Instructions.h",
+    "llvm::CleanupReturnInst::getCleanupPad",
+    4449
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/SimplifyCFG.cpp",
+      5526,
+      5527
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\n\nThe crash occurs when `CleanupReturnInst::getCleanupPad()` tries to cast its first operand to a `CleanupPadInst`, but the operand is actually a `PoisonValue` (token poison). This happens because during CFG simplification, some cleanuppad instructions are replaced with poison values when their blocks are being deleted, but the corresponding cleanupret instructions still reference these poison values.\n\n2. Analyzing `opt`'s Log:\n\nThe debug log shows that several blocks are being removed as dead code:\n- `panic1` (invoke block)\n- `funclet_bb14` (cleanuppad block) \n- `unreachable` (unreachable block)\n\nAfter these removals, there's a cleanupret instruction in `bb13` that references `%cleanuppad`, but this cleanuppad was in the now-deleted `funclet_bb14` block. The cleanuppad gets replaced with poison, but the cleanupret still exists and tries to access it.\n\n3. Root Cause Analysis:\n\nLooking at the `simplifyCleanupReturn` function in `SimplifyCFG.cpp`, there's already a check for `UndefValue` operands on line 5526, with a comment explaining that \"It is possible to transiantly have an undef cleanuppad operand because we have deleted some, but not all, dead blocks.\" However, the code doesn't check for `PoisonValue` operands, which can also occur during dead block elimination.\n\nIn the debugger, we confirmed that the problematic `CleanupReturnInst` has a `token poison` operand instead of a valid `CleanupPadInst`. The existing check only handles `UndefValue` but not `PoisonValue`, causing the cast assertion to fail.\n\n4. Proposed Edit Point(s):\n\nThe fix is to extend the existing check in `simplifyCleanupReturn` to also handle `PoisonValue` operands, similar to how it already handles `UndefValue`. This should be done at line 5526 in `llvm/lib/Transforms/Utils/SimplifyCFG.cpp`.\n\n5. Conclusion:\n\nBy adding a check for `PoisonValue` alongside the existing `UndefValue` check, we prevent the invalid cast that causes the assertion failure. This allows the pass to safely skip processing cleanupret instructions that reference dead cleanuppad instructions, which will eventually be cleaned up by dead block elimination.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\nindex 850e57e6b0b1..8f6f612fc0d0 100644\n--- a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n+++ b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n@@ -5520,10 +5520,10 @@ static bool mergeCleanupPad(CleanupReturnInst *RI) {\n }\n \n bool SimplifyCFGOpt::simplifyCleanupReturn(CleanupReturnInst *RI) {\n-  // It is possible to transiantly have an undef cleanuppad operand because we\n-  // have deleted some, but not all, dead blocks.\n+  // It is possible to transiantly have an undef or poison cleanuppad operand\n+  // because we have deleted some, but not all, dead blocks.\n   // Eventually, this block will be deleted.\n-  if (isa<UndefValue>(RI->getOperand(0)))\n+  if (isa<UndefValue>(RI->getOperand(0)) || isa<PoisonValue>(RI->getOperand(0)))\n     return false;\n \n   if (mergeCleanupPad(RI))\n"
+  ]
+}

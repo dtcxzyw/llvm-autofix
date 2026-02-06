@@ -1,0 +1,936 @@
+Setting up the buggy LLVM environment ...
+Building LLVM and try reproducing the issue ...
+Issue reproduced successfully.
+Starting to fix the issue ...
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ You are an expert LLVM developer. Please solve this LLVM issue:             │
+│                                                                             │
+│ ------ BEGIN ISSUE ------                                                   │
+│ Type: miscompilation                                                        │
+│                                                                             │
+│ Reproducer (LLVM IR): ```bash                                               │
+│ cat /tmp/test.ll                                                            │
+│ define i32 @loadcombine_consecutive_idx_64(ptr %data) {                     │
+│ entry:                                                                      │
+│   %arrayidx = getelementptr inbounds nuw i8, ptr %data, i64 2149675577      │
+│   %val = load i8, ptr %arrayidx, align 1                                    │
+│   %conv = zext i8 %val to i32                                               │
+│   %arrayidx.2 = getelementptr inbounds nuw i8, ptr %data, i64 2149675576    │
+│   %val.2 = load i8, ptr %arrayidx.2, align 1                                │
+│   %conv.2 = zext i8 %val.2 to i32                                           │
+│   %shl = shl nuw nsw i32 %conv, 8                                           │
+│   %or = or disjoint i32 %shl, %conv.2                                       │
+│   ret i32 %or                                                               │
+│ }                                                                           │
+│                                                                             │
+│ ```                                                                         │
+│                                                                             │
+│ LLVM's Symptom: ```bash                                                     │
+│ /llvm-autofix-deps/llvm/llvm/bin/opt /tmp/test.ll                           │
+│ -passes=aggressive-instcombine -mtriple x86_64-none-eabi -mattr=avx2        │
+│ -data-layout=e-n64 -S                                                       │
+│ --- src ---                                                                 │
+│ target datalayout = "e-n64"                                                 │
+│ target triple = "x86_64-unknown-none-eabi"                                  │
+│ define i32 @loadcombine_consecutive_idx_64(ptr %data) {                     │
+│ entry:                                                                      │
+│   %arrayidx = getelementptr inbounds nuw i8, ptr %data, i64 2149675577      │
+│   %val = load i8, ptr %arrayidx, align 1                                    │
+│   %conv = zext i8 %val to i32                                               │
+│   %arrayidx.2 = getelementptr inbounds nuw i8, ptr %data, i64 2149675576    │
+│   %val.2 = load i8, ptr %arrayidx.2, align 1                                │
+│   %conv.2 = zext i8 %val.2 to i32                                           │
+│   %shl = shl nuw nsw i32 %conv, 8                                           │
+│   %or = or disjoint i32 %shl, %conv.2                                       │
+│   ret i32 %or                                                               │
+│ }                                                                           │
+│                                                                             │
+│                                                                             │
+│ --- tgt ---                                                                 │
+│ ; ModuleID = '<stdin>'                                                      │
+│ source_filename = "<stdin>"                                                 │
+│ target datalayout = "e-n64"                                                 │
+│ target triple = "x86_64-unknown-none-eabi"                                  │
+│                                                                             │
+│ define i32 @loadcombine_consecutive_idx_64(ptr %data) #0 {                  │
+│ entry:                                                                      │
+│   %0 = getelementptr i8, ptr %data, i32 -2145291720                         │
+│   %val.2 = load i16, ptr %0, align 1                                        │
+│   %1 = zext i16 %val.2 to i32                                               │
+│   ret i32 %1                                                                │
+│ }                                                                           │
+│                                                                             │
+│ attributes #0 = { "target-features"="+avx2" }                               │
+│                                                                             │
+│                                                                             │
+│ --- log ---                                                                 │
+│                                                                             │
+│ ----------------------------------------                                    │
+│ define i32 @loadcombine_consecutive_idx_64(ptr %data) {                     │
+│ entry:                                                                      │
+│   %arrayidx = gep inbounds nuw ptr %data, 1 x i64 2149675577                │
+│   %val = load i8, ptr %arrayidx, align 1                                    │
+│   %conv = zext i8 %val to i32                                               │
+│   %arrayidx.2 = gep inbounds nuw ptr %data, 1 x i64 2149675576              │
+│   %val.2 = load i8, ptr %arrayidx.2, align 1                                │
+│   %conv.2 = zext i8 %val.2 to i32                                           │
+│   %shl = shl nsw nuw i32 %conv, 8                                           │
+│   %or = or disjoint i32 %shl, %conv.2                                       │
+│   ret i32 %or                                                               │
+│ }                                                                           │
+│ =>                                                                          │
+│ define i32 @loadcombine_consecutive_idx_64(ptr %data) {                     │
+│ entry:                                                                      │
+│   %#0 = gep ptr %data, 1 x i32 2149675576                                   │
+│   %val.2 = load i16, ptr %#0, align 1                                       │
+│   %#1 = zext i16 %val.2 to i32                                              │
+│   ret i32 %#1                                                               │
+│ }                                                                           │
+│ Transformation doesn't verify!                                              │
+│                                                                             │
+│ ERROR: Source is more defined than target                                   │
+│                                                                             │
+│ Example:                                                                    │
+│ ptr %data = pointer(non-local, block_id=1, offset=0) / Address=#x000000001  │
+│                                                                             │
+│ Source:                                                                     │
+│ ptr %arrayidx = pointer(non-local, block_id=1, offset=2149675577) /         │
+│ Address=#x08021723a                                                         │
+│ i8 %val = poison                                                            │
+│ i32 %conv = poison                                                          │
+│ ptr %arrayidx.2 = pointer(non-local, block_id=1, offset=2149675576) /       │
+│ Address=#x080217239                                                         │
+│ i8 %val.2 = poison                                                          │
+│ i32 %conv.2 = poison                                                        │
+│ i32 %shl = poison                                                           │
+│ i32 %or = poison                                                            │
+│                                                                             │
+│ SOURCE MEMORY STATE                                                         │
+│ ===================                                                         │
+│ NON-LOCAL BLOCKS:                                                           │
+│ Block 0 >       size: 0 align: 1        alloc type: 0   alive: false        │
+│ address: 0                                                                  │
+│ Block 1 >       size: 4294967296        align: 1        alloc type: 0       │
+│ alive: true     address: 1                                                  │
+│                                                                             │
+│ Target:                                                                     │
+│ ptr %#0 = pointer(non-local, block_id=1, offset=-2145291720) /              │
+│ Address=#xf80217239                                                         │
+│ i16 %val.2 = UB triggered!                                                  │
+│                                                                             │
+│                                                                             │
+│ Summary:                                                                    │
+│   0 correct transformations                                                 │
+│   1 incorrect transformations                                               │
+│   0 failed-to-prove transformations                                         │
+│   0 Alive2 errors                                                           │
+│                                                                             │
+│                                                                             │
+│ --- opt_stderr ---                                                          │
+│                                                                             │
+│                                                                             │
+│                                                                             │
+│ ```                                                                         │
+│ ------  END ISSUE  ------                                                   │
+│                                                                             │
+│ You can execute bash commands and edit files to implement the necessary     │
+│ changes.                                                                    │
+│                                                                             │
+│ ## Recommended Workflow                                                     │
+│                                                                             │
+│ This workflows should be done step-by-step so that you can iterate on your  │
+│ changes and any possible problems.                                          │
+│                                                                             │
+│ 1. Analyze the codebase by finding and reading relevant files               │
+│ 2. Edit the source code to resolve the issue                                │
+│ 3. Verify your fix works by running the `submit-patch` command              │
+│ 4. Based on the output of `submit-patch`, repeat steps 1-3 as necessary     │
+│ until the issue is resolved                                                 │
+│                                                                             │
+│ ## Important Rules                                                          │
+│                                                                             │
+│ 1. Every response must contain exactly one action                           │
+│ 2. The action must be enclosed in triple backticks                          │
+│ 3. Directory or environment variable changes are not persistent. Every      │
+│ action is executed in a new subshell.                                       │
+│    However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd          │
+│ /path/to/working/dir && ...` or write/load environment variables from files │
+│ 4. Solving this issue does not require deleting any files or accessing the  │
+│ internet, so you are not permitted to use tools such as: rm, curl, wget,    │
+│ git, ssh, scp, ftp, telnet, ping, traceroute, nslookup, dig, nmap, apt,     │
+│ apt-get, yum, dnf, pacman, brew.                                            │
+│                                                                             │
+│ <system_information>                                                        │
+│ Linux 6.8.0-57-generic #59-Ubuntu SMP PREEMPT_DYNAMIC Sat Mar 15 17:40:59   │
+│ UTC 2025 x86_64                                                             │
+│ </system_information>                                                       │
+│                                                                             │
+│ ## Formatting your response                                                 │
+│                                                                             │
+│ Here is an example of a correct response:                                   │
+│                                                                             │
+│ <example_response>                                                          │
+│ THOUGHT: I need to understand the structure of the repository first. Let me │
+│ check what files are in the current directory to get a better understanding │
+│ of the codebase.                                                            │
+│                                                                             │
+│ ```bash                                                                     │
+│ ls -la                                                                      │
+│ ```                                                                         │
+│ </example_response>                                                         │
+│                                                                             │
+│ ## Useful command examples                                                  │
+│                                                                             │
+│ ### Create a new file:                                                      │
+│                                                                             │
+│ ```bash                                                                     │
+│ cat <<'EOF' > newfile.py                                                    │
+│ import numpy as np                                                          │
+│ hello = "world"                                                             │
+│ print(hello)                                                                │
+│ EOF                                                                         │
+│ ```                                                                         │
+│                                                                             │
+│ ### Edit files with sed:```bash                                             │
+│ # Replace all occurrences                                                   │
+│ sed -i 's/old_string/new_string/g' filename.py                              │
+│                                                                             │
+│ # Replace only first occurrence                                             │
+│ sed -i 's/old_string/new_string/' filename.py                               │
+│                                                                             │
+│ # Replace first occurrence on line 1                                        │
+│ sed -i '1s/old_string/new_string/' filename.py                              │
+│                                                                             │
+│ # Replace all occurrences in lines 1-10                                     │
+│ sed -i '1,10s/old_string/new_string/g' filename.py                          │
+│ ```                                                                         │
+│                                                                             │
+│ ### View file content:                                                      │
+│                                                                             │
+│ ```bash                                                                     │
+│ # View specific lines with numbers                                          │
+│ nl -ba filename.py | sed -n '10,20p'                                        │
+│ ```                                                                         │
+│                                                                             │
+│ ### Submit your patch:                                                      │
+│                                                                             │
+│ ```bash                                                                     │
+│ # This command has no arguments                                             │
+│ submit-patch                                                                │
+│ ```                                                                         │
+│                                                                             │
+│ ### Any other permitted command you want to run:                            │
+│                                                                             │
+│ ```bash                                                                     │
+│ anything                                                                    │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #0, chat statistics so far: {'chat_rounds': 0, 'input_tokens':
+0, 'cached_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: The issue is that the aggressive-instcombine pass is incorrectly   │
+│ transforming two consecutive i8 loads into a single i16 load when the GEP   │
+│ indices are large (2149675576 and 2149675577). The problem occurs because   │
+│ the transformation is using an i32 index (-2145291720) which wraps around   │
+│ due to signed integer overflow, causing undefined behavior. I need to find  │
+│ the source code responsible for this load combining optimization and add a  │
+│ check to prevent it when the GEP indices would cause wrapping or when they  │
+│ exceed the safe range for the target data layout.                           │
+│                                                                             │
+│ First, let me locate the relevant LLVM source files for the                 │
+│ aggressive-instcombine pass and load combining logic.                       │
+│                                                                             │
+│ ```bash                                                                     │
+│ find /llvm-autofix-deps/llvm/llvm -name "*.cpp" | grep -E                   │
+│ "(aggressive|instcombine|loadcombine)" | head -10                           │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ /llvm-autofix-deps/llvm/llvm/clang/test/Analysis/stl-algorithm-modeling-agg │
+│ ressive-std-find-modeling.cpp                                               │
+│ /llvm-autofix-deps/llvm/llvm/clang/test/Analysis/iterator-modeling-no-aggre │
+│ ssive-binary-operation-simplification-no-crash.cpp                          │
+│ /llvm-autofix-deps/llvm/llvm/clang/test/Analysis/container-modeling-no-aggr │
+│ essive-binary-operation-simplification-warn.cpp                             │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #1, chat statistics so far: {'chat_rounds': 1, 'input_tokens':
+2085, 'cached_tokens': 0, 'output_tokens': 200, 'total_tokens': 2285}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: The previous search didn't find the right LLVM source files. Let   │
+│ me search more specifically for the InstCombine or AggressiveInstCombine    │
+│ implementation files in the LLVM codebase.                                  │
+│                                                                             │
+│ ```bash                                                                     │
+│ find /llvm-autofix-deps/llvm/llvm -path "*/lib/Transforms/InstCombine*"     │
+│ -name "*.cpp" | head -10                                                    │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombinePHI │
+│ .cpp                                                                        │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineAto │
+│ micRMW.cpp                                                                  │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineShi │
+│ fts.cpp                                                                     │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSim │
+│ plifyDemanded.cpp                                                           │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineMul │
+│ DivRem.cpp                                                                  │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineLoa │
+│ dStoreAlloca.cpp                                                            │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineAdd │
+│ Sub.cpp                                                                     │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineVec │
+│ torOps.cpp                                                                  │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineCal │
+│ ls.cpp                                                                      │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #2, chat statistics so far: {'chat_rounds': 2, 'input_tokens':
+4490, 'cached_tokens': 0, 'output_tokens': 277, 'total_tokens': 4767}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: The file `InstCombineLoadStoreAlloca.cpp` seems most relevant      │
+│ since it deals with load combining. Let me examine this file to understand  │
+│ how consecutive loads are being combined.                                   │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -n "consecutive.*load\|load.*consecutive\|combine.*load"               │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineLoa │
+│ dStoreAlloca.cpp                                                            │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ 544:/// Helper to combine a load to a new type.                             │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #3, chat statistics so far: {'chat_rounds': 3, 'input_tokens':
+7272, 'cached_tokens': 0, 'output_tokens': 371, 'total_tokens': 7643}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: Let me look at the AggressiveInstCombine pass specifically, as     │
+│ that's what's mentioned in the issue. The problem might be in a different   │
+│ file.                                                                       │
+│                                                                             │
+│ ```bash                                                                     │
+│ find /llvm-autofix-deps/llvm/llvm -path                                     │
+│ "*/lib/Transforms/AggressiveInstCombine*" -name "*.cpp"                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/AggressiveInstCombine/Aggr │
+│ essiveInstCombine.cpp                                                       │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/AggressiveInstCombine/Trun │
+│ cInstCombine.cpp                                                            │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #4, chat statistics so far: {'chat_rounds': 4, 'input_tokens':
+10187, 'cached_tokens': 2304, 'output_tokens': 441, 'total_tokens': 10628}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: Let me check the AggressiveInstCombine.cpp file since that's the   │
+│ pass mentioned in the issue. I need to find where it handles load combining │
+│ of consecutive memory accesses.                                             │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -n -A 10 -B 5 "consecutive\|load.*combine\|combine.*load"              │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/AggressiveInstCombine/Aggr │
+│ essiveInstCombine.cpp                                                       │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ 616-  const APInt *Shift = nullptr;                                         │
+│ 617-  Type *ZextType;                                                       │
+│ 618-  AAMDNodes AATags;                                                     │
+│ 619-};                                                                      │
+│ 620-                                                                        │
+│ 621:// Identify and Merge consecutive loads recursively which is of the     │
+│ form                                                                        │
+│ 622-// (ZExt(L1) << shift1) | (ZExt(L2) << shift2) -> ZExt(L3) << shift1    │
+│ 623-// (ZExt(L1) << shift1) | ZExt(L2) -> ZExt(L3)                          │
+│ 624-static bool foldLoadsRecursive(Value *V, LoadOps &LOps, const           │
+│ DataLayout &DL,                                                             │
+│ 625-                               AliasAnalysis &AA) {                     │
+│ 626-  const APInt *ShAmt2 = nullptr;                                        │
+│ 627-  Value *X;                                                             │
+│ 628-  Instruction *L1, *L2;                                                 │
+│ 629-                                                                        │
+│ 630-  // Go to the last node with loads.                                    │
+│ 631-  if (match(V, m_OneUse(m_c_Or(                                         │
+│ --                                                                          │
+│ 661-    return false;                                                       │
+│ 662-                                                                        │
+│ 663-  // Find the data layout                                               │
+│ 664-  bool IsBigEndian = DL.isBigEndian();                                  │
+│ 665-                                                                        │
+│ 666:  // Check if loads are consecutive and same size.                      │
+│ 667-  Value *Load1Ptr = LI1->getPointerOperand();                           │
+│ 668-  APInt Offset1(DL.getIndexTypeSizeInBits(Load1Ptr->getType()), 0);     │
+│ 669-  Load1Ptr =                                                            │
+│ 670-      Load1Ptr->stripAndAccumulateConstantOffsets(DL, Offset1,          │
+│ 671-                                                  /* AllowNonInbounds   │
+│ */ true);                                                                   │
+│ 672-                                                                        │
+│ 673-  Value *Load2Ptr = LI2->getPointerOperand();                           │
+│ 674-  APInt Offset2(DL.getIndexTypeSizeInBits(Load2Ptr->getType()), 0);     │
+│ 675-  Load2Ptr =                                                            │
+│ 676-      Load2Ptr->stripAndAccumulateConstantOffsets(DL, Offset2,          │
+│ --                                                                          │
+│ 738-    else                                                                │
+│ 739-      LoadSize2 = LOps.LoadSize;                                        │
+│ 740-  }                                                                     │
+│ 741-                                                                        │
+│ 742-  // Verify if shift amount and load index aligns and verifies that     │
+│ loads                                                                       │
+│ 743:  // are consecutive.                                                   │
+│ 744-  uint64_t ShiftDiff = IsBigEndian ? LoadSize2 : LoadSize1;             │
+│ 745-  uint64_t PrevSize =                                                   │
+│ 746-      DL.getTypeStoreSize(IntegerType::get(LI1->getContext(),           │
+│ LoadSize1));                                                                │
+│ 747-  if ((Shift2 - Shift1) != ShiftDiff || (Offset2 - Offset1) !=          │
+│ PrevSize)                                                                   │
+│ 748-    return false;                                                       │
+│ 749-                                                                        │
+│ 750-  // Update LOps                                                        │
+│ 751-  AAMDNodes AATags1 = LOps.AATags;                                      │
+│ 752-  AAMDNodes AATags2 = LI2->getAAMetadata();                             │
+│ 753-  if (LOps.FoundRoot == false) {                                        │
+│ --                                                                          │
+│ 765-  LOps.ZextType = X->getType();                                         │
+│ 766-  return true;                                                          │
+│ 767-}                                                                       │
+│ 768-                                                                        │
+│ 769-// For a given BB instruction, evaluate all loads in the chain that     │
+│ form a                                                                      │
+│ 770:// pattern which suggests that the loads can be combined. The one and   │
+│ only use                                                                    │
+│ 771-// of the loads is to form a wider load.                                │
+│ 772-static bool foldConsecutiveLoads(Instruction &I, const DataLayout &DL,  │
+│ 773-                                 TargetTransformInfo &TTI,              │
+│ AliasAnalysis &AA,                                                          │
+│ 774-                                 const DominatorTree &DT) {             │
+│ 775-  // Only consider load chains of scalar values.                        │
+│ 776-  if (isa<VectorType>(I.getType()))                                     │
+│ 777-    return false;                                                       │
+│ 778-                                                                        │
+│ 779-  LoadOps LOps;                                                         │
+│ 780-  if (!foldLoadsRecursive(&I, LOps, DL, AA) || !LOps.FoundRoot)         │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #5, chat statistics so far: {'chat_rounds': 5, 'input_tokens':
+13255, 'cached_tokens': 4224, 'output_tokens': 538, 'total_tokens': 13793}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: Now I can see the issue! In the `foldConsecutiveLoads` function in │
+│ `AggressiveInstCombine.cpp`, the code is checking if loads are consecutive  │
+│ by comparing offsets, but it's not properly handling cases where the GEP    │
+│ indices are large and might wrap around when converted to a smaller index   │
+│ type. The problem occurs in lines 668-671 and 738-748 where it calculates   │
+│ offsets and checks if they are consecutive.                                 │
+│                                                                             │
+│ Looking at the error, the original GEP uses i64 indices (2149675576,        │
+│ 2149675577), but the transformation creates a GEP with i32 index            │
+│ (-2145291720), which is the result of signed overflow when converting from  │
+│ i64 to i32.                                                                 │
+│                                                                             │
+│ I need to add a check to ensure that when we're creating a combined load,   │
+│ the base pointer offset doesn't cause undefined behavior due to index       │
+│ wrapping. Specifically, I should check if the offset calculation would be   │
+│ safe in the target's index type.                                            │
+│                                                                             │
+│ Let me examine the exact location where the new GEP is created to           │
+│ understand how the index type is chosen.                                    │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -n -A 15 -B 5 "getelementptr.*i32\|getelementptr.*index"               │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/AggressiveInstCombine/Aggr │
+│ essiveInstCombine.cpp                                                       │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ 505-// %sub = sub i32 0, %x                                                 │
+│ 506-// %and = and i32 %sub, %x                                              │
+│ 507-// %mul = mul i32 %and, 81224991                                        │
+│ 508-// %shr = lshr i32 %mul, 27                                             │
+│ 509-// %idxprom = zext i32 %shr to i64                                      │
+│ 510:// %arrayidx = getelementptr inbounds [32 x i32], [32 x i32]*           │
+│ @ctz3.table,                                                                │
+│ 511-//     i64 0, i64 %idxprom                                              │
+│ 512-// %0 = load i32, i32* %arrayidx, align 4, !tbaa !8                     │
+│ 513-//                                                                      │
+│ 514-// CASE 4:                                                              │
+│ 515-// %sub = sub i64 0, %x                                                 │
+│ 516-// %and = and i64 %sub, %x                                              │
+│ 517-// %mul = mul i64 %and, 283881067100198605                              │
+│ 518-// %shr = lshr i64 %mul, 58                                             │
+│ 519-// %arrayidx = getelementptr inbounds [64 x i8], [64 x i8]* @table, i64 │
+│ 0,                                                                          │
+│ 520-//     i64 %shr                                                         │
+│ 521-// %0 = load i8, i8* %arrayidx, align 1, !tbaa !8                       │
+│ 522-//                                                                      │
+│ 523-// All this can be lowered to @llvm.cttz.i32/64 intrinsic.              │
+│ 524-static bool tryToRecognizeTableBasedCttz(Instruction &I) {              │
+│ 525-  LoadInst *LI = dyn_cast<LoadInst>(&I);                                │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #6, chat statistics so far: {'chat_rounds': 6, 'input_tokens':
+17346, 'cached_tokens': 4224, 'output_tokens': 850, 'total_tokens': 18196}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: Let me look for where the actual GEP creation happens in the load  │
+│ combining logic. I need to find the code that creates the new combined      │
+│ load.                                                                       │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -n -A 20 -B 5 "CreateLoad\|CreateGEP\|GetElementPtrInst::Create"       │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/AggressiveInstCombine/Aggr │
+│ essiveInstCombine.cpp                                                       │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ 1073-                                                                       │
+│ 1074-  Value *Base = LHS;                                                   │
+│ 1075-  for (uint64_t i = 0; i < N; ++i) {                                   │
+│ 1076-    B.SetInsertPoint(BBSubs[i]);                                       │
+│ 1077-    Value *VL =                                                        │
+│ 1078:        B.CreateZExt(B.CreateLoad(B.getInt8Ty(),                       │
+│ 1079-                                  B.CreateInBoundsPtrAdd(Base,         │
+│ B.getInt64(i))),                                                            │
+│ 1080-                     CI->getType());                                   │
+│ 1081-    Value *VR =                                                        │
+│ 1082-        ConstantInt::get(CI->getType(), static_cast<unsigned           │
+│ char>(RHS[i]));                                                             │
+│ 1083-    Value *Sub = Swapped ? B.CreateSub(VR, VL) : B.CreateSub(VL, VR);  │
+│ 1084-    if (i < N - 1)                                                     │
+│ 1085-      B.CreateCondBr(B.CreateICmpNE(Sub,                               │
+│ ConstantInt::get(CI->getType(), 0)),                                        │
+│ 1086-                     BBNE, BBSubs[i + 1]);                             │
+│ 1087-    else                                                               │
+│ 1088-      B.CreateBr(BBNE);                                                │
+│ 1089-                                                                       │
+│ 1090-    Phi->addIncoming(Sub, BBSubs[i]);                                  │
+│ 1091-  }                                                                    │
+│ 1092-                                                                       │
+│ 1093-  CI->replaceAllUsesWith(Phi);                                         │
+│ 1094-  CI->eraseFromParent();                                               │
+│ 1095-                                                                       │
+│ 1096-  if (DTU) {                                                           │
+│ 1097-    SmallVector<DominatorTree::UpdateType, 8> Updates;                 │
+│ 1098-    Updates.push_back({DominatorTree::Insert, BBCI, BBSubs[0]});       │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #7, chat statistics so far: {'chat_rounds': 7, 'input_tokens':
+22212, 'cached_tokens': 4224, 'output_tokens': 946, 'total_tokens': 23158}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: Let me search more specifically for the load combining             │
+│ implementation that creates the new wider load.                             │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -n -A 30 "foldConsecutiveLoads"                                        │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/AggressiveInstCombine/Aggr │
+│ essiveInstCombine.cpp                                                       │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ 772:static bool foldConsecutiveLoads(Instruction &I, const DataLayout &DL,  │
+│ 773-                                 TargetTransformInfo &TTI,              │
+│ AliasAnalysis &AA,                                                          │
+│ 774-                                 const DominatorTree &DT) {             │
+│ 775-  // Only consider load chains of scalar values.                        │
+│ 776-  if (isa<VectorType>(I.getType()))                                     │
+│ 777-    return false;                                                       │
+│ 778-                                                                        │
+│ 779-  LoadOps LOps;                                                         │
+│ 780-  if (!foldLoadsRecursive(&I, LOps, DL, AA) || !LOps.FoundRoot)         │
+│ 781-    return false;                                                       │
+│ 782-                                                                        │
+│ 783-  IRBuilder<> Builder(&I);                                              │
+│ 784-  LoadInst *NewLoad = nullptr, *LI1 = LOps.Root;                        │
+│ 785-                                                                        │
+│ 786-  IntegerType *WiderType = IntegerType::get(I.getContext(),             │
+│ LOps.LoadSize);                                                             │
+│ 787-  // TTI based checks if we want to proceed with wider load             │
+│ 788-  bool Allowed = TTI.isTypeLegal(WiderType);                            │
+│ 789-  if (!Allowed)                                                         │
+│ 790-    return false;                                                       │
+│ 791-                                                                        │
+│ 792-  unsigned AS = LI1->getPointerAddressSpace();                          │
+│ 793-  unsigned Fast = 0;                                                    │
+│ 794-  Allowed = TTI.allowsMisalignedMemoryAccesses(I.getContext(),          │
+│ LOps.LoadSize,                                                              │
+│ 795-                                               AS, LI1->getAlign(),     │
+│ &Fast);                                                                     │
+│ 796-  if (!Allowed || !Fast)                                                │
+│ 797-    return false;                                                       │
+│ 798-                                                                        │
+│ 799-  // Get the Index and Ptr for the new GEP.                             │
+│ 800-  Value *Load1Ptr = LI1->getPointerOperand();                           │
+│ 801-  Builder.SetInsertPoint(LOps.RootInsert);                              │
+│ 802-  if (!DT.dominates(Load1Ptr, LOps.RootInsert)) {                       │
+│ --                                                                          │
+│ 1254:      MadeChange |= foldConsecutiveLoads(I, DL, TTI, AA, DT);          │
+│ 1255-      MadeChange |= foldPatternedLoads(I, DL);                         │
+│ 1256-      // NOTE: This function introduces erasing of the instruction     │
+│ `I`, so it                                                                  │
+│ 1257-      // needs to be called at the end of this sequence, otherwise we  │
+│ may make                                                                    │
+│ 1258-      // bugs.                                                         │
+│ 1259-      MadeChange |= foldLibCalls(I, TTI, TLI, AC, DT, DL,              │
+│ MadeCFGChange);                                                             │
+│ 1260-    }                                                                  │
+│ 1261-  }                                                                    │
+│ 1262-                                                                       │
+│ 1263-  // We're done with transforms, so remove dead instructions.          │
+│ 1264-  if (MadeChange)                                                      │
+│ 1265-    for (BasicBlock &BB : F)                                           │
+│ 1266-      SimplifyInstructionsInBlock(&BB);                                │
+│ 1267-                                                                       │
+│ 1268-  return MadeChange;                                                   │
+│ 1269-}                                                                      │
+│ 1270-                                                                       │
+│ 1271-/// This is the entry point for all transforms. Pass manager           │
+│ differences are                                                             │
+│ 1272-/// handled in the callers of this function.                           │
+│ 1273-static bool runImpl(Function &F, AssumptionCache &AC,                  │
+│ TargetTransformInfo &TTI,                                                   │
+│ 1274-                    TargetLibraryInfo &TLI, DominatorTree &DT,         │
+│ 1275-                    AliasAnalysis &AA, bool &MadeCFGChange) {          │
+│ 1276-  bool MadeChange = false;                                             │
+│ 1277-  const DataLayout &DL = F.getDataLayout();                            │
+│ 1278-  TruncInstCombine TIC(AC, TLI, DL, DT);                               │
+│ 1279-  MadeChange |= TIC.run(F);                                            │
+│ 1280-  MadeChange |= foldUnusualPatterns(F, DT, TTI, TLI, AA, AC,           │
+│ MadeCFGChange);                                                             │
+│ 1281-  return MadeChange;                                                   │
+│ 1282-}                                                                      │
+│ 1283-                                                                       │
+│ 1284-PreservedAnalyses AggressiveInstCombinePass::run(Function &F,          │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #8, chat statistics so far: {'chat_rounds': 8, 'input_tokens':
+27584, 'cached_tokens': 4224, 'output_tokens': 1014, 'total_tokens': 28598}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: Now I can see the issue more clearly. In the                       │
+│ `foldConsecutiveLoads` function, around lines 800-801, it gets the pointer  │
+│ operand and creates a new GEP. The problem is that when creating the new    │
+│ GEP, it doesn't verify that the offset calculation is safe for the target's │
+│ index type.                                                                 │
+│                                                                             │
+│ Looking at the error again: the original offsets are 2149675576 and         │
+│ 2149675577 (both i64), but the transformed code uses an i32 index of        │
+│ -2145291720, which is 2149675576 interpreted as a signed i32 (since         │
+│ 2149675576 > 2^31-1).                                                       │
+│                                                                             │
+│ The issue is in how the GEP index type is chosen. The DataLayout has        │
+│ "e-n64" which means 64-bit pointers, but the GEP creation might be using a  │
+│ smaller index type.                                                         │
+│                                                                             │
+│ Let me look at how the new load pointer is created:                         │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -n -A 10 -B 5 "Load1Ptr.*strip\|NewLoad.*CreateLoad"                   │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/AggressiveInstCombine/Aggr │
+│ essiveInstCombine.cpp                                                       │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ 665-                                                                        │
+│ 666-  // Check if loads are consecutive and same size.                      │
+│ 667-  Value *Load1Ptr = LI1->getPointerOperand();                           │
+│ 668-  APInt Offset1(DL.getIndexTypeSizeInBits(Load1Ptr->getType()), 0);     │
+│ 669-  Load1Ptr =                                                            │
+│ 670:      Load1Ptr->stripAndAccumulateConstantOffsets(DL, Offset1,          │
+│ 671-                                                  /* AllowNonInbounds   │
+│ */ true);                                                                   │
+│ 672-                                                                        │
+│ 673-  Value *Load2Ptr = LI2->getPointerOperand();                           │
+│ 674-  APInt Offset2(DL.getIndexTypeSizeInBits(Load2Ptr->getType()), 0);     │
+│ 675-  Load2Ptr =                                                            │
+│ 676-      Load2Ptr->stripAndAccumulateConstantOffsets(DL, Offset2,          │
+│ 677-                                                  /* AllowNonInbounds   │
+│ */ true);                                                                   │
+│ 678-                                                                        │
+│ 679-  // Verify if both loads have same base pointers and load sizes are    │
+│ same.                                                                       │
+│ 680-  uint64_t LoadSize1 = LI1->getType()->getPrimitiveSizeInBits();        │
+│ --                                                                          │
+│ 799-  // Get the Index and Ptr for the new GEP.                             │
+│ 800-  Value *Load1Ptr = LI1->getPointerOperand();                           │
+│ 801-  Builder.SetInsertPoint(LOps.RootInsert);                              │
+│ 802-  if (!DT.dominates(Load1Ptr, LOps.RootInsert)) {                       │
+│ 803-    APInt Offset1(DL.getIndexTypeSizeInBits(Load1Ptr->getType()), 0);   │
+│ 804:    Load1Ptr = Load1Ptr->stripAndAccumulateConstantOffsets(             │
+│ 805-        DL, Offset1, /* AllowNonInbounds */ true);                      │
+│ 806-    Load1Ptr = Builder.CreatePtrAdd(Load1Ptr,                           │
+│ 807-                                                                        │
+│ Builder.getInt32(Offset1.getZExtValue()));                                  │
+│ 808-  }                                                                     │
+│ 809-  // Generate wider load.                                               │
+│ 810-  NewLoad = Builder.CreateAlignedLoad(WiderType, Load1Ptr,              │
+│ LI1->getAlign(),                                                            │
+│ 811-                                      LI1->isVolatile(), "");           │
+│ 812-  NewLoad->takeName(LI1);                                               │
+│ 813-  // Set the New Load AATags Metadata.                                  │
+│ 814-  if (LOps.AATags)                                                      │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #9, chat statistics so far: {'chat_rounds': 9, 'input_tokens':
+33932, 'cached_tokens': 4224, 'output_tokens': 1307, 'total_tokens': 35239}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: Found the bug! In line 807, the code is using                      │
+│ `Builder.getInt32(Offset1.getZExtValue())` to create the offset for the new │
+│ pointer. This is problematic because:                                       │
+│                                                                             │
+│ 1. `Offset1` is an APInt with size based on the index type (which should be │
+│ i64 for n64 data layout)                                                    │
+│ 2. But it's being converted to i32 via `getInt32()`, which causes           │
+│ truncation and signed interpretation issues                                 │
+│ 3. The `getZExtValue()` returns the full value, but `getInt32()` truncates  │
+│ it to 32 bits                                                               │
+│                                                                             │
+│ The fix is to use the appropriate integer type based on the DataLayout's    │
+│ index type size, not hardcoded i32.                                         │
+│                                                                             │
+│ Looking at line 807: `Builder.getInt32(Offset1.getZExtValue())` should be   │
+│ changed to use the correct index type.                                      │
+│                                                                             │
+│ Let me check what the correct way to get the index type constant is:        │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -n "getIndexTypeSizeInBits\|getIntN"                                   │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/AggressiveInstCombine/Aggr │
+│ essiveInstCombine.cpp                                                       │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ 668:  APInt Offset1(DL.getIndexTypeSizeInBits(Load1Ptr->getType()), 0);     │
+│ 674:  APInt Offset2(DL.getIndexTypeSizeInBits(Load2Ptr->getType()), 0);     │
+│ 803:    APInt Offset1(DL.getIndexTypeSizeInBits(Load1Ptr->getType()), 0);   │
+│ 835:  unsigned BW = DL.getIndexTypeSizeInBits(PtrOp->getType());            │
+│ 894:  unsigned BW = DL.getIndexTypeSizeInBits(PtrOp->getType());            │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #10, chat statistics so far: {'chat_rounds': 10,
+'input_tokens': 41114, 'cached_tokens': 4224, 'output_tokens': 1558,
+'total_tokens': 42672}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: I can see that the code already uses `DL.getIndexTypeSizeInBits()` │
+│ to get the proper index bit width. The issue is in line 807 where it        │
+│ hardcodes `getInt32()`. I need to replace this with a call that uses the    │
+│ correct integer type based on the index size.                               │
+│                                                                             │
+│ Looking at the LLVM IRBuilder, there should be a way to create an integer   │
+│ constant of the appropriate size. Let me check what methods are available.  │
+│                                                                             │
+│ The fix should be to replace `Builder.getInt32(Offset1.getZExtValue())`     │
+│ with something like `Builder.getIntN(IndexSize, Offset1.getZExtValue())`    │
+│ where IndexSize is obtained from the DataLayout.                            │
+│                                                                             │
+│ From lines 803-805, I can see that `Offset1` is already created with the    │
+│ correct index type size. So I just need to use that same size to create the │
+│ constant.                                                                   │
+│                                                                             │
+│ ```bash                                                                     │
+│ sed -i                                                                      │
+│ '807s/Builder.getInt32(Offset1.getZExtValue())/Builder.getIntN(DL.getIndexT │
+│ ypeSizeInBits(Load1Ptr->getType()), Offset1.getZExtValue())/'               │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/AggressiveInstCombine/Aggr │
+│ essiveInstCombine.cpp                                                       │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #11, chat statistics so far: {'chat_rounds': 11,
+'input_tokens': 48690, 'cached_tokens': 4224, 'output_tokens': 1821,
+'total_tokens': 50511}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: Now I need to verify that this fix works. Let me test it by        │
+│ running the same command that was shown in the issue to see if the          │
+│ transformation is now correct.                                              │
+│                                                                             │
+│ ```bash                                                                     │
+│ /llvm-autofix-deps/llvm/llvm/bin/opt /tmp/test.ll                           │
+│ -passes=aggressive-instcombine -mtriple x86_64-none-eabi -mattr=avx2        │
+│ -data-layout=e-n64 -S                                                       │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ <returncode>127</returncode>                                                │
+│ <output>                                                                    │
+│ /bin/sh: 1: /llvm-autofix-deps/llvm/llvm/bin/opt: not found                 │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #12, chat statistics so far: {'chat_rounds': 12,
+'input_tokens': 56554, 'cached_tokens': 4224, 'output_tokens': 1917,
+'total_tokens': 58471}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: The opt binary is not in that location. Let me find where the LLVM │
+│ binaries are built.                                                         │
+│                                                                             │
+│ ```bash                                                                     │
+│ find /llvm-autofix-deps -name "opt" -type f | head -5                       │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@3685703] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #13, chat statistics so far: {'chat_rounds': 13,
+'input_tokens': 64564, 'cached_tokens': 11648, 'output_tokens': 1965,
+'total_tokens': 66529}
+╭─ assistant [MainThread@3685703] ────────────────────────────────────────────╮
+│ THOUGHT: The LLVM build might not be available. Instead, I should use the   │
+│ `submit-patch` command to test my fix, as that's the recommended workflow.  │
+│                                                                             │
+│ ```bash                                                                     │
+│ submit-patch                                                                │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Generation statistics saved to /tmp/118467-qwen3max-12012358.json.
+Saved trajectory to '/tmp/118467-qwen3max-12012358.traj.json'
+Final Patch
+-----------
+diff --git
+a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
+b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
+index b5b561797f75..2493bb72f4ff 100644
+--- a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
++++ b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
+@@ -804,7 +804,7 @@ static bool foldConsecutiveLoads(Instruction &I, const
+DataLayout &DL,
+     Load1Ptr = Load1Ptr->stripAndAccumulateConstantOffsets(
+         DL, Offset1, /* AllowNonInbounds */ true);
+     Load1Ptr = Builder.CreatePtrAdd(Load1Ptr,
+-                                    Builder.getInt32(Offset1.getZExtValue()));
++
+Builder.getIntN(DL.getIndexTypeSizeInBits(Load1Ptr->getType()),
+Offset1.getZExtValue()));
+   }
+   // Generate wider load.
+   NewLoad = Builder.CreateAlignedLoad(WiderType, Load1Ptr, LI1->getAlign(),
+
+Reference Patch
+---------------
+commit f68b0e36997322eeda8fd199ea80deb1b49c5410
+Author: Antonio Frighetto <me@antoniofrighetto.com>
+Date:   Wed Dec 4 10:15:11 2024 +0100
+
+    [AggressiveInstCombine] Use APInt and avoid truncation when folding loads
+
+    A miscompilation issue has been addressed with improved handling.
+
+    Fixes: https://github.com/llvm/llvm-project/issues/118467.
+
+diff --git
+a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
+b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
+index b5b561797f75..45ee2d472a11 100644
+--- a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
++++ b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
+@@ -803,8 +803,7 @@ static bool foldConsecutiveLoads(Instruction &I, const
+DataLayout &DL,
+     APInt Offset1(DL.getIndexTypeSizeInBits(Load1Ptr->getType()), 0);
+     Load1Ptr = Load1Ptr->stripAndAccumulateConstantOffsets(
+         DL, Offset1, /* AllowNonInbounds */ true);
+-    Load1Ptr = Builder.CreatePtrAdd(Load1Ptr,
+-                                    Builder.getInt32(Offset1.getZExtValue()));
++    Load1Ptr = Builder.CreatePtrAdd(Load1Ptr, Builder.getInt(Offset1));
+   }
+   // Generate wider load.
+   NewLoad = Builder.CreateAlignedLoad(WiderType, Load1Ptr, LI1->getAlign(),
+
+Statistics
+----------
+{
+  "command": {
+    "issue": "118467",
+    "model": "qwen3-max"
+  },
+  "patch": "diff --git
+a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
+b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\nindex
+b5b561797f75..2493bb72f4ff 100644\n---
+a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\n+++
+b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\n@@
+-804,7 +804,7 @@ static bool foldConsecutiveLoads(Instruction &I, const
+DataLayout &DL,\n     Load1Ptr = Load1Ptr->stripAndAccumulateConstantOffsets(\n
+DL, Offset1, /* AllowNonInbounds */ true);\n     Load1Ptr =
+Builder.CreatePtrAdd(Load1Ptr,\n-
+Builder.getInt32(Offset1.getZExtValue()));\n+
+Builder.getIntN(DL.getIndexTypeSizeInBits(Load1Ptr->getType()),
+Offset1.getZExtValue()));\n   }\n   // Generate wider load.\n   NewLoad =
+Builder.CreateAlignedLoad(WiderType, Load1Ptr, LI1->getAlign(),\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 72647,
+  "output_tokens": 2009,
+  "cached_tokens": 17920,
+  "total_tokens": 74656,
+  "chat_rounds": 14,
+  "total_time_sec": 88.25237703323364,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git
+a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
+b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\nindex
+b5b561797f75..2493bb72f4ff 100644\n---
+a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\n+++
+b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\n@@
+-804,7 +804,7 @@ static bool foldConsecutiveLoads(Instruction &I, const
+DataLayout &DL,\n     Load1Ptr = Load1Ptr->stripAndAccumulateConstantOffsets(\n
+DL, Offset1, /* AllowNonInbounds */ true);\n     Load1Ptr =
+Builder.CreatePtrAdd(Load1Ptr,\n-
+Builder.getInt32(Offset1.getZExtValue()));\n+
+Builder.getIntN(DL.getIndexTypeSizeInBits(Load1Ptr->getType()),
+Offset1.getZExtValue()));\n   }\n   // Generate wider load.\n   NewLoad =
+Builder.CreateAlignedLoad(WiderType, Load1Ptr, LI1->getAlign(),\n"
+  ]
+}

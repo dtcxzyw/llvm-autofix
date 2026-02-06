@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "115575",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/115575-qwen3max-11240624.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 04ea12ef0f12..312d435ae1b1 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -1005,6 +1005,11 @@ bool VectorCombine::scalarizeBinopOrCmp(Instruction &I) {\n     ++NumScalarBO;\n \n   // For constant cases, extract the scalar element, this should constant fold.\n+  // But first check that the index is within bounds to avoid creating poison\n+  // that could trigger immediate undefined behavior in the scalar operation.\n+  auto *FixedVecTy = dyn_cast<FixedVectorType>(VecTy);\n+  if (FixedVecTy && Index >= FixedVecTy->getNumElements())\n+    return false;\n   if (IsConst0)\n     V0 = ConstantExpr::getExtractElement(VecC0, Builder.getInt64(Index));\n   if (IsConst1)\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 436486,
+  "output_tokens": 3055,
+  "cached_tokens": 150272,
+  "total_tokens": 439541,
+  "chat_rounds": 29,
+  "total_time_sec": 712.8537464141846,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+    "(anonymous namespace)::VectorCombine::scalarizeBinopOrCmp",
+    1015
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+      1013,
+      1015
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\n\nThe issue occurs when the vector-combine pass attempts to scalarize a vector binary operation where one operand is an insertelement with an out-of-bounds index (index 3 for a <2 x i8> vector). The original code has:\n\n%ins = insertelement <2 x i8> poison, i8 %x, i32 3\n%bo = sdiv <2 x i8> %ins, <i8 5, i8 2>\n\nThe insertelement with index 3 on a 2-element vector produces a vector where both elements are poison (since the index is out-of-bounds). When performing sdiv with this poison vector and a constant vector <5, 2>, the result is also poison for both elements.\n\nHowever, the transformation incorrectly scalarizes this to:\n\n%bo.scalar = sdiv i8 %x, poison\n%bo = insertelement <2 x i8> poison, i8 %bo.scalar, i64 3\n\nThis is problematic because sdiv i8 %x, poison triggers undefined behavior immediately, whereas the original vector operation only produces poison values without immediate UB.\n\n2. Analyzing `opt`'s Log:\n\nThe log shows that the transformation is happening in scalarizeBinopOrCmp(). The debugger reveals that:\n- Ins0 is the insertelement with index 3 (out-of-bounds)\n- Ins1 is the constant vector <5, 2>\n- IsConst0 = false, IsConst1 = true\n- Index = 3 (from Index0)\n- V0 = %x, V1 = poison (extracted from VecC1 at index 3)\n\nThe key problem is that when extracting from VecC1 (<5, 2>) at index 3, the code gets poison, but this poison is then used as the divisor in the scalar sdiv operation, which immediately triggers UB.\n\n3. Root Cause Analysis:\n\nThe root cause is in the scalarizeBinopOrCmp function around lines 1008-1011. When IsConst1 is true (meaning the second operand is a constant vector), the code extracts the element at the insertion index (Index = 3) from VecC1 using ConstantExpr::getExtractElement. For a 2-element vector, extracting at index 3 returns poison.\n\nHowever, the transformation assumes that if the original vector operation was well-defined (or at least didn't immediately trigger UB), then the scalar operation will also be safe. This assumption fails when the extraction index is out-of-bounds, because:\n\n- In the vector case: sdiv <poison, poison>, <5, 2> produces <poison, poison> (no immediate UB)\n- In the scalar case: sdiv %x, poison immediately triggers UB due to poison divisor\n\nThe issue is that the pass doesn't validate whether the extraction index is within bounds before performing the scalarization.\n\n4. Proposed Edit Point(s):\n\nThe fix should prevent scalarization when the insertion index is out-of-bounds for either of the constant vectors involved. We need to add a bounds check before proceeding with the transformation.\n\nLooking at the code structure, we should add a validation that the Index is within the valid range of the vector type before extracting elements from constant vectors.\n\nThe edit point is in the scalarizeBinopOrCmp function where we need to check if the index is valid for the vector type before proceeding with scalarization.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 04ea12ef0f12..a8e8b2899158 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -969,6 +969,12 @@ bool VectorCombine::scalarizeBinopOrCmp(Instruction &I) {\n           ScalarTy->isPointerTy()) &&\n          \"Unexpected types for insert element into binop or cmp\");\n \n+  // Check if the index is within bounds to avoid creating poison that could\n+  // trigger immediate undefined behavior in the scalar operation.\n+  auto *FixedVecTy = dyn_cast<FixedVectorType>(VecTy);\n+  if (!FixedVecTy || Index >= FixedVecTy->getNumElements())\n+    return false;\n+\n   unsigned Opcode = I.getOpcode();\n   InstructionCost ScalarOpCost, VectorOpCost;\n   if (IsCmp) {\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 04ea12ef0f12..312d435ae1b1 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -1005,6 +1005,11 @@ bool VectorCombine::scalarizeBinopOrCmp(Instruction &I) {\n     ++NumScalarBO;\n \n   // For constant cases, extract the scalar element, this should constant fold.\n+  // But first check that the index is within bounds to avoid creating poison\n+  // that could trigger immediate undefined behavior in the scalar operation.\n+  auto *FixedVecTy = dyn_cast<FixedVectorType>(VecTy);\n+  if (FixedVecTy && Index >= FixedVecTy->getNumElements())\n+    return false;\n   if (IsConst0)\n     V0 = ConstantExpr::getExtractElement(VecC0, Builder.getInt64(Index));\n   if (IsConst1)\n"
+  ]
+}

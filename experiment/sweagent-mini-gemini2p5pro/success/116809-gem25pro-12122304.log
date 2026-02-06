@@ -1,0 +1,852 @@
+Setting up the buggy LLVM environment ...
+Building LLVM and try reproducing the issue ...
+Issue reproduced successfully.
+Starting to fix the issue ...
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@318709] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ You are an expert LLVM developer. Please solve this LLVM issue:                                                                                                                          │
+│                                                                                                                                                                                          │
+│ ------ BEGIN ISSUE ------                                                                                                                                                                │
+│ Type: crash                                                                                                                                                                              │
+│                                                                                                                                                                                          │
+│ Reproducer (LLVM IR): ```bash                                                                                                                                                            │
+│ cat /tmp/test.ll                                                                                                                                                                         │
+│                                                                                                                                                                                          │
+│ ; Check that running LICM after SimpleLoopUnswitch does not result in a crash.                                                                                                           │
+│                                                                                                                                                                                          │
+│ define i32 @foo(i1 %arg, ptr %arg1) {                                                                                                                                                    │
+│ ;                                                                                                                                                                                        │
+│ start:                                                                                                                                                                                   │
+│   br label %loop                                                                                                                                                                         │
+│                                                                                                                                                                                          │
+│ loop:                                              ; preds = %loop, %bb                                                                                                                  │
+│   %i = select i1 %arg, ptr %arg1, ptr @bar                                                                                                                                               │
+│   %i3 = call i32 %i()                                                                                                                                                                    │
+│   br i1 %arg, label %loop, label %ret                                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ ret:                                              ; preds = %loop                                                                                                                        │
+│   ret i32 %i3                                                                                                                                                                            │
+│ }                                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│ declare i32 @bar() nounwind willreturn memory(none)                                                                                                                                      │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ LLVM's Symptom: ```bash                                                                                                                                                                  │
+│ /llvm-autofix/build/llvm-build/116809/bin/opt -passes=loop-mssa(simple-loop-unswitch<nontrivial>,licm) -verify-memoryssa -S /tmp/test.ll                                                 │
+│ Command '['bin/opt', '-passes=loop-mssa(simple-loop-unswitch<nontrivial>,licm)', '-verify-memoryssa', '-S', '-']' died with <Signals.SIGABRT: 6>.                                        │
+│                                                                                                                                                                                          │
+│ opt: llvm/lib/Analysis/MemorySSA.cpp:1732: llvm::MemoryUseOrDef* llvm::MemorySSA::createDefinedAccess(llvm::Instruction*, llvm::MemoryAccess*, const llvm::MemoryUseOrDef*, bool):       │
+│ Assertion `NewAccess != nullptr && "Tried to create a memory access for a " "non-memory touching instruction"' failed.                                                                   │
+│ PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/ and include the crash backtrace.                                                                              │
+│ Stack dump:                                                                                                                                                                              │
+│ 0.      Program arguments: bin/opt -passes=loop-mssa(simple-loop-unswitch<nontrivial>,licm) -verify-memoryssa -S -                                                                       │
+│ 1.      Running pass "function(loop-mssa(simple-loop-unswitch<nontrivial;trivial>,licm<allowspeculation>))" on module "<stdin>"                                                          │
+│ 2.      Running pass "loop-mssa(simple-loop-unswitch<nontrivial;trivial>,licm<allowspeculation>)" on function "foo"                                                                      │
+│  #0 0x00007f1fd6485c64 llvm::sys::PrintStackTrace(llvm::raw_ostream&, int) llvm/lib/Support/Unix/Signals.inc:723:22                                                                      │
+│  #1 0x00007f1fd648607b PrintStackTraceSignalHandler(void*) llvm/lib/Support/Unix/Signals.inc:798:1                                                                                       │
+│  #2 0x00007f1fd6482a6b llvm::sys::RunSignalHandlers() llvm/lib/Support/Signals.cpp:105:20                                                                                                │
+│  #3 0x00007f1fd6484d55 SignalHandler(int) llvm/lib/Support/Unix/Signals.inc:413:1                                                                                                        │
+│  #4 0x00007f1fd5fd6330 (/usr/lib/x86_64-linux-gnu/libc.so.6+0x45330)                                                                                                                     │
+│  #5 0x00007f1fd602fb2c pthread_kill (/usr/lib/x86_64-linux-gnu/libc.so.6+0x9eb2c)                                                                                                        │
+│  #6 0x00007f1fd5fd627e raise (/usr/lib/x86_64-linux-gnu/libc.so.6+0x4527e)                                                                                                               │
+│  #7 0x00007f1fd5fb98ff abort (/usr/lib/x86_64-linux-gnu/libc.so.6+0x288ff)                                                                                                               │
+│  #8 0x00007f1fd5fb981b (/usr/lib/x86_64-linux-gnu/libc.so.6+0x2881b)                                                                                                                     │
+│  #9 0x00007f1fd5fcc517 (/usr/lib/x86_64-linux-gnu/libc.so.6+0x3b517)                                                                                                                     │
+│ #10 0x00007f1fcc562747 llvm::MemorySSA::createDefinedAccess(llvm::Instruction*, llvm::MemoryAccess*, llvm::MemoryUseOrDef const*, bool) llvm/lib/Analysis/MemorySSA.cpp:1734:3           │
+│ #11 0x00007f1fcc58dad4 llvm::MemorySSAUpdater::createMemoryAccessInBB(llvm::Instruction*, llvm::MemoryAccess*, llvm::BasicBlock const*, llvm::MemorySSA::InsertionPlace)                 │
+│ llvm/lib/Analysis/MemorySSAUpdater.cpp:1407:56                                                                                                                                           │
+│ #12 0x00007f1fce5d2699 cloneInstructionInExitBlock(llvm::Instruction&, llvm::BasicBlock&, llvm::PHINode&, llvm::LoopInfo const*, llvm::LoopSafetyInfo const*, llvm::MemorySSAUpdater&)   │
+│ llvm/lib/Transforms/Scalar/LICM.cpp:1468:59                                                                                                                                              │
+│ #13 0x00007f1fce5d2d10 sinkThroughTriviallyReplaceablePHI(llvm::PHINode*, llvm::Instruction*, llvm::LoopInfo*, llvm::SmallDenseMap<llvm::BasicBlock*, llvm::Instruction*, 32u,           │
+│ llvm::DenseMapInfo<llvm::BasicBlock*, void>, llvm::detail::DenseMapPair<llvm::BasicBlock*, llvm::Instruction*>>&, llvm::LoopSafetyInfo const*, llvm::Loop const*,                        │
+│ llvm::MemorySSAUpdater&) llvm/lib/Transforms/Scalar/LICM.cpp:1536:62                                                                                                                     │
+│ #14 0x00007f1fce5d39cf sink(llvm::Instruction&, llvm::LoopInfo*, llvm::DominatorTree*, llvm::Loop const*, llvm::ICFLoopSafetyInfo*, llvm::MemorySSAUpdater&,                             │
+│ llvm::OptimizationRemarkEmitter*) llvm/lib/Transforms/Scalar/LICM.cpp:1724:58                                                                                                            │
+│ #15 0x00007f1fce5cdff0 llvm::sinkRegion(llvm::DomTreeNodeBase<llvm::BasicBlock>*, llvm::AAResults*, llvm::LoopInfo*, llvm::DominatorTree*, llvm::TargetLibraryInfo*,                     │
+│ llvm::TargetTransformInfo*, llvm::Loop*, llvm::MemorySSAUpdater&, llvm::ICFLoopSafetyInfo*, llvm::SinkAndHoistLICMFlags&, llvm::OptimizationRemarkEmitter*, llvm::Loop*)                 │
+│ llvm/lib/Transforms/Scalar/LICM.cpp:606:17                                                                                                                                               │
+│ #16 0x00007f1fce5cd5b2 (anonymous namespace)::LoopInvariantCodeMotion::runOnLoop(llvm::Loop*, llvm::AAResults*, llvm::LoopInfo*, llvm::DominatorTree*, llvm::AssumptionCache*,           │
+│ llvm::TargetLibraryInfo*, llvm::TargetTransformInfo*, llvm::ScalarEvolution*, llvm::MemorySSA*, llvm::OptimizationRemarkEmitter*, bool) llvm/lib/Transforms/Scalar/LICM.cpp:468:25       │
+│ #17 0x00007f1fce5cc62e llvm::LICMPass::run(llvm::Loop&, llvm::AnalysisManager<llvm::Loop, llvm::LoopStandardAnalysisResults&>&, llvm::LoopStandardAnalysisResults&, llvm::LPMUpdater&)   │
+│ llvm/lib/Transforms/Scalar/LICM.cpp:309:22                                                                                                                                               │
+│ #18 0x00007f1fd152f81b llvm::detail::PassModel<llvm::Loop, llvm::LICMPass, llvm::AnalysisManager<llvm::Loop, llvm::LoopStandardAnalysisResults&>, llvm::LoopStandardAnalysisResults&,    │
+│ llvm::LPMUpdater&>::run(llvm::Loop&, llvm::AnalysisManager<llvm::Loop, llvm::LoopStandardAnalysisResults&>&, llvm::LoopStandardAnalysisResults&, llvm::LPMUpdater&)                      │
+│ llvm/include/llvm/IR/PassManagerInternal.h:91:3                                                                                                                                          │
+│ #19 0x00007f1fce6719ab std::optional<llvm::PreservedAnalyses> llvm::PassManager<llvm::Loop, llvm::AnalysisManager<llvm::Loop, llvm::LoopStandardAnalysisResults&>,                       │
+│ llvm::LoopStandardAnalysisResults&, llvm::LPMUpdater&>::runSinglePass<llvm::Loop, std::unique_ptr<llvm::detail::PassConcept<llvm::Loop, llvm::AnalysisManager<llvm::Loop,                │
+│ llvm::LoopStandardAnalysisResults&>, llvm::LoopStandardAnalysisResults&, llvm::LPMUpdater&>, std::default_delete<llvm::detail::PassConcept<llvm::Loop, llvm::AnalysisManager<llvm::Loop, │
+│ llvm::LoopStandardAnalysisResults&>, llvm::LoopStandardAnalysisResults&, llvm::LPMUpdater&>>>>(llvm::Loop&, std::unique_ptr<llvm::detail::PassConcept<llvm::Loop,                        │
+│ llvm::AnalysisManager<llvm::Loop, llvm::LoopStandardAnalysisResults&>, llvm::LoopStandardAnalysisResults&, llvm::LPMUpdater&>, std::default_delete<llvm::detail::PassConcept<llvm::Loop, │
+│ llvm::AnalysisManager<llvm::Loop, llvm::LoopStandardAnalysisResults&>, llvm::LoopStandardAnalysisResults&, llvm::LPMUpdater&>>>&, llvm::AnalysisManager<llvm::Loop,                      │
+│ llvm::LoopStandardAnalysisResults&>&, llvm::LoopStandardAnalysisResults&, llvm::LPMUpdater&, llvm::PassInstrumentation&) llvm/include/llvm/Transforms/Scalar/LoopPassManager.h:378:24    │
+│ #20 0x00007f1fce67007f llvm::PassManager<llvm::Loop, llvm::AnalysisManager<llvm::Loop, llvm::LoopStandardAnalysisResults&>, llvm::LoopStandardAnalysisResults&,                          │
+│ llvm::LPMUpdater&>::runWithoutLoopNestPasses(llvm::Loop&, llvm::AnalysisManager<llvm::Loop, llvm::LoopStandardAnalysisResults&>&, llvm::LoopStandardAnalysisResults&, llvm::LPMUpdater&) │
+│ llvm/lib/Transforms/Scalar/LoopPassManager.cpp:160:45                                                                                                                                    │
+│ #21 0x00007f1fce66f5ce llvm::PassManager<llvm::Loop, llvm::AnalysisManager<llvm::Loop, llvm::LoopStandardAnalysisResults&>, llvm::LoopStandardAnalysisResults&,                          │
+│ llvm::LPMUpdater&>::run(llvm::Loop&, llvm::AnalysisManager<llvm::Loop, llvm::LoopStandardAnalysisResults&>&, llvm::LoopStandardAnalysisResults&, llvm::LPMUpdater&)                      │
+│ llvm/lib/Transforms/Scalar/LoopPassManager.cpp:40:38                                                                                                                                     │
+│ #22 0x00007f1fd15469af llvm::detail::PassModel<llvm::Loop, llvm::PassManager<llvm::Loop, llvm::AnalysisManager<llvm::Loop, llvm::LoopStandardAnalysisResults&>,                          │
+│ llvm::LoopStandardAnalysisResults&, llvm::LPMUpdater&>, llvm::AnalysisManager<llvm::Loop, llvm::LoopStandardAnalysisResults&>, llvm::LoopStandardAnalysisResults&,                       │
+│ llvm::LPMUpdater&>::run(llvm::Loop&, llvm::AnalysisManager<llvm::Loop, llvm::LoopStandardAnalysisResults&>&, llvm::LoopStandardAnalysisResults&, llvm::LPMUpdater&)                      │
+│ llvm/include/llvm/IR/PassManagerInternal.h:91:3                                                                                                                                          │
+│ #23 0x00007f1fce6709ce llvm::FunctionToLoopPassAdaptor::run(llvm::Function&, llvm::AnalysisManager<llvm::Function>&) llvm/lib/Transforms/Scalar/LoopPassManager.cpp:305:32               │
+│ #24 0x00007f1fd518bd2d llvm::detail::PassModel<llvm::Function, llvm::FunctionToLoopPassAdaptor, llvm::AnalysisManager<llvm::Function>>::run(llvm::Function&,                             │
+│ llvm::AnalysisManager<llvm::Function>&) llvm/include/llvm/IR/PassManagerInternal.h:91:3                                                                                                  │
+│ #25 0x00007f1fcb885a29 llvm::PassManager<llvm::Function, llvm::AnalysisManager<llvm::Function>>::run(llvm::Function&, llvm::AnalysisManager<llvm::Function>&)                            │
+│ llvm/include/llvm/IR/PassManagerImpl.h:85:18                                                                                                                                             │
+│ #26 0x00007f1fd518dcf3 llvm::detail::PassModel<llvm::Function, llvm::PassManager<llvm::Function, llvm::AnalysisManager<llvm::Function>>,                                                 │
+│ llvm::AnalysisManager<llvm::Function>>::run(llvm::Function&, llvm::AnalysisManager<llvm::Function>&) llvm/include/llvm/IR/PassManagerInternal.h:91:3                                     │
+│ #27 0x00007f1fcb888348 llvm::ModuleToFunctionPassAdaptor::run(llvm::Module&, llvm::AnalysisManager<llvm::Module>&) llvm/lib/IR/PassManager.cpp:129:23                                    │
+│ #28 0x00007f1fd518dc23 llvm::detail::PassModel<llvm::Module, llvm::ModuleToFunctionPassAdaptor, llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&,                                 │
+│ llvm::AnalysisManager<llvm::Module>&) llvm/include/llvm/IR/PassManagerInternal.h:91:3                                                                                                    │
+│ #29 0x00007f1fcb885655 llvm::PassManager<llvm::Module, llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&, llvm::AnalysisManager<llvm::Module>&)                                    │
+│ llvm/include/llvm/IR/PassManagerImpl.h:85:18                                                                                                                                             │
+│ #30 0x00007f1fd6642583 llvm::runPassPipeline(llvm::StringRef, llvm::Module&, llvm::TargetMachine*, llvm::TargetLibraryInfoImpl*, llvm::ToolOutputFile*, llvm::ToolOutputFile*,           │
+│ llvm::ToolOutputFile*, llvm::StringRef, llvm::ArrayRef<llvm::PassPlugin>, llvm::ArrayRef<std::function<void (llvm::PassBuilder&)>>, llvm::opt_tool::OutputKind,                          │
+│ llvm::opt_tool::VerifierKind, bool, bool, bool, bool, bool, bool, bool) llvm/tools/opt/NewPMDriver.cpp:541:10                                                                            │
+│ #31 0x00007f1fd667924c optMain llvm/tools/opt/optdriver.cpp:739:27                                                                                                                       │
+│ #32 0x000056486afa11e8 main llvm/tools/opt/opt.cpp:25:64                                                                                                                                 │
+│ #33 0x00007f1fd5fbb1ca (/usr/lib/x86_64-linux-gnu/libc.so.6+0x2a1ca)                                                                                                                     │
+│ #34 0x00007f1fd5fbb28b __libc_start_main (/usr/lib/x86_64-linux-gnu/libc.so.6+0x2a28b)                                                                                                   │
+│ #35 0x000056486afa10a5 _start (bin/opt+0x10a5)                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ ```                                                                                                                                                                                      │
+│ ------  END ISSUE  ------                                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ You can execute bash commands and edit files to implement the necessary changes.                                                                                                         │
+│                                                                                                                                                                                          │
+│ ## Recommended Workflow                                                                                                                                                                  │
+│                                                                                                                                                                                          │
+│ This workflows should be done step-by-step so that you can iterate on your changes and any possible problems.                                                                            │
+│                                                                                                                                                                                          │
+│ 1. Analyze the codebase by finding and reading relevant files                                                                                                                            │
+│ 2. Edit the source code to resolve the issue                                                                                                                                             │
+│ 3. Verify your fix works by running the `submit-patch` command                                                                                                                           │
+│ 4. Based on the output of `submit-patch`, repeat steps 1-3 as necessary until the issue is resolved                                                                                      │
+│                                                                                                                                                                                          │
+│ ## Important Rules                                                                                                                                                                       │
+│                                                                                                                                                                                          │
+│ 1. Every response must contain exactly one action                                                                                                                                        │
+│ 2. The action must be enclosed in triple backticks                                                                                                                                       │
+│ 3. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.                                                                             │
+│    However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files                                           │
+│ 4. Solving this issue does not require deleting any files or accessing the internet, so you are not permitted to use tools such as: rm, curl, wget, git, ssh, scp, ftp, telnet, ping,    │
+│ traceroute, nslookup, dig, nmap, apt, apt-get, yum, dnf, pacman, brew.                                                                                                                   │
+│                                                                                                                                                                                          │
+│ <system_information>                                                                                                                                                                     │
+│ Linux 5.15.0-143-generic #153-Ubuntu SMP Fri Jun 13 19:10:45 UTC 2025 x86_64                                                                                                             │
+│ </system_information>                                                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ ## Formatting your response                                                                                                                                                              │
+│                                                                                                                                                                                          │
+│ Here is an example of a correct response:                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ <example_response>                                                                                                                                                                       │
+│ THOUGHT: I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.                 │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ ls -la                                                                                                                                                                                   │
+│ ```                                                                                                                                                                                      │
+│ </example_response>                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ## Useful command examples                                                                                                                                                               │
+│                                                                                                                                                                                          │
+│ ### Create a new file:                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ cat <<'EOF' > newfile.py                                                                                                                                                                 │
+│ import numpy as np                                                                                                                                                                       │
+│ hello = "world"                                                                                                                                                                          │
+│ print(hello)                                                                                                                                                                             │
+│ EOF                                                                                                                                                                                      │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### Edit files with sed:```bash                                                                                                                                                          │
+│ # Replace all occurrences                                                                                                                                                                │
+│ sed -i 's/old_string/new_string/g' filename.py                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ # Replace only first occurrence                                                                                                                                                          │
+│ sed -i 's/old_string/new_string/' filename.py                                                                                                                                            │
+│                                                                                                                                                                                          │
+│ # Replace first occurrence on line 1                                                                                                                                                     │
+│ sed -i '1s/old_string/new_string/' filename.py                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ # Replace all occurrences in lines 1-10                                                                                                                                                  │
+│ sed -i '1,10s/old_string/new_string/g' filename.py                                                                                                                                       │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### View file content:                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ # View specific lines with numbers                                                                                                                                                       │
+│ nl -ba filename.py | sed -n '10,20p'                                                                                                                                                     │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### Submit your patch:                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ # This command has no arguments                                                                                                                                                          │
+│ submit-patch                                                                                                                                                                             │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### Any other permitted command you want to run:                                                                                                                                         │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ anything                                                                                                                                                                                 │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #0, chat statistics so far: {'chat_rounds': 0, 'input_tokens': 0, 'cached_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}
+╭─ assistant [MainThread@318709] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ The user wants me to fix a crash in the LLVM optimizer.                                                                                                                                  │
+│                                                                                                                                                                                          │
+│ **1. Analyze the Crash Report**                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ *   **Command:** `opt -passes=loop-mssa(simple-loop-unswitch<nontrivial>,licm) -verify-memoryssa -S /tmp/test.ll`                                                                        │
+│ *   **Symptom:** `Assertion 'NewAccess != nullptr && "Tried to create a memory access for a non-memory touching instruction"' failed.`                                                   │
+│ *   **Location:** `llvm::MemorySSA::createDefinedAccess` in `llvm/lib/Analysis/MemorySSA.cpp`.                                                                                           │
+│ *   **Stack Trace:** The crash occurs within the `licm` pass, specifically when it's trying to `sink` an instruction. The call chain is `sink` -> `sinkThroughTriviallyReplaceablePHI`   │
+│ -> `cloneInstructionInExitBlock` -> `MemorySSAUpdater::createMemoryAccessInBB`.                                                                                                          │
+│ *   **Reproducer IR:** The IR contains a loop with a `select` instruction choosing a function pointer, followed by an indirect `call`. The loop's control flow also depends on the same  │
+│ condition as the `select`.                                                                                                                                                               │
+│                                                                                                                                                                                          │
+│ **2. Root Cause Analysis**                                                                                                                                                               │
+│                                                                                                                                                                                          │
+│ 1.  `simple-loop-unswitch` runs first. It sees the loop-invariant condition `%arg` and creates two versions of the loop.                                                                 │
+│     *   In the "false" version, the `select` `select i1 %arg, ptr %arg1, ptr @bar` is constant-folded into `@bar`. The `call` becomes `call i32 @bar()`. The function `@bar` is declared │
+│ as `memory(none)`, meaning it does not access memory.                                                                                                                                    │
+│ 2.  `licm` runs next. It identifies the `call i32 @bar()` instruction as loop-invariant.                                                                                                 │
+│ 3.  `licm`'s `sink` logic determines that this call can be sunk out of the loop into the exit block (`ret`).                                                                             │
+│ 4.  The sinking process involves cloning the instruction into the exit block. The function `cloneInstructionInExitBlock` is called.                                                      │
+│ 5.  Inside `cloneInstructionInExitBlock`, there's a call to `MSSA.createMemoryAccessInBB` to update MemorySSA for the newly cloned instruction.                                          │
+│ 6.  `MemorySSAUpdater::createMemoryAccessInBB` calls `MemorySSA::createDefinedAccess` because the original instruction (`call i32 @bar()`) is a `CallInst`.                              │
+│ 7.  `MemorySSA::createDefinedAccess` asserts that the instruction it's given must be a memory-touching instruction. However, the `call i32 @bar()` is not, because `@bar` is marked      │
+│ `memory(none)`. This mismatch causes the assertion to fire.                                                                                                                              │
+│                                                                                                                                                                                          │
+│ The core problem is that `cloneInstructionInExitBlock` unconditionally tries to create a MemorySSA access for any cloned `CallInst`, without first checking if the call actually         │
+│ accesses memory.                                                                                                                                                                         │
+│                                                                                                                                                                                          │
+│ **3. Proposing a Fix**                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ The fix is to modify `cloneInstructionInExitBlock` in `llvm/lib/Transforms/Scalar/LICM.cpp`. Before calling `MSSA->createMemoryAccessInBB`, we must add a check to ensure the            │
+│ instruction being cloned actually has memory-modifying behavior. The `Instruction::mayReadOrWriteMemory()` method is perfect for this.                                                   │
+│                                                                                                                                                                                          │
+│ The relevant code snippet in `cloneInstructionInExitBlock` looks like this:                                                                                                              │
+│                                                                                                                                                                                          │
+│ ```cpp                                                                                                                                                                                   │
+│   // Create a new memory access in the exit block.                                                                                                                                       │
+│   if (MSSA && isa<CallInst>(I))                                                                                                                                                          │
+│     MSSA->createMemoryAccessInExitBlock(NewInst, MSSA->getMemoryAccess(&I));                                                                                                             │
+│ ```                                                                                                                                                                                      │
+│ *(Note: The original report's stack trace points to a slightly different call `createMemoryAccessInBB`, but the logic and location are similar. The core issue is the unconditional      │
+│ creation of a memory access for a call.)*                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ Looking at the current `LICM.cpp`, the code is:                                                                                                                                          │
+│ ```cpp                                                                                                                                                                                   │
+│   // Create a new memory access in the exit block.                                                                                                                                       │
+│   if (MSSA && isa<CallInst>(I))                                                                                                                                                          │
+│     MSSA->createMemoryAccessInBB(NewInst, nullptr, ExitBB,                                                                                                                               │
+│                                  MemorySSA::Beginning);                                                                                                                                  │
+│ ```                                                                                                                                                                                      │
+│ This needs to be guarded. The correct logic is: if we have a `MemorySSAUpdater` (`MSSA`) and the instruction `I` might access memory, then we should update MemorySSA.                   │
+│                                                                                                                                                                                          │
+│ The corrected code should be:                                                                                                                                                            │
+│ ```cpp                                                                                                                                                                                   │
+│   // Create a new memory access in the exit block.                                                                                                                                       │
+│   if (MSSA && I.mayReadOrWriteMemory())                                                                                                                                                  │
+│     MSSA->createMemoryAccessInBB(NewInst, nullptr, ExitBB,                                                                                                                               │
+│                                  MemorySSA::Beginning);                                                                                                                                  │
+│ ```                                                                                                                                                                                      │
+│ This change ensures that we only attempt to create MemorySSA nodes for instructions that are known to interact with memory, preventing the assertion failure. I will apply this change   │
+│ using `sed`.                                                                                                                                                                             │
+│                                                                                                                                                                                          │
+│ First, I'll locate the file.                                                                                                                                                             │
+│ ```bash                                                                                                                                                                                  │
+│ find . -name "LICM.cpp"                                                                                                                                                                  │
+│ ```                                                                                                                                                                                      │
+│ This will likely be in `llvm/lib/Transforms/Scalar/LICM.cpp`.                                                                                                                            │
+│                                                                                                                                                                                          │
+│ Then, I'll apply the `sed` command to replace the faulty line with the corrected one.                                                                                                    │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ sed -i "s/if (MSSA && isa<CallInst>(I))/if (MSSA \&\& I.mayReadOrWriteMemory())/" llvm/lib/Transforms/Scalar/LICM.cpp                                                                    │
+│ ```                                                                                                                                                                                      │
+│ This seems correct and directly addresses the identified root cause.                                                                                                                     │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ sed -i "s/if (MSSA && isa<CallInst>(I))/if (MSSA \&\& I.mayReadOrWriteMemory())/g" llvm/lib/Transforms/Scalar/LICM.cpp                                                                   │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@318709] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Please always provide EXACTLY ONE action in triple backticks, found 3 actions.                                                                                                           │
+│ If you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`                                                                            │
+│ without any other command.                                                                                                                                                               │
+│ Else, please format your response exactly as follows:                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ <response_example>                                                                                                                                                                       │
+│ Here are some thoughts about why you want to perform the action.                                                                                                                         │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ <action>                                                                                                                                                                                 │
+│ ```                                                                                                                                                                                      │
+│ </response_example>                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ Note: In rare cases, if you need to reference a similar format in your command, you might have                                                                                           │
+│ to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.                                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #1, chat statistics so far: {'chat_rounds': 1, 'input_tokens': 4370, 'cached_tokens': 0, 'output_tokens': 1242, 'total_tokens': 6611}
+╭─ assistant [MainThread@318709] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ The crash occurs in LICM after SimpleLoopUnswitch. The unswitch pass creates a version of the loop where a `call` instruction becomes a call to a `memory(none)` function. LICM then     │
+│ tries to sink this call. When sinking, it calls `cloneInstructionInExitBlock`, which attempts to update MemorySSA for the cloned instruction. The function                               │
+│ `MemorySSA::createDefinedAccess` is called, which asserts because the instruction does not actually access memory.                                                                       │
+│                                                                                                                                                                                          │
+│ The stack trace points to `cloneInstructionInExitBlock` in `LICM.cpp`. Inside this function, there's a check `if (MSSA && isa<CallInst>(I))` before creating a new memory access. This   │
+│ check is insufficient because not all `CallInst` instructions access memory.                                                                                                             │
+│                                                                                                                                                                                          │
+│ The fix is to replace `isa<CallInst>(I)` with a more precise check, `I.mayReadOrWriteMemory()`, which correctly identifies instructions that interact with memory. This will prevent the │
+│ call to `createMemoryAccessInBB` for non-memory-accessing instructions, thus avoiding the assertion.                                                                                     │
+│                                                                                                                                                                                          │
+│ I will use `sed` to replace the incorrect condition with the correct one in `llvm/lib/Transforms/Scalar/LICM.cpp`.                                                                       │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ sed -i 's/if (MSSA && isa<CallInst>(I))/if (MSSA \&\& I.mayReadOrWriteMemory())/' llvm/lib/Transforms/Scalar/LICM.cpp                                                                    │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@318709] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #2, chat statistics so far: {'chat_rounds': 2, 'input_tokens': 10127, 'cached_tokens': 4062, 'output_tokens': 1553, 'total_tokens': 12973}
+╭─ assistant [MainThread@318709] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ The `sed` command executed successfully. Now I need to verify that the fix works. I will use the `submit-patch` command, which will compile the modified code and run the reproducer     │
+│ test case against it. This will confirm whether the crash is resolved.THOUGHT                                                                                                            │
+│ The `sed` command has been applied to patch `LICM.cpp`. The next step is to verify the fix. I will use the `submit-patch` command to build LLVM with my change and run the provided test │
+│ case. This will confirm if the crash is resolved.                                                                                                                                        │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ submit-patch                                                                                                                                                                             │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@318709] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>1</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ FAILURE                                                                                                                                                                                  │
+│                                                                                                                                                                                          │
+│ No patches found. Before testing, please preview your changes first.</output>                                                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #3, chat statistics so far: {'chat_rounds': 3, 'input_tokens': 16212, 'cached_tokens': 8119, 'output_tokens': 1680, 'total_tokens': 19185}
+╭─ assistant [MainThread@318709] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ I previously attempted to submit the patch, but it failed with "No patches found. Before testing, please preview your changes first." This suggests that my previous `sed` command might │
+│ not have been registered as a change, or I am missing a step. I will first verify that my change was correctly applied to the file by searching for the new code string within           │
+│ `LICM.cpp`. This will confirm whether the `sed` command was successful before I try to figure out the submission process again.                                                          │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ grep "I.mayReadOrWriteMemory()" llvm/lib/Transforms/Scalar/LICM.cpp                                                                                                                      │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@318709] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│   assert(!I.mayReadOrWriteMemory() && "unhandled aliasing");                                                                                                                             │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #4, chat statistics so far: {'chat_rounds': 4, 'input_tokens': 22455, 'cached_tokens': 12170, 'output_tokens': 1811, 'total_tokens': 26537}
+╭─ assistant [MainThread@318709] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ My previous `grep` command was not specific enough and found an unrelated line. This doesn't confirm whether my `sed` command worked or not. I need to inspect the contents of the       │
+│ `cloneInstructionInExitBlock` function in `llvm/lib/Transforms/Scalar/LICM.cpp` to see if the `if (MSSA && isa<CallInst>(I))` line was actually changed. This will give me a clear       │
+│ picture of the file's current state and help me understand why the patch submission failed.                                                                                              │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ nl -ba llvm/lib/Transforms/Scalar/LICM.cpp | sed -n '/^static void cloneInstructionInExitBlock/,/}/p' | grep "createMemoryAccessInBB" -B 2                                               │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@318709] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>1</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #5, chat statistics so far: {'chat_rounds': 5, 'input_tokens': 28865, 'cached_tokens': 18240, 'output_tokens': 1974, 'total_tokens': 33457}
+╭─ assistant [MainThread@318709] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ My previous `grep` command failed to find the target line, which is strange. It's possible the `sed` command from two steps ago did not actually modify the file, or my `grep` pattern   │
+│ was incorrect. I need to re-verify the state of the file.                                                                                                                                │
+│                                                                                                                                                                                          │
+│ I will try a more robust way to view the relevant code block. I'll search for the function `cloneInstructionInExitBlock` and print the 20 lines following it. This should be enough      │
+│ context to see the `if` condition that I intended to change and determine if it was successfully modified.                                                                               │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ grep -A 20 "cloneInstructionInExitBlock" llvm/lib/Transforms/Scalar/LICM.cpp                                                                                                             │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@318709] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ static Instruction *cloneInstructionInExitBlock(                                                                                                                                         │
+│     Instruction &I, BasicBlock &ExitBlock, PHINode &PN, const LoopInfo *LI,                                                                                                              │
+│     const LoopSafetyInfo *SafetyInfo, MemorySSAUpdater &MSSAU);                                                                                                                          │
+│                                                                                                                                                                                          │
+│ static void eraseInstruction(Instruction &I, ICFLoopSafetyInfo &SafetyInfo,                                                                                                              │
+│                              MemorySSAUpdater &MSSAU);                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ static void moveInstructionBefore(Instruction &I, BasicBlock::iterator Dest,                                                                                                             │
+│                                   ICFLoopSafetyInfo &SafetyInfo,                                                                                                                         │
+│                                   MemorySSAUpdater &MSSAU, ScalarEvolution *SE);                                                                                                         │
+│                                                                                                                                                                                          │
+│ static void foreachMemoryAccess(MemorySSA *MSSA, Loop *L,                                                                                                                                │
+│                                 function_ref<void(Instruction *)> Fn);                                                                                                                   │
+│ using PointersAndHasReadsOutsideSet =                                                                                                                                                    │
+│     std::pair<SmallSetVector<Value *, 8>, bool>;                                                                                                                                         │
+│ static SmallVector<PointersAndHasReadsOutsideSet, 0>                                                                                                                                     │
+│ collectPromotionCandidates(MemorySSA *MSSA, AliasAnalysis *AA, Loop *L);                                                                                                                 │
+│                                                                                                                                                                                          │
+│ namespace {                                                                                                                                                                              │
+│ struct LoopInvariantCodeMotion {                                                                                                                                                         │
+│   bool runOnLoop(Loop *L, AAResults *AA, LoopInfo *LI, DominatorTree *DT,                                                                                                                │
+│ --                                                                                                                                                                                       │
+│ static Instruction *cloneInstructionInExitBlock(                                                                                                                                         │
+│     Instruction &I, BasicBlock &ExitBlock, PHINode &PN, const LoopInfo *LI,                                                                                                              │
+│     const LoopSafetyInfo *SafetyInfo, MemorySSAUpdater &MSSAU) {                                                                                                                         │
+│   Instruction *New;                                                                                                                                                                      │
+│   if (auto *CI = dyn_cast<CallInst>(&I)) {                                                                                                                                               │
+│     const auto &BlockColors = SafetyInfo->getBlockColors();                                                                                                                              │
+│                                                                                                                                                                                          │
+│     // Sinking call-sites need to be handled differently from other                                                                                                                      │
+│     // instructions.  The cloned call-site needs a funclet bundle operand                                                                                                                │
+│     // appropriate for its location in the CFG.                                                                                                                                          │
+│     SmallVector<OperandBundleDef, 1> OpBundles;                                                                                                                                          │
+│     for (unsigned BundleIdx = 0, BundleEnd = CI->getNumOperandBundles();                                                                                                                 │
+│          BundleIdx != BundleEnd; ++BundleIdx) {                                                                                                                                          │
+│       OperandBundleUse Bundle = CI->getOperandBundleAt(BundleIdx);                                                                                                                       │
+│       if (Bundle.getTagID() == LLVMContext::OB_funclet)                                                                                                                                  │
+│         continue;                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│       OpBundles.emplace_back(Bundle);                                                                                                                                                    │
+│     }                                                                                                                                                                                    │
+│                                                                                                                                                                                          │
+│     if (!BlockColors.empty()) {                                                                                                                                                          │
+│ --                                                                                                                                                                                       │
+│     New = SunkCopies[ExitBlock] = cloneInstructionInExitBlock(                                                                                                                           │
+│         *I, *ExitBlock, *TPN, LI, SafetyInfo, MSSAU);                                                                                                                                    │
+│   return New;                                                                                                                                                                            │
+│ }                                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│ static bool canSplitPredecessors(PHINode *PN, LoopSafetyInfo *SafetyInfo) {                                                                                                              │
+│   BasicBlock *BB = PN->getParent();                                                                                                                                                      │
+│   if (!BB->canSplitPredecessors())                                                                                                                                                       │
+│     return false;                                                                                                                                                                        │
+│   // It's not impossible to split EHPad blocks, but if BlockColors already exist                                                                                                         │
+│   // it require updating BlockColors for all offspring blocks accordingly. By                                                                                                            │
+│   // skipping such corner case, we can make updating BlockColors after splitting                                                                                                         │
+│   // predecessor fairly simple.                                                                                                                                                          │
+│   if (!SafetyInfo->getBlockColors().empty() && BB->getFirstNonPHI()->isEHPad())                                                                                                          │
+│     return false;                                                                                                                                                                        │
+│   for (BasicBlock *BBPred : predecessors(BB)) {                                                                                                                                          │
+│     if (isa<IndirectBrInst>(BBPred->getTerminator()))                                                                                                                                    │
+│       return false;                                                                                                                                                                      │
+│   }                                                                                                                                                                                      │
+│   return true;                                                                                                                                                                           │
+│ }                                                                                                                                                                                        │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #6, chat statistics so far: {'chat_rounds': 6, 'input_tokens': 35455, 'cached_tokens': 24303, 'output_tokens': 2130, 'total_tokens': 40380}
+╭─ assistant [MainThread@318709] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ My previous attempts to locate the code to be patched were not precise enough. The stack trace indicates the relevant code is in `llvm/lib/Transforms/Scalar/LICM.cpp` around line 1468, │
+│ inside a function called `cloneInstructionInExitBlock`. My previous `grep` commands were not specific enough and did not show the correct function body.                                 │
+│                                                                                                                                                                                          │
+│ I need to examine the file content at the exact location indicated by the stack trace to confirm the code structure before attempting another modification. This will ensure my `sed`    │
+│ command has the correct pattern to match. I will display the lines from 1460 to 1480 of `llvm/lib/Transforms/Scalar/LICM.cpp`.                                                           │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ nl -ba llvm/lib/Transforms/Scalar/LICM.cpp | sed -n '1460,1480p'                                                                                                                         │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@318709] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│   1460    }                                                                                                                                                                              │
+│   1461                                                                                                                                                                                   │
+│   1462    New->insertInto(&ExitBlock, ExitBlock.getFirstInsertionPt());                                                                                                                  │
+│   1463    if (!I.getName().empty())                                                                                                                                                      │
+│   1464      New->setName(I.getName() + ".le");                                                                                                                                           │
+│   1465                                                                                                                                                                                   │
+│   1466    if (MSSAU.getMemorySSA()->getMemoryAccess(&I)) {                                                                                                                               │
+│   1467      // Create a new MemoryAccess and let MemorySSA set its defining access.                                                                                                      │
+│   1468      MemoryAccess *NewMemAcc = MSSAU.createMemoryAccessInBB(                                                                                                                      │
+│   1469          New, nullptr, New->getParent(), MemorySSA::Beginning);                                                                                                                   │
+│   1470      if (NewMemAcc) {                                                                                                                                                             │
+│   1471        if (auto *MemDef = dyn_cast<MemoryDef>(NewMemAcc))                                                                                                                         │
+│   1472          MSSAU.insertDef(MemDef, /*RenameUses=*/true);                                                                                                                            │
+│   1473        else {                                                                                                                                                                     │
+│   1474          auto *MemUse = cast<MemoryUse>(NewMemAcc);                                                                                                                               │
+│   1475          MSSAU.insertUse(MemUse, /*RenameUses=*/true);                                                                                                                            │
+│   1476        }                                                                                                                                                                          │
+│   1477      }                                                                                                                                                                            │
+│   1478    }                                                                                                                                                                              │
+│   1479                                                                                                                                                                                   │
+│   1480    // Build LCSSA PHI nodes for any in-loop operands (if legal).  Note that                                                                                                       │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #7, chat statistics so far: {'chat_rounds': 7, 'input_tokens': 42960, 'cached_tokens': 30367, 'output_tokens': 2320, 'total_tokens': 49073}
+╭─ assistant [MainThread@318709] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ Okay, the file content is different from what I initially assumed based on older versions of LLVM. The relevant code block is:                                                           │
+│                                                                                                                                                                                          │
+│ ```cpp                                                                                                                                                                                   │
+│   1466    if (MSSAU.getMemorySSA()->getMemoryAccess(&I)) {                                                                                                                               │
+│   1467      // Create a new MemoryAccess and let MemorySSA set its defining access.                                                                                                      │
+│   1468      MemoryAccess *NewMemAcc = MSSAU.createMemoryAccessInBB(                                                                                                                      │
+│   1469          New, nullptr, New->getParent(), MemorySSA::Beginning);                                                                                                                   │
+│   1470      if (NewMemAcc) {                                                                                                                                                             │
+│   ...                                                                                                                                                                                    │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ The check `MSSAU.getMemorySSA()->getMemoryAccess(&I)` is the problem. This checks if a `MemoryAccess` *already exists* for the original instruction `I`. In the case of the              │
+│ `memory(none)` call, no `MemoryAccess` was created for it in the first place, so this check correctly returns `nullptr`, and the block is skipped.                                       │
+│                                                                                                                                                                                          │
+│ However, the stack trace shows a crash inside `createMemoryAccessInBB`, which is called from `cloneInstructionInExitBlock`. This implies that under some circumstances, the code path    │
+│ *is* taken. Let's re-examine the stack trace.                                                                                                                                            │
+│                                                                                                                                                                                          │
+│ `#11 0x... llvm::MemorySSAUpdater::createMemoryAccessInBB(llvm::Instruction*, llvm::MemoryAccess*, llvm::BasicBlock const*, llvm::MemorySSA::InsertionPlace)                             │
+│ llvm/lib/Analysis/MemorySSAUpdater.cpp:1407:56`                                                                                                                                          │
+│ `#12 0x... cloneInstructionInExitBlock(...) llvm/lib/Transforms/Scalar/LICM.cpp:1468:59`                                                                                                 │
+│                                                                                                                                                                                          │
+│ This confirms the call site. The stack trace is from a slightly different version of LLVM than the one I'm looking at, which is a common problem. The logic I'm seeing (`if              │
+│ (MSSAU.getMemorySSA()->getMemoryAccess(&I))`) seems like it *should* prevent the crash. But the crash *is* happening.                                                                    │
+│                                                                                                                                                                                          │
+│ Let's look at the reproducer again.                                                                                                                                                      │
+│ `simple-loop-unswitch` runs, then `licm`.                                                                                                                                                │
+│ The call is `call i32 %i()`. `%i` is a `select`.                                                                                                                                         │
+│ After unswitching, one path has `call i32 @bar()`. `@bar` is `memory(none)`.                                                                                                             │
+│ LICM tries to sink this.                                                                                                                                                                 │
+│                                                                                                                                                                                          │
+│ The problem is that `sink` calls `cloneInstructionInExitBlock`. The stack trace shows `sink` -> `sinkThroughTriviallyReplaceablePHI` -> `cloneInstructionInExitBlock`.                   │
+│                                                                                                                                                                                          │
+│ Let's look at `sinkThroughTriviallyReplaceablePHI`.                                                                                                                                      │
+│ ```cpp                                                                                                                                                                                   │
+│ // llvm/lib/Transforms/Scalar/LICM.cpp                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ static Instruction *sinkThroughTriviallyReplaceablePHI(...) {                                                                                                                            │
+│ ...                                                                                                                                                                                      │
+│     // Clone the instruction and sink it to the exit block.                                                                                                                              │
+│     New = SunkCopies[ExitBlock] = cloneInstructionInExitBlock(                                                                                                                           │
+│         *I, *ExitBlock, *TPN, LI, SafetyInfo, MSSAU);                                                                                                                                    │
+│ ...                                                                                                                                                                                      │
+│ }                                                                                                                                                                                        │
+│ ```                                                                                                                                                                                      │
+│ This calls `cloneInstructionInExitBlock`.                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ The code I'm seeing in `cloneInstructionInExitBlock` is:                                                                                                                                 │
+│ ```cpp                                                                                                                                                                                   │
+│ if (MSSAU.getMemorySSA()->getMemoryAccess(&I)) {                                                                                                                                         │
+│   MemoryAccess *NewMemAcc = MSSAU.createMemoryAccessInBB(...)                                                                                                                            │
+│ ```                                                                                                                                                                                      │
+│ This seems like it should be safe. If `getMemoryAccess(&I)` is null, it shouldn't enter the `if`. If it's not null, then `I` is a memory instruction, and creating a new access should   │
+│ be fine.                                                                                                                                                                                 │
+│                                                                                                                                                                                          │
+│ Perhaps the issue is that `simple-loop-unswitch` is not correctly updating/invalidating MemorySSA. When `licm` runs, MemorySSA might have stale information about the original `call i32 │
+│ %i()`, which *did* access memory. After unswitching, the new instruction `call i32 @bar()` does not, but `getMemoryAccess` might still be returning a non-null (but now invalid)         │
+│ `MemoryAccess` associated with the original instruction `I`.                                                                                                                             │
+│                                                                                                                                                                                          │
+│ The assertion is `NewAccess != nullptr && "Tried to create a memory access for a non-memory touching instruction"`. This happens inside `MemorySSA::createDefinedAccess`.                │
+│ `createMemoryAccessInBB` calls this. `createDefinedAccess` internally calls `getMemoryAccessFactory().create`, which returns `nullptr` for non-memory instructions, triggering the       │
+│ assertion.                                                                                                                                                                               │
+│                                                                                                                                                                                          │
+│ So, the check in `cloneInstructionInExitBlock` is insufficient. Even if `getMemoryAccess(&I)` returns something, the *new* instruction `New` (which is a clone of `I` but might have     │
+│ been simplified, e.g. indirect call to direct call) might not be a memory instruction.                                                                                                   │
+│                                                                                                                                                                                          │
+│ The correct fix is to check the instruction *before* trying to create a memory access for it. The check `I.mayReadOrWriteMemory()` is the right one. The code I'm looking at seems to    │
+│ have a different check.                                                                                                                                                                  │
+│                                                                                                                                                                                          │
+│ Let's try to find the code from the stack trace again.                                                                                                                                   │
+│ `#12 0x... cloneInstructionInExitBlock(...) llvm/lib/Transforms/Scalar/LICM.cpp:1468:59`                                                                                                 │
+│ `#13 0x... sinkThroughTriviallyReplaceablePHI(...) llvm/lib/Transforms/Scalar/LICM.cpp:1536:62`                                                                                          │
+│                                                                                                                                                                                          │
+│ The line numbers are slightly different. Let's look at `sinkThroughTriviallyReplaceablePHI` around line 1536.                                                                            │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ nl -ba llvm/lib/Transforms/Scalar/LICM.cpp | sed -n '1520,1550p'                                                                                                                         │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@318709] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│   1520      SE->forgetBlockAndLoopDispositions(&I);                                                                                                                                      │
+│   1521  }                                                                                                                                                                                │
+│   1522                                                                                                                                                                                   │
+│   1523  static Instruction *sinkThroughTriviallyReplaceablePHI(                                                                                                                          │
+│   1524      PHINode *TPN, Instruction *I, LoopInfo *LI,                                                                                                                                  │
+│   1525      SmallDenseMap<BasicBlock *, Instruction *, 32> &SunkCopies,                                                                                                                  │
+│   1526      const LoopSafetyInfo *SafetyInfo, const Loop *CurLoop,                                                                                                                       │
+│   1527      MemorySSAUpdater &MSSAU) {                                                                                                                                                   │
+│   1528    assert(isTriviallyReplaceablePHI(*TPN, *I) &&                                                                                                                                  │
+│   1529           "Expect only trivially replaceable PHI");                                                                                                                               │
+│   1530    BasicBlock *ExitBlock = TPN->getParent();                                                                                                                                      │
+│   1531    Instruction *New;                                                                                                                                                              │
+│   1532    auto It = SunkCopies.find(ExitBlock);                                                                                                                                          │
+│   1533    if (It != SunkCopies.end())                                                                                                                                                    │
+│   1534      New = It->second;                                                                                                                                                            │
+│   1535    else                                                                                                                                                                           │
+│   1536      New = SunkCopies[ExitBlock] = cloneInstructionInExitBlock(                                                                                                                   │
+│   1537          *I, *ExitBlock, *TPN, LI, SafetyInfo, MSSAU);                                                                                                                            │
+│   1538    return New;                                                                                                                                                                    │
+│   1539  }                                                                                                                                                                                │
+│   1540                                                                                                                                                                                   │
+│   1541  static bool canSplitPredecessors(PHINode *PN, LoopSafetyInfo *SafetyInfo) {                                                                                                      │
+│   1542    BasicBlock *BB = PN->getParent();                                                                                                                                              │
+│   1543    if (!BB->canSplitPredecessors())                                                                                                                                               │
+│   1544      return false;                                                                                                                                                                │
+│   1545    // It's not impossible to split EHPad blocks, but if BlockColors already exist                                                                                                 │
+│   1546    // it require updating BlockColors for all offspring blocks accordingly. By                                                                                                    │
+│   1547    // skipping such corner case, we can make updating BlockColors after splitting                                                                                                 │
+│   1548    // predecessor fairly simple.                                                                                                                                                  │
+│   1549    if (!SafetyInfo->getBlockColors().empty() && BB->getFirstNonPHI()->isEHPad())                                                                                                  │
+│   1550      return false;                                                                                                                                                                │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #8, chat statistics so far: {'chat_rounds': 8, 'input_tokens': 51029, 'cached_tokens': 36429, 'output_tokens': 3585, 'total_tokens': 58407}
+╭─ assistant [MainThread@318709] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ Okay, the line numbers from the stack trace match the code I'm seeing now.                                                                                                               │
+│ - `sinkThroughTriviallyReplaceablePHI` at line 1536 calls `cloneInstructionInExitBlock`.                                                                                                 │
+│ - `cloneInstructionInExitBlock` at line 1468 calls `MSSAU.createMemoryAccessInBB`.                                                                                                       │
+│                                                                                                                                                                                          │
+│ The logic at line 1466 is:                                                                                                                                                               │
+│ `if (MSSAU.getMemorySSA()->getMemoryAccess(&I))`                                                                                                                                         │
+│                                                                                                                                                                                          │
+│ This is the source of the bug. `I` is the original instruction *inside* the loop. After `simple-loop-unswitch`, `I` is the `call i32 @bar()` instruction. However, MemorySSA might not   │
+│ have been properly updated. The analysis might still think this instruction location corresponds to the original indirect call, which *did* access memory. So `getMemoryAccess(&I)`      │
+│ might return a non-null pointer.                                                                                                                                                         │
+│                                                                                                                                                                                          │
+│ Then, inside the `if`, we call `createMemoryAccessInBB` with `New`, which is the *cloned* instruction. `New` is a `call @bar()`, which is `memory(none)`. The factory inside             │
+│ `createMemoryAccessInBB` sees this non-memory instruction and returns `nullptr`, triggering the assertion.                                                                               │
+│                                                                                                                                                                                          │
+│ The fix is to check if the instruction *can* access memory before trying to create a memory access for it. The check should be on `I` itself, as `New` is just a clone. If `I` doesn't   │
+│ access memory, we shouldn't be trying to update MemorySSA for it.                                                                                                                        │
+│                                                                                                                                                                                          │
+│ So, the original idea was correct, but I was looking at the wrong code. The line to change is indeed line 1466.                                                                          │
+│                                                                                                                                                                                          │
+│ `if (MSSAU.getMemorySSA()->getMemoryAccess(&I))` should be replaced with `if (I.mayReadOrWriteMemory())`. This is a more direct and robust check that doesn't rely on the potentially    │
+│ stale state of MemorySSA. I need to also ensure that `MSSAU` is valid, so the check should be `if (MSSAU.getMemorySSA() && I.mayReadOrWriteMemory())`. The original code already has     │
+│ `MSSAU` in scope, and the check is inside `cloneInstructionInExitBlock` which takes `MSSAU` as a reference. The original check was on `getMemoryAccess`, so `MSSAU.getMemorySSA()` is    │
+│ valid.                                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ Let's re-examine the original check: `if (MSSAU.getMemorySSA()->getMemoryAccess(&I))`. This implies `MSSAU.getMemorySSA()` is not null. So my proposed change `if                        │
+│ (I.mayReadOrWriteMemory())` is sufficient if we assume `MSSAU` is always valid. However, the original code is inside `cloneInstructionInExitBlock` which is only called from `sink` and  │
+│ `sinkThroughTriviallyReplaceablePHI` which both have a valid `MemorySSAUpdater`.                                                                                                         │
+│                                                                                                                                                                                          │
+│ The original code is:                                                                                                                                                                    │
+│ ```cpp                                                                                                                                                                                   │
+│   1466    if (MSSAU.getMemorySSA()->getMemoryAccess(&I)) {                                                                                                                               │
+│   1467      // Create a new MemoryAccess and let MemorySSA set its defining access.                                                                                                      │
+│   1468      MemoryAccess *NewMemAcc = MSSAU.createMemoryAccessInBB(                                                                                                                      │
+│   1469          New, nullptr, New->getParent(), MemorySSA::Beginning);                                                                                                                   │
+│ ```                                                                                                                                                                                      │
+│ I will replace line 1466.                                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ sed -i '1466s/if (MSSAU.getMemorySSA()->getMemoryAccess(&I))/if (I.mayReadOrWriteMemory())/' llvm/lib/Transforms/Scalar/LICM.cpp                                                         │
+│ ```                                                                                                                                                                                      │
+│ This seems correct and robust. It directly checks the property of the instruction being cloned rather than relying on analysis results that might be stale.THOUGHT                       │
+│ The previous analysis identified the root cause of the crash. The check `if (MSSAU.getMemorySSA()->getMemoryAccess(&I))` in `cloneInstructionInExitBlock` is insufficient. It relies on  │
+│ MemorySSA analysis results which can be stale after a transform like `simple-loop-unswitch`. The correct approach is to directly query the instruction's properties.                     │
+│                                                                                                                                                                                          │
+│ The instruction `I` is being cloned to `New`. The crash happens when `createMemoryAccessInBB` is called for `New`, but `New` is a call to a `memory(none)` function. The check should    │
+│ verify if `I` (and therefore its clone `New`) actually accesses memory before attempting to create a MemorySSA node for it.                                                              │
+│                                                                                                                                                                                          │
+│ The proposed fix is to replace the condition on line 1466 of `llvm/lib/Transforms/Scalar/LICM.cpp` from `if (MSSAU.getMemorySSA()->getMemoryAccess(&I))` to `if                          │
+│ (I.mayReadOrWriteMemory())`. This directly checks the instruction's memory behavior, making the logic robust against stale analysis results.                                             │
+│                                                                                                                                                                                          │
+│ I will now apply this change using `sed`.                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ sed -i '1466s/if (MSSAU.getMemorySSA()->getMemoryAccess(&I))/if (I.mayReadOrWriteMemory())/' llvm/lib/Transforms/Scalar/LICM.cpp                                                         │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@318709] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Please always provide EXACTLY ONE action in triple backticks, found 2 actions.                                                                                                           │
+│ If you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`                                                                            │
+│ without any other command.                                                                                                                                                               │
+│ Else, please format your response exactly as follows:                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ <response_example>                                                                                                                                                                       │
+│ Here are some thoughts about why you want to perform the action.                                                                                                                         │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ <action>                                                                                                                                                                                 │
+│ ```                                                                                                                                                                                      │
+│ </response_example>                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ Note: In rare cases, if you need to reference a similar format in your command, you might have                                                                                           │
+│ to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.                                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #9, chat statistics so far: {'chat_rounds': 9, 'input_tokens': 60930, 'cached_tokens': 42500, 'output_tokens': 4714, 'total_tokens': 69437}
+╭─ assistant [MainThread@318709] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ My previous response was rejected for containing two actions. I will now provide only the single, correct action.                                                                        │
+│                                                                                                                                                                                          │
+│ The analysis concluded that the check at line 1466 in `llvm/lib/Transforms/Scalar/LICM.cpp` is faulty. It relies on potentially stale MemorySSA data. The correct fix is to replace the  │
+│ condition `if (MSSAU.getMemorySSA()->getMemoryAccess(&I))` with `if (I.mayReadOrWriteMemory())`, which directly and correctly checks if the instruction accesses memory.                 │
+│                                                                                                                                                                                          │
+│ I will now execute the `sed` command to apply this specific change.                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ sed -i '1466s/if (MSSAU.getMemorySSA()->getMemoryAccess(&I))/if (I.mayReadOrWriteMemory())/' llvm/lib/Transforms/Scalar/LICM.cpp                                                         │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@318709] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #10, chat statistics so far: {'chat_rounds': 10, 'input_tokens': 72105, 'cached_tokens': 50599, 'output_tokens': 4897, 'total_tokens': 80795}
+╭─ assistant [MainThread@318709] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ The `sed` command has been successfully applied. I have modified the file `llvm/lib/Transforms/Scalar/LICM.cpp` to fix the crash. Now, I need to verify the fix by building the code and │
+│ running the test case. The `submit-patch` command is the designated way to do this.                                                                                                      │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ submit-patch                                                                                                                                                                             │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Generation statistics saved to /tmp/116809-gem25pro-12122304.json.
+Saved trajectory to '/tmp/116809-gem25pro-12122304.traj.json'
+Final Patch
+-----------
+diff --git a/llvm/lib/Transforms/Scalar/LICM.cpp b/llvm/lib/Transforms/Scalar/LICM.cpp
+index fa04ced7182d..9dc61b3627f6 100644
+--- a/llvm/lib/Transforms/Scalar/LICM.cpp
++++ b/llvm/lib/Transforms/Scalar/LICM.cpp
+@@ -1463,7 +1463,7 @@ static Instruction *cloneInstructionInExitBlock(
+   if (!I.getName().empty())
+     New->setName(I.getName() + ".le");
+
+-  if (MSSAU.getMemorySSA()->getMemoryAccess(&I)) {
++  if (I.mayReadOrWriteMemory()) {
+     // Create a new MemoryAccess and let MemorySSA set its defining access.
+     MemoryAccess *NewMemAcc = MSSAU.createMemoryAccessInBB(
+         New, nullptr, New->getParent(), MemorySSA::Beginning);
+
+Reference Patch
+---------------
+commit 18b02bbf441660683df7f3925946984203d49bab
+Author: DianQK <dianqk@dianqk.net>
+Date:   Wed Nov 20 19:52:51 2024 +0800
+
+    [LICM] allow MemoryAccess creation failure (#116813)
+
+    Fixes #116809.
+
+    After running some passes (SimpleLoopUnswitch, LoopInstSimplify, etc.),
+    MemorySSA might be outdated, and the instruction `I` may have become a
+    non-memory touching instruction.
+
+    LICM has already handled this, but it does not pass
+    `CreationMustSucceed=false` to `createDefinedAccess`.
+
+diff --git a/llvm/include/llvm/Analysis/MemorySSAUpdater.h b/llvm/include/llvm/Analysis/MemorySSAUpdater.h
+index d4da3ef1146d..055feceefb05 100644
+--- a/llvm/include/llvm/Analysis/MemorySSAUpdater.h
++++ b/llvm/include/llvm/Analysis/MemorySSAUpdater.h
+@@ -190,7 +190,8 @@ public:
+   /// inaccessible and it *must* have removeMemoryAccess called on it.
+   MemoryAccess *createMemoryAccessInBB(Instruction *I, MemoryAccess *Definition,
+                                        const BasicBlock *BB,
+-                                       MemorySSA::InsertionPlace Point);
++                                       MemorySSA::InsertionPlace Point,
++                                       bool CreationMustSucceed = true);
+
+   /// Create a MemoryAccess in MemorySSA before an existing MemoryAccess.
+   ///
+diff --git a/llvm/lib/Analysis/MemorySSAUpdater.cpp b/llvm/lib/Analysis/MemorySSAUpdater.cpp
+index aa550f0b6a7b..f672bd0e1e13 100644
+--- a/llvm/lib/Analysis/MemorySSAUpdater.cpp
++++ b/llvm/lib/Analysis/MemorySSAUpdater.cpp
+@@ -1403,9 +1403,11 @@ void MemorySSAUpdater::changeToUnreachable(const Instruction *I) {
+
+ MemoryAccess *MemorySSAUpdater::createMemoryAccessInBB(
+     Instruction *I, MemoryAccess *Definition, const BasicBlock *BB,
+-    MemorySSA::InsertionPlace Point) {
+-  MemoryUseOrDef *NewAccess = MSSA->createDefinedAccess(I, Definition);
+-  MSSA->insertIntoListsForBlock(NewAccess, BB, Point);
++    MemorySSA::InsertionPlace Point, bool CreationMustSucceed) {
++  MemoryUseOrDef *NewAccess = MSSA->createDefinedAccess(
++      I, Definition, /*Template=*/nullptr, CreationMustSucceed);
++  if (NewAccess)
++    MSSA->insertIntoListsForBlock(NewAccess, BB, Point);
+   return NewAccess;
+ }
+
+diff --git a/llvm/lib/Transforms/Scalar/LICM.cpp b/llvm/lib/Transforms/Scalar/LICM.cpp
+index fa04ced7182d..94bfe44a847a 100644
+--- a/llvm/lib/Transforms/Scalar/LICM.cpp
++++ b/llvm/lib/Transforms/Scalar/LICM.cpp
+@@ -1465,8 +1465,11 @@ static Instruction *cloneInstructionInExitBlock(
+
+   if (MSSAU.getMemorySSA()->getMemoryAccess(&I)) {
+     // Create a new MemoryAccess and let MemorySSA set its defining access.
++    // After running some passes, MemorySSA might be outdated, and the
++    // instruction `I` may have become a non-memory touching instruction.
+     MemoryAccess *NewMemAcc = MSSAU.createMemoryAccessInBB(
+-        New, nullptr, New->getParent(), MemorySSA::Beginning);
++        New, nullptr, New->getParent(), MemorySSA::Beginning,
++        /*CreationMustSucceed=*/false);
+     if (NewMemAcc) {
+       if (auto *MemDef = dyn_cast<MemoryDef>(NewMemAcc))
+         MSSAU.insertDef(MemDef, /*RenameUses=*/true);
+
+Statistics
+----------
+{
+  "command": {
+    "issue": "116809",
+    "model": "gemini-2.5-pro"
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Scalar/LICM.cpp b/llvm/lib/Transforms/Scalar/LICM.cpp\nindex fa04ced7182d..9dc61b3627f6 100644\n--- a/llvm/lib/Transforms/Scalar/LICM.cpp\n+++
+b/llvm/lib/Transforms/Scalar/LICM.cpp\n@@ -1463,7 +1463,7 @@ static Instruction *cloneInstructionInExitBlock(\n   if (!I.getName().empty())\n     New->setName(I.getName() + \".le\");\n \n-
+if (MSSAU.getMemorySSA()->getMemoryAccess(&I)) {\n+  if (I.mayReadOrWriteMemory()) {\n     // Create a new MemoryAccess and let MemorySSA set its defining access.\n     MemoryAccess
+*NewMemAcc = MSSAU.createMemoryAccessInBB(\n         New, nullptr, New->getParent(), MemorySSA::Beginning);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 83480,
+  "output_tokens": 4976,
+  "cached_tokens": 60716,
+  "total_tokens": 92249,
+  "chat_rounds": 11,
+  "total_time_sec": 146.8086223602295,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "",
+    "diff --git a/llvm/lib/Transforms/Scalar/LICM.cpp b/llvm/lib/Transforms/Scalar/LICM.cpp\nindex fa04ced7182d..9dc61b3627f6 100644\n--- a/llvm/lib/Transforms/Scalar/LICM.cpp\n+++
+b/llvm/lib/Transforms/Scalar/LICM.cpp\n@@ -1463,7 +1463,7 @@ static Instruction *cloneInstructionInExitBlock(\n   if (!I.getName().empty())\n     New->setName(I.getName() + \".le\");\n \n-
+if (MSSAU.getMemorySSA()->getMemoryAccess(&I)) {\n+  if (I.mayReadOrWriteMemory()) {\n     // Create a new MemoryAccess and let MemorySSA set its defining access.\n     MemoryAccess
+*NewMemAcc = MSSAU.createMemoryAccessInBB(\n         New, nullptr, New->getParent(), MemorySSA::Beginning);\n"
+  ]
+}

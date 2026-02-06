@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "155110",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/155110-gpt5-12071347.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 092a3a87954f..91b728501a45 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -4518,11 +4518,16 @@ bool VectorCombine::run() {\n     // Ignore unreachable basic blocks.\n     if (!DT.isReachableFromEntry(&BB))\n       continue;\n-    // Use early increment range so that we can erase instructions in loop.\n-    for (Instruction &I : make_early_inc_range(BB)) {\n-      if (I.isDebugOrPseudoInst())\n+    // Collect a stable snapshot of instructions to avoid iterator invalidation\n+    // when folds erase non-current instructions.\n+    SmallVector<Instruction *, 64> Insts;\n+    Insts.reserve(BB.size());\n+    for (Instruction &I : BB)\n+      Insts.push_back(&I);\n+    for (Instruction *IP : Insts) {\n+      if (IP->isDebugOrPseudoInst())\n         continue;\n-      MadeChange |= FoldInst(I);\n+      MadeChange |= FoldInst(*IP);\n     }\n   }\n \n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 82886,
+  "output_tokens": 4105,
+  "cached_tokens": 61312,
+  "total_tokens": 86991,
+  "chat_rounds": 10,
+  "total_time_sec": 95.78019261360168,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+    "(anonymous namespace)::VectorCombine::run",
+    4522
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+      4517,
+      4526
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe vector-combine pass crashes with a SIGSEGV while iterating over instructions in a basic block using make_early_inc_range. The debug log shows that after a fold, the pass proceeds to erase multiple instructions (not just the currently-processed instruction). This can invalidate the underlying intrusive list iterator and lead to dereferencing freed nodes. The stack trace confirms the failure occurs during list iteration (ilist iterator operator++/operator*), pointing to instruction list corruption due to erasure during iteration.\n\n2. Analyzing opt's Log:\nThe debug-only log shows these steps:\n- Folding and replacing an 'and' instruction with a constant vector containing poison lanes.\n- Erasing the 'and' instruction.\n- Erasing other related instructions: the insertelement, phi, and the vector.reduce intrinsic.\nImmediately after that, the pass visits a <badref> call with <null operand!>, indicating that IR has been corrupted. This timing aligns with the first transformation point in VectorCombine::run, specifically the instruction scanning loop.\n\n3. Root Cause Analysis:\nThe main scan loop uses:\n  for (Instruction &I : make_early_inc_range(BB)) {\n    ... MadeChange |= FoldInst(I);\n  }\nmake_early_inc_range only guarantees safe erasure of the current element while iterating, but eraseInstruction() can remove arbitrary other instructions in the same basic block via RecursivelyDeleteTriviallyDeadInstructions on operands. Erasing non-current instructions during iteration can invalidate the iterator for the next instruction, leading to use-after-free and the observed SIGSEGV. This is corroborated by the crash location and the subsequent visitation of a \"<badref>\" instruction.\n\n4. Proposed Edit Point(s)\nReplace the early-increment range iteration with a two-phase approach: collect instruction pointers into a vector first, then iterate over that stable snapshot. This avoids iterator invalidation when erasing any instructions during the processing phase.\n\nEdit at llvm/lib/Transforms/Vectorize/VectorCombine.cpp lines 4517-4526:\n\n- Current:\n  4516   bool MadeChange = false;\n  4517   for (BasicBlock &BB : F) {\n  4518     // Ignore unreachable basic blocks.\n  4519     if (!DT.isReachableFromEntry(&BB))\n  4520       continue;\n  4521     // Use early increment range so that we can erase instructions in loop.\n  4522     for (Instruction &I : make_early_inc_range(BB)) {\n  4523       if (I.isDebugOrPseudoInst())\n  4524         continue;\n  4525       MadeChange |= FoldInst(I);\n  4526     }\n  4527   }\n\n- Replace with:\n  4516   bool MadeChange = false;\n  4517   for (BasicBlock &BB : F) {\n  4518     // Ignore unreachable basic blocks.\n  4519     if (!DT.isReachableFromEntry(&BB))\n  4520       continue;\n  4521     // Collect a stable snapshot of instructions to avoid iterator invalidation\n  4522     // when folds erase non-current instructions.\n  4523     SmallVector<Instruction *, 64> Insts;\n  4524     Insts.reserve(BB.size());\n  4525     for (Instruction &I : BB)\n  4526       Insts.push_back(&I);\n  4527     for (Instruction *IP : Insts) {\n  4528       if (IP->isDebugOrPseudoInst())\n  4529         continue;\n  4530       MadeChange |= FoldInst(*IP);\n  4531     }\n  4532   }\n\nThis change maintains functionality while ensuring that any erasures during FoldInst/eraseInstruction do not invalidate the iteration, since we're iterating over a separate container of raw pointers captured before transformations.\n\n5. Conclusion:\nThe crash is caused by erasing non-current instructions in a basic block while iterating over it using make_early_inc_range. By first collecting instruction pointers into a SmallVector and iterating over this stable snapshot, we avoid iterator invalidation and prevent the use-after-free that leads to the SIGSEGV. The rest of the pass logic, including the Worklist-driven processing, remains unchanged, and the fix should stabilize the pass for this and similar cases where transformations recursively delete multiple instructions within the same block.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 092a3a87954f..91b728501a45 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -4518,11 +4518,16 @@ bool VectorCombine::run() {\n     // Ignore unreachable basic blocks.\n     if (!DT.isReachableFromEntry(&BB))\n       continue;\n-    // Use early increment range so that we can erase instructions in loop.\n-    for (Instruction &I : make_early_inc_range(BB)) {\n-      if (I.isDebugOrPseudoInst())\n+    // Collect a stable snapshot of instructions to avoid iterator invalidation\n+    // when folds erase non-current instructions.\n+    SmallVector<Instruction *, 64> Insts;\n+    Insts.reserve(BB.size());\n+    for (Instruction &I : BB)\n+      Insts.push_back(&I);\n+    for (Instruction *IP : Insts) {\n+      if (IP->isDebugOrPseudoInst())\n         continue;\n-      MadeChange |= FoldInst(I);\n+      MadeChange |= FoldInst(*IP);\n     }\n   }\n \n"
+  ]
+}

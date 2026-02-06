@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "137185",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/137185-gpt5-11271319.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\nindex 6027572f1e84..87c7611408af 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n@@ -2127,7 +2127,9 @@ void VPScalarIVStepsRecipe::execute(VPTransformState &State) {\n           Builder.CreateMul(StartIdx0, ConstantInt::get(StartIdx0->getType(),\n                                                         getUnrollPart(*this)));\n     }\n-    StartIdx0 = Builder.CreateTrunc(StartIdx0, IntStepTy);\n+    // Adjust StartIdx0 width to match IntStepTy. Use zero-extend-or-trunc\n+    // because StartIdx0 represents an index/unroll start and is non-negative.\n+    StartIdx0 = Builder.CreateZExtOrTrunc(StartIdx0, IntStepTy);\n   }\n \n   if (!FirstLaneOnly && State.VF.isScalable()) {\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 49573,
+  "output_tokens": 1617,
+  "cached_tokens": 27648,
+  "total_tokens": 51190,
+  "chat_rounds": 5,
+  "total_time_sec": 92.37541174888611,
+  "trans_point": [
+    "llvm/lib/IR/Constants.cpp",
+    "llvm::ConstantExpr::getCast",
+    2215
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp",
+      2130,
+      2130
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs in llvm::ConstantExpr::getCast due to an invalid constantexpr cast triggered by IRBuilderBase::CreateTrunc within VPScalarIVStepsRecipe::execute. Specifically, the code attempts to truncate an integer value to IntStepTy, but IntStepTy can be wider than the source type under certain datalayouts (e.g., AIX with 32-bit pointers and 64-bit doubles), making truncation to a wider type invalid.\n\n2. Analyzing opt's Log:\n- The loop is vectorized with VF=1, UF=8. The VPlan shows VPScalarIVSteps being used for a floating-point induction derived from %sum.0 and %x.\n- The VPlan 'Final' section reveals scalar.ph and vector.ph blocks and the presence of runtime SCEV checks, as well as derivations involving %n.vec of type i32.\n- The debug-only log shows execution reaching VPScalarIVStepsRecipe::execute and then failing at Builder.CreateTrunc(StartIdx0, IntStepTy).\n- On AIX target datalayout, BaseIVTy is double (64-bit), hence IntStepTy becomes i64. StartIdx0 is computed from getOperand(2) and may be i32 (e.g., derived from %n.vec or similar). Truncating i32 to i64 is illegal (should be an extension), triggering the assertion.\n\n3. Root Cause Analysis:\nIn VPScalarIVStepsRecipe::execute, StartIdx0 is set from State.get(getOperand(2), true). If getUnrollPart(*this) != 0, we may multiply it and then perform Builder.CreateTrunc(StartIdx0, IntStepTy). The code assumes IntStepTy is narrower or equal to StartIdx0 type, but with floating-point inductions using BaseIVTy=double (64-bit), IntStepTy is i64 while StartIdx0 can be i32 (coming from vector-trip-count or part index on 32-bit targets). Using CreateTrunc to convert i32 -> i64 is invalid and asserts. The correct operation should be a width adjustment that extends when the destination is wider and truncates when narrower, i.e., CreateZExtOrTrunc or CreateSExtOrTrunc depending on signedness. Since StartIdx0 represents an index/unroll start and is non-negative, zero-extend is appropriate. LLVM often uses CreateZExtOrTrunc for index-like values.\n\n4. Proposed Edit Point(s):\n- File: llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n- Line: 2130\n- Change: Replace `StartIdx0 = Builder.CreateTrunc(StartIdx0, IntStepTy);` with `StartIdx0 = Builder.CreateZExtOrTrunc(StartIdx0, IntStepTy);`\n\nRationale: This ensures the cast is valid regardless of source/destination bit widths and matches the semantics for index values (non-negative). It mirrors similar patterns used elsewhere in VPlan recipes (e.g., VPVectorEndPointerRecipe uses CreateZExtOrTrunc for RunTimeVF to match IndexTy).\n\n5. Conclusion:\nThe assertion stems from an invalid truncation when widening i32 to i64 in VPScalarIVStepsRecipe::execute on targets where BaseIVTy is 64-bit FP but index types are 32-bit. Using CreateZExtOrTrunc fixes the type adjustment, preventing the invalid constantexpr cast and allowing the loop-vectorizer to proceed. This change is safe, consistent with index semantics, and aligns with existing code patterns in vector pointer/end pointer recipes.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\nindex 6027572f1e84..87c7611408af 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n@@ -2127,7 +2127,9 @@ void VPScalarIVStepsRecipe::execute(VPTransformState &State) {\n           Builder.CreateMul(StartIdx0, ConstantInt::get(StartIdx0->getType(),\n                                                         getUnrollPart(*this)));\n     }\n-    StartIdx0 = Builder.CreateTrunc(StartIdx0, IntStepTy);\n+    // Adjust StartIdx0 width to match IntStepTy. Use zero-extend-or-trunc\n+    // because StartIdx0 represents an index/unroll start and is non-negative.\n+    StartIdx0 = Builder.CreateZExtOrTrunc(StartIdx0, IntStepTy);\n   }\n \n   if (!FirstLaneOnly && State.VF.isScalable()) {\n"
+  ]
+}

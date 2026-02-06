@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "112476",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/112476-deepseekchat-12070341.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 804, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 5004109,
+  "output_tokens": 17638,
+  "cached_tokens": 4881728,
+  "total_tokens": 5021747,
+  "chat_rounds": 127,
+  "total_time_sec": 1355.711016178131,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+    "llvm::InstCombinerImpl::foldSelectEqualityTest",
+    1451
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+      1447,
+      1449
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe transformation incorrectly replaces the select chain with `icmp samesign eq i42 %X, %Y`. The issue is that the original logic handles the case where `%X` and `%Y` are compared to the same constant `-42`. When `%X = -42` and `%Y = 0`, the source yields `false` (since `%XeqC` is true, `%YeqC` is false, so `%equal = %YeqC = false`). However, the target yields `poison` because `icmp samesign eq` yields poison when operands have different signs (here `-42` is negative, `0` is non\u2011negative). The transformation is unsound because it introduces poison where the original code had a well\u2011defined result.\n\n2. Analyzing `opt`'s Log:\nThe log shows that `foldSelectEqualityTest` matched the pattern and replaced the select with `%XeqY`. The pattern matching in `foldSelectEqualityTest` does not check whether the matched `icmp eq` (`XeqY`) has the `samesign` modifier. The function assumes that `XeqY` is a plain equality comparison, but in this case it is `icmp samesign eq`. The `samesign` modifier introduces poison when signs differ, breaking the equivalence.\n\n3. Root Cause Analysis:\nThe root cause is that `foldSelectEqualityTest` does not verify that the matched `XeqY` is a *plain* equality comparison without extra modifiers (like `samesign`). The pattern `m_c_SpecificICmp(ICmpInst::ICMP_EQ, ...)` matches any `icmp eq` regardless of modifiers. The transformation is only valid when `XeqY` is a regular equality comparison that never yields poison for the same inputs as the original select. Therefore, we must ensure that `XeqY` does not have the `samesign` flag (or any other poison\u2011introducing flags).\n\n4. Proposed Edit Point(s):\nWe need to add a check that `XeqY` is a plain `icmp eq` without the `samesign` modifier. This can be done by verifying that `cast<ICmpInst>(XeqY)->hasSameSign()` returns false. The edit should be placed after the match for `XeqY` but before returning `replaceInstUsesWith`. Specifically, we should add:\n```cpp\nif (auto *Cmp = dyn_cast<ICmpInst>(XeqY))\n  if (Cmp->hasSameSign())\n    return nullptr;\n```\nThis ensures the transformation only applies when the equality comparison is not `samesign`.\n\n5. Conclusion:\nThe fix adds a guard to prevent the transformation when the matched equality comparison has the `samesign` modifier, preserving correctness. The edit point is lines 1447\u20111449 in `InstCombineSelect.cpp`.",
+  "test_traj": []
+}

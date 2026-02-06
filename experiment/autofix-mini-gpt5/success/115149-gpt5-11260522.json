@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "115149",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/115149-gpt5-11260522.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/InstCombine/InstCombinePHI.cpp b/llvm/lib/Transforms/InstCombine/InstCombinePHI.cpp\nindex cb5c44730512..66e1dbc72e7a 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombinePHI.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombinePHI.cpp\n@@ -545,7 +545,9 @@ Instruction *InstCombinerImpl::foldPHIArgGEPIntoPHI(PHINode &PN) {\n   // especially bad when the PHIs are in the header of a loop.\n   bool NeededPhi = false;\n \n-  GEPNoWrapFlags NW = GEPNoWrapFlags::all();\n+  // Initialize NW with the first incoming GEP's flags so we form the\n+  // intersection across all incoming GEPs, including the first.\n+  GEPNoWrapFlags NW = FirstInst->getNoWrapFlags();\n \n   // Scan to see if all operands are the same opcode, and all have one user.\n   for (Value *V : drop_begin(PN.incoming_values())) {\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 39219,
+  "output_tokens": 2153,
+  "cached_tokens": 19072,
+  "total_tokens": 41372,
+  "chat_rounds": 6,
+  "total_time_sec": 484.31968665122986,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombinePHI.cpp",
+    "llvm::InstCombinerImpl::foldPHIArgGEPIntoPHI",
+    616
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombinePHI.cpp",
+      548,
+      548
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe transformation performed by foldPHIArgGEPIntoPHI merges GEPs feeding a PHI by introducing PHIs for differing operands and creating a single GEP with potentially inherited no-wrap flags (like inbounds and nuw). In the provided reproducer, the source program is defined, but the transformed target program becomes less defined: Alive2 shows that for a specific pointer value (%ptr pointing just before a 1-byte non-local block), the source computes a non-inbounds GEP first (landing inside the block), then proceeds with an inbounds GEP from the valid pointer onward. The target transformation incorrectly applies inbounds to the newly created GEP using a PHI base that can be out-of-bounds, triggering poison/UB when the load is attempted.\n\n2. Analyzing opt's Log:\n- The first transformation is performed by InstCombinerImpl::foldPHIArgGEPIntoPHI.\n- The log shows: Old PHI of two GEPs is replaced with a phi of base (%ptr.pn) and a single GEP with \"inbounds nuw\" flags: \"%.pn = getelementptr inbounds nuw i8, ptr %ptr.pn, i64 1\".\n- However, the first incoming GEP (%add.ptr) in the source had no inbounds flags, while the second (%incdec.ptr) did have inbounds nuw.\n- Alive2 demonstrates that the target introduces UB because the new inbounds GEP is applied to a base pointer (%ptr.pn) that can be out-of-bounds on one incoming edge (the %ptr edge). In contrast, the source first moved the pointer into bounds with a non-inbounds GEP, then only used inbounds when the pointer was already in-bounds.\n\n3. Root Cause Analysis:\nThe implementation initializes GEPNoWrapFlags NW to GEPNoWrapFlags::all() and then ANDs it only with the flags of the GEPs from PN.incoming_values() excluding the first one (it iterates over drop_begin(PN.incoming_values())). As a result, NW ends up being the intersection of the flags of all the subsequent GEPs, but ignores the first GEP's flags entirely.\n\nIn the reproducer, the first GEP (%add.ptr) has no inbounds/nuw flags, while the second GEP (%incdec.ptr) has inbounds nuw. Because NW starts as \"all()\" and only intersects with the second's flags, NW stays as inbounds nuw. The newly created GEP is therefore marked inbounds nuw, even though one of the original GEPs was not inbounds. This unsoundly strengthens semantics and causes UB in the target where the source was defined.\n\nThus, NW must include the flags of the first GEP as well. The simplest and correct fix is to initialize NW with FirstInst->getNoWrapFlags() instead of GEPNoWrapFlags::all(). Alternatively, perform NW &= FirstInst->getNoWrapFlags() before the loop.\n\n4. Proposed Edit Point(s)\n- File: llvm/lib/Transforms/InstCombine/InstCombinePHI.cpp\n- Line 548: Change initialization of NW from \"GEPNoWrapFlags NW = GEPNoWrapFlags::all();\" to \"GEPNoWrapFlags NW = FirstInst->getNoWrapFlags();\". This ensures the intersection of flags across all incoming GEPs, including the first one.\n\n5. Conclusion:\nBy correctly including the no-wrap flags of the first GEP when computing NW, the new GEP created by foldPHIArgGEPIntoPHI will only be marked inbounds/nuw if all original incoming GEPs had those properties. This prevents unsound strengthening and avoids introducing UB in cases like the reproducer, restoring correctness of the transformation.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombinePHI.cpp b/llvm/lib/Transforms/InstCombine/InstCombinePHI.cpp\nindex cb5c44730512..66e1dbc72e7a 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombinePHI.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombinePHI.cpp\n@@ -545,7 +545,9 @@ Instruction *InstCombinerImpl::foldPHIArgGEPIntoPHI(PHINode &PN) {\n   // especially bad when the PHIs are in the header of a loop.\n   bool NeededPhi = false;\n \n-  GEPNoWrapFlags NW = GEPNoWrapFlags::all();\n+  // Initialize NW with the first incoming GEP's flags so we form the\n+  // intersection across all incoming GEPs, including the first.\n+  GEPNoWrapFlags NW = FirstInst->getNoWrapFlags();\n \n   // Scan to see if all operands are the same opcode, and all have one user.\n   for (Value *V : drop_begin(PN.incoming_values())) {\n"
+  ]
+}

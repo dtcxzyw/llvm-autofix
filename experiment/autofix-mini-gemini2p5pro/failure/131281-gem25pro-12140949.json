@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "131281",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/131281-gem25pro-12140949.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 785628,
+  "output_tokens": 28490,
+  "cached_tokens": 620050,
+  "total_tokens": 839562,
+  "chat_rounds": 48,
+  "total_time_sec": 547.5153903961182,
+  "trans_point": [
+    "llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp",
+    "llvm::SCEVExpanderCleaner::cleanup",
+    2402
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp",
+      1105,
+      1105
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe crash is an assertion failure in `SCEVExpanderCleaner::cleanup()`. The assertion `removed instruction should only be used by instructions inserted during expansion` fails. This means the cleaner is trying to delete an instruction that is still being used by code that was not part of the same temporary expansion. This points to an instruction lifetime management problem.\n\n### 2. Analyzing `opt`'s Log\n\nThe Scalar Evolution analysis reveals a crucial detail: the instructions `%add` (used in the loop's exit condition) and `%add2` (used in the GEP address calculation) compute the exact same SCEV expression: `{(-99 + %N),+,1}<nw><%loop>`. The backtrace confirms the crash happens during the destruction of a `GeneratedRTChecks` object within the `LoopVectorizePass`, which is responsible for cleaning up temporary instructions generated for runtime checks.\n\n### 3. Root Cause Analysis\n\nThe sequence of events leading to the crash is as follows:\n\n1.  **Runtime Check Generation**: The loop vectorizer needs to generate a runtime check, for example, to prove that the induction variable does not overflow. To do this, it needs to generate code for a SCEV expression related to the loop's behavior, which in this case is the same expression computed by `%add` and `%add2`.\n\n2.  **SCEV Expansion and Reuse**: The vectorizer invokes `SCEVExpander` to create the IR for this check. The expander is efficient; it maintains a cache of already-computed expressions. It sees that the instruction `%add2` from the original function already computes the required SCEV expression. Instead of generating a new `add` instruction, it reuses `%add2`.\n\n3.  **Incorrect Bookkeeping**: Here lies the bug. After finding and deciding to reuse `%add2`, the `SCEVExpander` incorrectly adds this pre-existing instruction to its internal `Inserted` set. This set is supposed to contain only the *new* instructions that the expander itself created and which are safe to delete later.\n\n4.  **The Crash**: When the `GeneratedRTChecks` object is destroyed, its `SCEVExpanderCleaner` is invoked. The cleaner iterates through the `Inserted` set and tries to delete every instruction within it. When it gets to `%add2`, it checks its users. It finds that `%add2` is used by `%add.ext` (the `sext` instruction from the original loop). Since `%add.ext` was not created by the expander for the runtime check, it is not in the `InsertedSet`. This violates the assertion, as a supposedly temporary instruction has a persistent user, and the program aborts.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to prevent `SCEVExpander` from adding a pre-existing, reused instruction to its `Inserted` set. The instruction should only be tracked for cleanup if it was newly created by the expander. The correct place to add this logic is in `SCEVExpander::expandCodeFor`, right after an expression has been expanded into a `Value`.\n\n**File**: `llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp`\n\n**Edit Point**: The following code should be inserted at line 1105, between the `if (isa<Constant>(V))` check and the `Instruction *I = cast<Instruction>(V);` line.\n\n```cpp\n  // If we got an instruction that is not in the inserted set, then it was\n  // pre-existing.\n  if (auto *I = dyn_cast<Instruction>(V))\n    if (!Inserted.count(I))\n      return I;\n\n```\n\nThis change results in the following diff:\n\n```diff\n--- a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n+++ b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n@@ -1102,6 +1102,12 @@\n   // If we got a constant, we don't need to insert any instructions.\n   if (isa<Constant>(V))\n     return nullptr;\n+\n+  // If we got an instruction that is not in the inserted set, then it was\n+  // pre-existing.\n+  if (auto *I = dyn_cast<Instruction>(V))\n+    if (!Inserted.count(I))\n+      return I;\n \n   Instruction *I = cast<Instruction>(V);\n   // If we are using a cleaner, add the instruction to the list of generated\n\n```\n\n### 5. Conclusion\n\nThis edit correctly distinguishes between newly generated instructions and reused pre-existing ones. By returning early for reused instructions, we avoid incorrectly adding them to the cleanup list, thus preventing the `SCEVExpanderCleaner` from attempting to delete an instruction that is still live. This resolves the assertion failure and allows vectorization to proceed correctly.",
+  "test_traj": []
+}

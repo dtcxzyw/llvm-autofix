@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "123550",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/123550-gem25pro-12132248.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 4955414,
+  "output_tokens": 26438,
+  "cached_tokens": 4458753,
+  "total_tokens": 5003532,
+  "chat_rounds": 239,
+  "total_time_sec": 1234.082245349884,
+  "trans_point": [
+    "llvm/lib/Transforms/Utils/SimplifyIndVar.cpp",
+    "(anonymous namespace)::SimplifyIndvar::simplifyIVRemainder",
+    412
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/SimplifyIndVar.cpp",
+      412,
+      412
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\nThe `indvars` pass incorrectly simplifies an `srem` instruction within a loop that executes only once. The loop's exit condition is determined to be true on the first iteration, making the backedge untaken. The pass attempts to simplify users of the loop's induction variables based on this fact.\n\nThe instruction `%srem = srem i32 729259140, %phi` is simplified. Since the loop executes once, the value of `%phi` will always be its incoming value from the preheader, which is `-173`. The `srem` should therefore be simplified to `srem i32 729259140, -173`, which evaluates to `130`.\n\nHowever, the optimizer incorrectly replaces the `srem` instruction with its dividend, `729259140`. This incorrect value is then returned by the function, causing the miscompilation.\n\n### 2. Analyzing `opt`'s Log\n- **`Loop %bb1: backedge-taken count is i32 0`**: Scalar Evolution correctly determines the loop executes once.\n- **`INDVARS: Simplified srem: %srem = srem i32 729259140, %phi`**: This log message identifies the exact transformation that is the source of the problem.\n- **`Replacing condition of loop-exiting branch ... with i1 true`**: This confirms the loop trip count analysis is being acted upon.\n- **Final IR**: The transformed IR shows `ret i32 729259140`, confirming that the `srem` was replaced by its dividend.\n\n### 3. Root Cause Analysis\nThe root cause is a logical error in the `SimplifyIndvar::simplifyIVRemainder` function (as indicated by the backtrace). When handling an `srem` instruction whose divisor is a PHI node in a loop with a trip count of one, the code should create a new `srem` instruction using the PHI's start value. Instead, due to a likely copy-paste or logic error, it simply returns the dividend of the original `srem`. This faulty logic is specific to the `srem` case, as similar simplifications for `sdiv`, `udiv`, and `urem` are typically handled correctly.\n\n### 4. Proposed Edit Point(s)\nThe fix is to correct the faulty simplification logic for `srem` in `SimplifyIndvar.cpp`. The code must be changed to create a new `srem` instruction instead of just returning the dividend. The line number is based on the initial problem description's context.\n\n**File**: `llvm/lib/Transforms/Utils/SimplifyIndVar.cpp`\n**Line 412**:\n```cpp\n-      NewVal = Op0;\n+      NewVal = Builder.CreateSRem(Op0, IV->getStartValue());\n```\n\n### 5. Conclusion\nThe miscompilation is caused by a bug in `SimplifyIndvar` that incorrectly simplifies an `srem` instruction in a single-trip loop. By replacing the faulty logic with the correct creation of a new `srem` instruction using the loop-invariant initial value, the generated code will compute the correct remainder, fixing the bug.",
+  "test_traj": []
+}

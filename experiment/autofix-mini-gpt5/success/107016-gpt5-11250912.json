@@ -1,0 +1,29 @@
+{
+  "command": {
+    "issue": "107016",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/107016-gpt5-11250912.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/include/llvm/CodeGen/BasicTTIImpl.h b/llvm/include/llvm/CodeGen/BasicTTIImpl.h\nindex 50dc7d5c54c5..e208c12960d7 100644\n--- a/llvm/include/llvm/CodeGen/BasicTTIImpl.h\n+++ b/llvm/include/llvm/CodeGen/BasicTTIImpl.h\n@@ -1569,7 +1569,9 @@ public:\n \n     case Intrinsic::powi:\n       if (auto *RHSC = dyn_cast<ConstantInt>(Args[1])) {\n-        bool ShouldOptForSize = I->getParent()->getParent()->hasOptSize();\n+        // ICA may be type-based only without an associated instruction (I == nullptr).\n+        // Conservatively assume no size optimization in that case.\n+        bool ShouldOptForSize = I && I->getParent()->getParent()->hasOptSize();\n         if (getTLI()->isBeneficialToExpandPowI(RHSC->getSExtValue(),\n                                                ShouldOptForSize)) {\n           // The cost is modeled on the expansion performed by ExpandPowI in\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 267368,
+  "output_tokens": 9227,
+  "cached_tokens": 213248,
+  "total_tokens": 276595,
+  "chat_rounds": 19,
+  "total_time_sec": 189.09479188919067,
+  "trans_point": [
+    "llvm/include/llvm/Analysis/TargetTransformInfo.h",
+    "llvm::TargetTransformInfo::Model<llvm::AArch64TTIImpl>::getIntrinsicInstrCost",
+    2799
+  ],
+  "edit_points": [],
+  "reason_thou": "1. Understanding the Issue:\nThe loop-vectorizer crashes with a SIGSEGV while computing the cost of widening a call to the intrinsic llvm.powi.* during vectorization planning. The stack trace shows the crash occurs inside BasicTTIImplBase<AArch64TTIImpl>::getIntrinsicInstrCost(), specifically when dereferencing I->getParent()->getParent() (frame #7/#5 in the trace). This indicates a null pointer dereference of the intrinsic instruction pointer.\n\n2. Analyzing opt's Log:\nThe first transformation point reported is TargetTransformInfo::Model<...>::getIntrinsicInstrCost(). That aligns with VPWidenCallRecipe::computeCost building IntrinsicCostAttributes and querying TTI for the intrinsic cost. In VPWidenCallRecipe::computeCost we construct IntrinsicCostAttributes using the constructor that does NOT pass an IntrinsicInst*, so ICA.getInst() returns nullptr. The cost model then calls AArch64TTIImpl::getIntrinsicInstrCost(), which forwards to the base implementation in BasicTTIImpl.h. Inside the switch handling Intrinsic::powi, it unconditionally dereferences I (the result of ICA.getInst()) to query optimization-for-size, leading to the segfault.\n\n3. Root Cause Analysis:\nIn BasicTTIImpl::getIntrinsicInstrCost (lines around 1567-1575), the code assumes ICA.getInst() is non-null for Intrinsic::powi. However, callers like VPWidenCallRecipe::computeCost intentionally create IntrinsicCostAttributes without an underlying IR instruction when computing hypothetical vector forms (using only types and argument values). Thus I is null and dereferencing it causes a crash. This is a missing null check. Other intrinsic cases in the same function either avoid dereferencing I or guard its usage, but powi does not.\n\n4. Proposed Edit Points(s):\nEdit file llvm/include/llvm/CodeGen/BasicTTIImpl.h at line 1572.\nChange the line:\n  bool ShouldOptForSize = I->getParent()->getParent()->hasOptSize();\nTo safely handle a null intrinsic instruction pointer:\n  bool ShouldOptForSize = I && I->getParent()->getParent()->hasOptSize();\nOptionally expanded form:\n  bool ShouldOptForSize = false;\n  if (I)\n    ShouldOptForSize = I->getParent()->getParent()->hasOptSize();\nA single-line replacement with the short-circuit is sufficient and minimally invasive.\nRationale: When I is null (type-based cost query), we conservatively assume size is not being optimized. This preserves existing behavior for real instructions while preventing the crash.\n\n5. Conclusion:\nAdding a null check around the use of I in the powi intrinsic cost computation prevents a null dereference during vectorization cost modeling when the intrinsic instruction pointer is absent. This resolves the segmentation fault without altering semantics for valid instruction-based queries. Expected effect: loop-vectorizer no longer crashes on loops containing llvm.powi; it proceeds to evaluate cost and continue vectorization decisions normally.\n",
+  "test_traj": [
+    "diff --git a/llvm/include/llvm/CodeGen/BasicTTIImpl.h b/llvm/include/llvm/CodeGen/BasicTTIImpl.h\nindex 50dc7d5c54c5..e208c12960d7 100644\n--- a/llvm/include/llvm/CodeGen/BasicTTIImpl.h\n+++ b/llvm/include/llvm/CodeGen/BasicTTIImpl.h\n@@ -1569,7 +1569,9 @@ public:\n \n     case Intrinsic::powi:\n       if (auto *RHSC = dyn_cast<ConstantInt>(Args[1])) {\n-        bool ShouldOptForSize = I->getParent()->getParent()->hasOptSize();\n+        // ICA may be type-based only without an associated instruction (I == nullptr).\n+        // Conservatively assume no size optimization in that case.\n+        bool ShouldOptForSize = I && I->getParent()->getParent()->hasOptSize();\n         if (getTLI()->isBeneficialToExpandPowI(RHSC->getSExtValue(),\n                                                ShouldOptForSize)) {\n           // The cost is modeled on the expansion performed by ExpandPowI in\n"
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "118030",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/118030-gpt5-11260859.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 48a8520a966f..7723442bc0fb 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -17799,6 +17799,8 @@ bool BoUpSLP::collectValuesToDemote(\n     // original type and the sign bit of the truncate type are similar.\n     auto AShrChecker = [&](unsigned BitWidth, unsigned OrigBitWidth) {\n       return all_of(E.Scalars, [&](Value *V) {\n+        if (isa<PoisonValue>(V))\n+          return true;\n         auto *I = cast<Instruction>(V);\n         KnownBits AmtKnownBits = computeKnownBits(I->getOperand(1), *DL);\n         unsigned ShiftedBits = OrigBitWidth - BitWidth;\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 58645,
+  "output_tokens": 1830,
+  "cached_tokens": 31616,
+  "total_tokens": 60475,
+  "chat_rounds": 5,
+  "total_time_sec": 92.42475581169128,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "operator()",
+    17802
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      17799,
+      17807
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs in SLPVectorizer during computeMinimumValueSizes -> collectValuesToDemote when checking if arithmetic shift right (AShr) operations can be demoted to smaller bit widths. The failure is an assertion in llvm::cast<Instruction>(Value*), meaning the code tries to cast a Value to Instruction when it isn't one (e.g., PoisonValue or Constant), violating assumptions.\n\n2. Analyzing opt's Log:\nThe debug log shows SLP processing bundles including PHIs and shifts, and explicitly mentions encountering poison values (e.g., %c.4 has poison incoming). The backtrace pinpoints the crash at SLPVectorizer.cpp:17802 inside the AShrChecker lambda of collectValuesToDemote. Other similar checkers (ShlChecker, LShrChecker) guard against PoisonValue by early returning true for poison scalars; AShrChecker lacks this guard.\n\n3. Root Cause Analysis:\nIn collectValuesToDemote, for AShr, the code uses:\n  auto *I = cast<Instruction>(V);\nwithout verifying V is an Instruction. If any scalar in the tree entry is PoisonValue (or potentially a Constant), cast<Instruction> asserts. This is consistent with the IR having PHIs that can carry poison values and with SLP gathering PHIs and reusing scalars. Shl/LShr checkers properly handle PoisonValue via isa<PoisonValue>(V) checks; AShrChecker missed this, causing the invalid cast and abort.\n\n4. Proposed Edit Points(s):\nEdit the AShrChecker in collectValuesToDemote to mirror SHL/LShr handling by checking for PoisonValue before casting.\n\nEdit Point:\nFile: llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nLines: 17799-17807\nChange AShrChecker to:\n    auto AShrChecker = [&](unsigned BitWidth, unsigned OrigBitWidth) {\n      return all_of(E.Scalars, [&](Value *V) {\n        if (isa<PoisonValue>(V))\n          return true;\n        auto *I = cast<Instruction>(V);\n        KnownBits AmtKnownBits = computeKnownBits(I->getOperand(1), *DL);\n        unsigned ShiftedBits = OrigBitWidth - BitWidth;\n        return AmtKnownBits.getMaxValue().ult(BitWidth) &&\n               ShiftedBits < ComputeNumSignBits(I->getOperand(0), *DL, 0, AC,\n                                                nullptr, DT);\n      });\n    };\n\nReasoning:\n- Aligns AShrChecker with ShlChecker and LShrChecker which already handle PoisonValue.\n- Prevents cast<Instruction> on non-instruction values.\n- Semantically correct: a poison lane doesn't prevent demotion as it can be considered trivially safe.\n\nOptional Consideration:\nIf other checkers (e.g., UDiv/URem, Call min/max/abs) similarly cast without a poison check, they may also need guards. The backtrace shows the crash specifically within AShrChecker; the proposed fix addresses the immediate issue.\n\n5. Conclusion:\nThe crash is due to missing PoisonValue handling in AShrChecker causing an invalid cast to Instruction. Adding an early poison check prevents the assertion, allowing SLP to safely continue demotion analysis. This fix mirrors existing patterns in nearby code and should resolve the reported reproducer.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 48a8520a966f..7723442bc0fb 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -17799,6 +17799,8 @@ bool BoUpSLP::collectValuesToDemote(\n     // original type and the sign bit of the truncate type are similar.\n     auto AShrChecker = [&](unsigned BitWidth, unsigned OrigBitWidth) {\n       return all_of(E.Scalars, [&](Value *V) {\n+        if (isa<PoisonValue>(V))\n+          return true;\n         auto *I = cast<Instruction>(V);\n         KnownBits AmtKnownBits = computeKnownBits(I->getOperand(1), *DL);\n         unsigned ShiftedBits = OrigBitWidth - BitWidth;\n"
+  ]
+}

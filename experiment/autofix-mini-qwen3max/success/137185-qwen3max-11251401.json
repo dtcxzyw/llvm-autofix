@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "137185",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/137185-qwen3max-11251401.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\nindex 6027572f1e84..00202d27300c 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n@@ -2127,7 +2127,7 @@ void VPScalarIVStepsRecipe::execute(VPTransformState &State) {\n           Builder.CreateMul(StartIdx0, ConstantInt::get(StartIdx0->getType(),\n                                                         getUnrollPart(*this)));\n     }\n-    StartIdx0 = Builder.CreateTrunc(StartIdx0, IntStepTy);\n+    StartIdx0 = Builder.CreateZExtOrTrunc(StartIdx0, IntStepTy);\n   }\n \n   if (!FirstLaneOnly && State.VF.isScalable()) {\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 344461,
+  "output_tokens": 2047,
+  "cached_tokens": 121984,
+  "total_tokens": 346508,
+  "chat_rounds": 23,
+  "total_time_sec": 174.43452095985413,
+  "trans_point": [
+    "llvm/lib/IR/Constants.cpp",
+    "llvm::ConstantExpr::getCast",
+    2215
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp",
+      2130,
+      2130
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs in `VPScalarIVStepsRecipe::execute()` when trying to create a `trunc` instruction via `Builder.CreateTrunc()`. The assertion failure in `ConstantExpr::getCast()` indicates that we're attempting an invalid cast operation - specifically trying to truncate a value from a smaller bit width to a larger bit width. From the debugger, we can see that `StartIdx0` has type `i32` (32 bits) while `IntStepTy` is `i64` (64 bits), making `trunc i32 to i64` an invalid operation.\n\n2. Analyzing `opt`'s Log: The log shows that the loop contains a floating-point induction variable (`%sum.next = fadd reassoc double %sum.1, %x`) and an integer induction variable (`%i.next = add i32 %i, 1`). The vectorizer is attempting to handle both. The VPlan shows that for the floating-point IV, it's creating scalar steps with `SCALAR-STEPS` recipe. The issue arises because `IntStepTy` is being set to match the bit width of the floating-point type (64 bits for `double`), but the actual start index value comes from the trip count computation which is `i32`.\n\n3. Root Cause Analysis: In `VPScalarIVStepsRecipe::execute()`, `IntStepTy` is computed as `IntegerType::get(BaseIVTy->getContext(), BaseIVTy->getScalarSizeInBits())`. When `BaseIVTy` is a floating-point type like `double`, this creates an `i64` type. However, the `StartIdx0` value obtained from `State.get(getOperand(2), true)` is derived from the trip count computation, which in this case is `i32` (as seen in the reproducer where `%n` is `i32` and the trip count expression involves `i32` operations). The code then attempts to truncate from `i32` to `i64`, which is invalid since truncation can only go from larger to smaller bit widths.\n\n4. Proposed Edit Point(s): The fix is to replace the `CreateTrunc` call with `CreateZExtOrTrunc` which handles both extension and truncation appropriately based on the source and destination types. This ensures that if the source type is smaller than the destination, it will zero-extend instead of attempting an invalid truncation.\n\n5. Conclusion: By changing `Builder.CreateTrunc` to `Builder.CreateZExtOrTrunc` at line 2130, we handle both cases where the source type may be larger or smaller than the destination type. This prevents the assertion failure and allows the vectorizer to correctly handle mixed-type scenarios where integer trip counts are used with floating-point induction variables.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\nindex 6027572f1e84..00202d27300c 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n@@ -2127,7 +2127,7 @@ void VPScalarIVStepsRecipe::execute(VPTransformState &State) {\n           Builder.CreateMul(StartIdx0, ConstantInt::get(StartIdx0->getType(),\n                                                         getUnrollPart(*this)));\n     }\n-    StartIdx0 = Builder.CreateTrunc(StartIdx0, IntStepTy);\n+    StartIdx0 = Builder.CreateZExtOrTrunc(StartIdx0, IntStepTy);\n   }\n \n   if (!FirstLaneOnly && State.VF.isScalable()) {\n"
+  ]
+}

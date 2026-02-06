@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "131488",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/131488-qwen3max-12051659.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..36f0a2893259 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2543,14 +2543,22 @@ static bool OptimizeNonTrivialIFuncs(\n \n     // Discover the callee versions.\n     SmallVector<Function *> Callees;\n-    if (any_of(*Resolver, [&TTI, &Callees](BasicBlock &BB) {\n-          if (auto *Ret = dyn_cast_or_null<ReturnInst>(BB.getTerminator()))\n+    bool HasReturnInst = false;\n+    if (any_of(*Resolver, [&TTI, &Callees, &HasReturnInst](BasicBlock &BB) {\n+          if (auto *Ret = dyn_cast_or_null<ReturnInst>(BB.getTerminator())) {\n+            HasReturnInst = true;\n             if (!collectVersions(TTI, Ret->getReturnValue(), Callees))\n               return true;\n+          }\n           return false;\n         }))\n       continue;\n \n+    // If there are no return instructions in the resolver, there are no\n+    // callee versions to optimize.\n+    if (!HasReturnInst)\n+      continue;\n+\n     assert(!Callees.empty() && \"Expecting successful collection of versions\");\n \n     LLVM_DEBUG(dbgs() << \"Statically resolving calls to function \"\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 191005,
+  "output_tokens": 2643,
+  "cached_tokens": 21760,
+  "total_tokens": 193648,
+  "chat_rounds": 22,
+  "total_time_sec": 191.79137206077576,
+  "trans_point": [
+    "llvm/lib/Transforms/IPO/GlobalOpt.cpp",
+    "OptimizeNonTrivialIFuncs(llvm::Module &, llvm::function_ref<llvm::TargetTransformInfo&(llvm::Function&)>)",
+    2554
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/GlobalOpt.cpp",
+      2554,
+      2554
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs in the `OptimizeNonTrivialIFuncs` function when processing an ifunc that points to a resolver function (`@f1`) containing only an `unreachable` instruction. The assertion `!Callees.empty() && \"Expecting successful collection of versions\"` fails because the `collectVersions` function was never called, leaving `Callees` empty.\n\n2. Analyzing `opt`'s Log: The log shows that the pass reaches the assertion without successfully collecting any callee versions. The resolver function `@f1` has a single basic block with only an `unreachable` terminator, which is not a `ReturnInst`. Therefore, the lambda in the `any_of` call on lines 2546-2551 never executes the `collectVersions` call since it only processes blocks ending with `ReturnInst`.\n\n3. Root Cause Analysis: The code assumes that if the `any_of` loop doesn't return early (i.e., doesn't encounter a case where `collectVersions` returns false), then `Callees` must be non-empty. However, when the resolver function contains only `unreachable` instructions and no `ReturnInst`, the loop completes without ever calling `collectVersions`, resulting in an empty `Callees` vector. This violates the assumption behind the assertion.\n\n4. Proposed Edit Point(s): The assertion on line 2554 should be removed or replaced with a conditional check that handles the case where no return instructions exist in the resolver function. Since the resolver function with only `unreachable` cannot return any function pointer, it's safe to skip optimization for such cases.\n\n5. Conclusion: The fix involves removing the problematic assertion that assumes `Callees` must be non-empty after the `any_of` loop. Instead, the code should naturally handle empty `Callees` by continuing to the next iteration, as there are no valid callee versions to optimize.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..f88d51f443bc 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2551,7 +2551,8 @@ static bool OptimizeNonTrivialIFuncs(\n         }))\n       continue;\n \n-    assert(!Callees.empty() && \"Expecting successful collection of versions\");\n+    if (Callees.empty())\n+      continue;\n \n     LLVM_DEBUG(dbgs() << \"Statically resolving calls to function \"\n                       << Resolver->getName() << \"\\n\");\n",
+    "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..36f0a2893259 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2543,14 +2543,22 @@ static bool OptimizeNonTrivialIFuncs(\n \n     // Discover the callee versions.\n     SmallVector<Function *> Callees;\n-    if (any_of(*Resolver, [&TTI, &Callees](BasicBlock &BB) {\n-          if (auto *Ret = dyn_cast_or_null<ReturnInst>(BB.getTerminator()))\n+    bool HasReturnInst = false;\n+    if (any_of(*Resolver, [&TTI, &Callees, &HasReturnInst](BasicBlock &BB) {\n+          if (auto *Ret = dyn_cast_or_null<ReturnInst>(BB.getTerminator())) {\n+            HasReturnInst = true;\n             if (!collectVersions(TTI, Ret->getReturnValue(), Callees))\n               return true;\n+          }\n           return false;\n         }))\n       continue;\n \n+    // If there are no return instructions in the resolver, there are no\n+    // callee versions to optimize.\n+    if (!HasReturnInst)\n+      continue;\n+\n     assert(!Callees.empty() && \"Expecting successful collection of versions\");\n \n     LLVM_DEBUG(dbgs() << \"Statically resolving calls to function \"\n"
+  ]
+}

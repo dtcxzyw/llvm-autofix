@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "110494",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/110494-gpt5-11251503.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Scalar/LoopStrengthReduce.cpp b/llvm/lib/Transforms/Scalar/LoopStrengthReduce.cpp\nindex f69db57c25ed..afa451486ff9 100644\n--- a/llvm/lib/Transforms/Scalar/LoopStrengthReduce.cpp\n+++ b/llvm/lib/Transforms/Scalar/LoopStrengthReduce.cpp\n@@ -6868,8 +6868,16 @@ static bool SalvageDVI(llvm::Loop *L, ScalarEvolution &SE,\n     // less DWARF ops than an iteration count-based expression.\n     if (std::optional<APInt> Offset =\n             SE.computeConstantDifference(DVIRec.SCEVs[i], SCEVInductionVar)) {\n-      if (Offset->getSignificantBits() <= 64)\n+      if (Offset->getSignificantBits() <= 64) {\n         SalvageExpr->createOffsetExpr(Offset->getSExtValue(), LSRInductionVar);\n+      } else {\n+        // Fallback: offset exists but is too large to encode directly. Use\n+        // iteration-count based salvage instead so that we still populate\n+        // LocationOps; otherwise the builder remains empty and later code\n+        // will assert.\n+        if (!SalvageExpr->createIterCountExpr(DVIRec.SCEVs[i], IterCountExpr, SE))\n+          return false;\n+      }\n     } else if (!SalvageExpr->createIterCountExpr(DVIRec.SCEVs[i], IterCountExpr,\n                                                  SE))\n       return false;\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 106695,
+  "output_tokens": 5999,
+  "cached_tokens": 71680,
+  "total_tokens": 112694,
+  "chat_rounds": 10,
+  "total_time_sec": 143.12641191482544,
+  "trans_point": [
+    "llvm/lib/Transforms/Scalar/LoopStrengthReduce.cpp",
+    "(anonymous namespace)::SCEVDbgValueBuilder::appendToVectors",
+    6629
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/LoopStrengthReduce.cpp",
+      6869,
+      6873
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs in SCEVDbgValueBuilder::appendToVectors with assertion `!LocationOps.empty()`. This means we attempted to append a salvage expression whose builder had no location operands. The reproducer is a loop with a single dbg.value that tracks a 128-bit induction-like PHI (start = large 128-bit constant, stride = 1). LSR's SCEV-based salvage logic tries to build a recovery expression for the dbg.value after transformations. The dbg.value has an empty original DIExpression (no ops), so SalvageDVI expects to fully replace it using a constructed SCEVDbgValueBuilder. However, the builder was left empty, triggering the assertion.\n\n2. Analyzing opt's Log:\nDebug output shows: \n- IV SCEV: {0,+,1}\n- restore dbg.value to pre-LSR state\n- pre/post-LSR state changed\n- salvaging location at index 0 with SCEV: {4704496199548239085565,+,1}\nImmediately after this, the pass crashes inside appendToVectors.\nThe large start constant (4704496199548239085565) exceeds 64 bits (needs ~72 bits). The salvage mechanism attempts an offset-based recovery first.\n\n3. Root Cause Analysis:\nIn SalvageDVI (lines ~6869-6875), the code does:\n```\nif (optional<APInt> Offset = computeConstantDifference(...)) {\n  if (Offset->getSignificantBits() <= 64)\n    createOffsetExpr(...); // pushes location\n  // else do nothing\n} else if (!createIterCountExpr(...)) return false;\n```\nWhen an offset exists but is wider than 64 bits, neither createOffsetExpr nor createIterCountExpr is invoked. This leaves the freshly allocated SalvageExpr builder with empty LocationOps. After the loop, for an originally empty DIExpression, code assumes the builder exists and calls `appendToVectors`, asserting that LocationOps contains the IV. The assertion fires because LocationOps is empty. The intended logic was to fall back to iteration-count-based salvage when offset-based salvage is inapplicable. That fallback only happens when no offset is computable, not when it is computable but unusable (>64 bits). Hence builder remains empty and crash ensues.\n\n4. Proposed Edit Points(s):\nEdit lines 6869-6873 in llvm/lib/Transforms/Scalar/LoopStrengthReduce.cpp to add a fallback when the offset exists but is too wide. Replace:\n```\nif (std::optional<APInt> Offset =\n        SE.computeConstantDifference(DVIRec.SCEVs[i], SCEVInductionVar)) {\n  if (Offset->getSignificantBits() <= 64)\n    SalvageExpr->createOffsetExpr(Offset->getSExtValue(), LSRInductionVar);\n} else if (!SalvageExpr->createIterCountExpr(DVIRec.SCEVs[i], IterCountExpr,\n                                             SE))\n  return false;\n```\nwith:\n```\nif (std::optional<APInt> Offset =\n        SE.computeConstantDifference(DVIRec.SCEVs[i], SCEVInductionVar)) {\n  if (Offset->getSignificantBits() <= 64) {\n    SalvageExpr->createOffsetExpr(Offset->getSExtValue(), LSRInductionVar);\n  } else {\n    // Fallback: offset too large to encode directly, use iter-count salvage.\n    if (!SalvageExpr->createIterCountExpr(DVIRec.SCEVs[i], IterCountExpr, SE))\n      return false;\n  }\n} else if (!SalvageExpr->createIterCountExpr(DVIRec.SCEVs[i], IterCountExpr, SE)) {\n  return false;\n}\n```\nThis guarantees either offset salvage or iteration-count salvage populates LocationOps, or we abort salvage early before merge, preventing the assertion.\n\n5. Conclusion:\nThe crash results from missing fallback logic when a computable offset is too wide (>64 bits). Adding the fallback to attempt createIterCountExpr in that case ensures the builder always has the IV location before appendToVectors is called, or the salvage aborts safely. This prevents the assertion and allows loop-reduce to proceed correctly for large (>64-bit) induction starts.\n",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Scalar/LoopStrengthReduce.cpp b/llvm/lib/Transforms/Scalar/LoopStrengthReduce.cpp\nindex f69db57c25ed..afa451486ff9 100644\n--- a/llvm/lib/Transforms/Scalar/LoopStrengthReduce.cpp\n+++ b/llvm/lib/Transforms/Scalar/LoopStrengthReduce.cpp\n@@ -6868,8 +6868,16 @@ static bool SalvageDVI(llvm::Loop *L, ScalarEvolution &SE,\n     // less DWARF ops than an iteration count-based expression.\n     if (std::optional<APInt> Offset =\n             SE.computeConstantDifference(DVIRec.SCEVs[i], SCEVInductionVar)) {\n-      if (Offset->getSignificantBits() <= 64)\n+      if (Offset->getSignificantBits() <= 64) {\n         SalvageExpr->createOffsetExpr(Offset->getSExtValue(), LSRInductionVar);\n+      } else {\n+        // Fallback: offset exists but is too large to encode directly. Use\n+        // iteration-count based salvage instead so that we still populate\n+        // LocationOps; otherwise the builder remains empty and later code\n+        // will assert.\n+        if (!SalvageExpr->createIterCountExpr(DVIRec.SCEVs[i], IterCountExpr, SE))\n+          return false;\n+      }\n     } else if (!SalvageExpr->createIterCountExpr(DVIRec.SCEVs[i], IterCountExpr,\n                                                  SE))\n       return false;\n"
+  ]
+}

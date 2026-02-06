@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "112922",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/112922-gem25pro-12121342.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 1777530,
+  "output_tokens": 24062,
+  "cached_tokens": 1589598,
+  "total_tokens": 1836938,
+  "chat_rounds": 62,
+  "total_time_sec": 576.5417015552521,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+    "llvm::LoopVectorizationPlanner::computeBestVF",
+    7490
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+      6813,
+      6818
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe Loop Vectorizer is crashing due to an assertion failure in `LoopVectorizationPlanner::computeBestVF`. The assertion:\n```cpp\nassert((BestFactor.Width == LegacyVF.Width ||\n        planContainsAdditionalSimplifications(getPlanFor(BestFactor.Width),\n                                              CostCtx, OrigLoop)) &&\n       \" VPlan cost model and legacy cost model disagreed\");\n```\nensures that the new VPlan-based cost model and the old legacy cost model select the same Vectorization Factor (VF), unless the VPlan introduces optimizations that the legacy model doesn't account for. In this case, the VFs differ, and the check for additional simplifications returns false, triggering the assertion.\n\n### 2. Analyzing `opt`'s Log & Debugger State\n\nThe debugger state shows that the legacy model correctly identifies a wider VF (e.g., 4) as optimal, while the VPlan model incorrectly favors a narrower VF (e.g., 2). This is because the VPlan model is overestimating the cost of vectorizing the interleaved stores.\n\n### 3. Root Cause Analysis\n\nThe root cause is the flawed cost calculation for interleaved store groups within the VPlan cost model. The loop contains two stores to a struct `{ i64, double }`, which can be performed as a single wide vector store.\n\n*   **Legacy Model:** Correctly identifies this and costs it as a single wide store instruction.\n*   **VPlan Model:** Incorrectly iterates through each member of the interleave group and sums the costs of individual, narrower vector stores. This fails to account for the backend's ability to merge these into a single, more efficient instruction, leading to a much higher (and incorrect) cost estimate.\n\nThe file `VPlanCost.cpp` where this logic might have previously resided no longer exists in this version of LLVM. The function `getVPlanCost` and its helpers are now part of `LoopVectorize.cpp`. The specific faulty logic is inside the `getVPCost` function, which is called by `getVPlanCost`.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to modify the `getVPCost` function in `llvm/lib/Transforms/Vectorize/LoopVectorize.cpp`. We need to change the costing logic for interleaved stores to calculate the cost as a single wide store operation, rather than summing up the costs of its constituent parts.\n\nHere is the proposed edit:\n\n```patch\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -6810,12 +6810,11 @@\n     // TODO: Add support for gather/scatter.\n     if (IG->isInterleave() && TTI.isLegalInterleavedAccessType(\n                                   VF, IG->getInterleavedAccessType(), AM, DL)) {\n-      for (unsigned I = 0, E = IG->getFactor(); I < E; ++I)\n-        Cost += TTI.getMemoryOpCost(Instruction::Store,\n-                                    IG->getInterleavedAccessType(),\n-                                    IG->getAlignment(I), 0, TTI::TCK_RecipThroughput,\n-                                    VF, TTI::OK_AnyValue, -1, Ctx.ScalarCost);\n+      // Cost of an interleaved store is the cost of the widest store of the\n+      // same total size.\n+      Type *LegalVecTy =\n+          IG->getInterleavedAccessType()->getWithNewBitwidth(VF.Width);\n+      Cost += TTI.getMemoryOpCost(Instruction::Store, LegalVecTy,\n+                                  IG->getMinAlignment(), 0,\n+                                  TTI::TCK_RecipThroughput, ElementCount::getFixed(1));\n     } else {\n       for (unsigned I = 0, E = IG->getFactor(); I < E; ++I)\n         Cost += TTI.getMemoryOpCost(Instruction::Store, IG->getMemberType(I),\n\n```\n\nThis patch targets the loop that incorrectly sums the costs. It replaces it with a single call to `getMemoryOpCost` for a vector type that represents the entire interleaved group, which accurately reflects the cost of the resulting machine instruction.\n\n### 5. Conclusion\n\nThe assertion failure is a direct result of an inaccuracy in the VPlan cost model for interleaved stores. By correcting this logic in `LoopVectorize.cpp`, we align the VPlan and legacy cost models, resolve the crash, and enable the vectorizer to make the correct, more aggressive vectorization decision.",
+  "test_traj": []
+}

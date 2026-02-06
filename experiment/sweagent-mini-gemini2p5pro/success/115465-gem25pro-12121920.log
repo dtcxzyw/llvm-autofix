@@ -1,0 +1,1129 @@
+Setting up the buggy LLVM environment ...
+Building LLVM and try reproducing the issue ...
+Issue reproduced successfully.
+Starting to fix the issue ...
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ You are an expert LLVM developer. Please solve this LLVM issue:                                                                                                                          │
+│                                                                                                                                                                                          │
+│ ------ BEGIN ISSUE ------                                                                                                                                                                │
+│ Type: miscompilation                                                                                                                                                                     │
+│                                                                                                                                                                                          │
+│ Reproducer (LLVM IR): ```bash                                                                                                                                                            │
+│ cat /tmp/test.ll                                                                                                                                                                         │
+│ define <4 x i8> @shuf_cmp_may_be_poison(<4 x i8> %x, <4 x i8> %y, i1 %cmp) {                                                                                                             │
+│   %sel = select i1 %cmp, <4 x i8> %y, <4 x i8> <i8 0, i8 poison, i8 0, i8 poison>                                                                                                        │
+│   %shuf = shufflevector <4 x i8> %sel, <4 x i8> <i8 poison, i8 1, i8 poison, i8 3>, <4 x i32> <i32 0, i32 5, i32 2, i32 7>                                                               │
+│   ret <4 x i8> %shuf                                                                                                                                                                     │
+│ }                                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ LLVM's Symptom: ```bash                                                                                                                                                                  │
+│ /llvm-autofix/build/llvm-build/115465/bin/opt /tmp/test.ll -passes=instcombine -S                                                                                                        │
+│ --- src ---                                                                                                                                                                              │
+│ define <4 x i8> @shuf_cmp_may_be_poison(<4 x i8> %x, <4 x i8> %y, i1 %cmp) {                                                                                                             │
+│   %sel = select i1 %cmp, <4 x i8> %y, <4 x i8> <i8 0, i8 poison, i8 0, i8 poison>                                                                                                        │
+│   %shuf = shufflevector <4 x i8> %sel, <4 x i8> <i8 poison, i8 1, i8 poison, i8 3>, <4 x i32> <i32 0, i32 5, i32 2, i32 7>                                                               │
+│   ret <4 x i8> %shuf                                                                                                                                                                     │
+│ }                                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ --- tgt ---                                                                                                                                                                              │
+│ ; ModuleID = '<stdin>'                                                                                                                                                                   │
+│ source_filename = "<stdin>"                                                                                                                                                              │
+│                                                                                                                                                                                          │
+│ define <4 x i8> @shuf_cmp_may_be_poison(<4 x i8> %x, <4 x i8> %y, i1 %cmp) {                                                                                                             │
+│   %1 = shufflevector <4 x i8> %y, <4 x i8> <i8 poison, i8 1, i8 poison, i8 3>, <4 x i32> <i32 0, i32 5, i32 2, i32 7>                                                                    │
+│   %shuf = select i1 %cmp, <4 x i8> %1, <4 x i8> <i8 0, i8 1, i8 0, i8 3>                                                                                                                 │
+│   ret <4 x i8> %shuf                                                                                                                                                                     │
+│ }                                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ --- log ---                                                                                                                                                                              │
+│                                                                                                                                                                                          │
+│ ----------------------------------------                                                                                                                                                 │
+│ define <4 x i8> @shuf_cmp_may_be_poison(<4 x i8> %x, <4 x i8> %y, i1 %cmp) {                                                                                                             │
+│ #0:                                                                                                                                                                                      │
+│   %sel = select i1 %cmp, <4 x i8> %y, <4 x i8> { 0, poison, 0, poison }                                                                                                                  │
+│   %shuf = shufflevector <4 x i8> %sel, <4 x i8> { poison, 1, poison, 3 }, 0, 5, 2, 7                                                                                                     │
+│   ret <4 x i8> %shuf                                                                                                                                                                     │
+│ }                                                                                                                                                                                        │
+│ =>                                                                                                                                                                                       │
+│ define <4 x i8> @shuf_cmp_may_be_poison(<4 x i8> %x, <4 x i8> %y, i1 %cmp) {                                                                                                             │
+│ #0:                                                                                                                                                                                      │
+│   %#1 = shufflevector <4 x i8> %y, <4 x i8> { poison, 1, poison, 3 }, 0, 5, 2, 7                                                                                                         │
+│   %shuf = select i1 %cmp, <4 x i8> %#1, <4 x i8> { 0, 1, 0, 3 }                                                                                                                          │
+│   ret <4 x i8> %shuf                                                                                                                                                                     │
+│ }                                                                                                                                                                                        │
+│ Transformation doesn't verify!                                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ ERROR: Target is more poisonous than source                                                                                                                                              │
+│                                                                                                                                                                                          │
+│ NOTE: The counterexample is unique.                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ Example:                                                                                                                                                                                 │
+│ <4 x i8> %x = < poison, poison, poison, poison >                                                                                                                                         │
+│ <4 x i8> %y = < poison, poison, poison, poison >                                                                                                                                         │
+│ i1 %cmp = poison                                                                                                                                                                         │
+│                                                                                                                                                                                          │
+│ Source:                                                                                                                                                                                  │
+│ <4 x i8> %sel = < poison, poison, poison, poison >                                                                                                                                       │
+│ <4 x i8> %shuf = < poison, #x01 (1), poison, #x03 (3) >                                                                                                                                  │
+│                                                                                                                                                                                          │
+│ Target:                                                                                                                                                                                  │
+│ <4 x i8> %#1 = < poison, #x01 (1), poison, #x03 (3) >                                                                                                                                    │
+│ <4 x i8> %shuf = < poison, poison, poison, poison >                                                                                                                                      │
+│ Source value: < poison, #x01 (1), poison, #x03 (3) >                                                                                                                                     │
+│ Target value: < poison, poison, poison, poison >                                                                                                                                         │
+│                                                                                                                                                                                          │
+│ Summary:                                                                                                                                                                                 │
+│   0 correct transformations                                                                                                                                                              │
+│   1 incorrect transformations                                                                                                                                                            │
+│   0 failed-to-prove transformations                                                                                                                                                      │
+│   0 Alive2 errors                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ --- opt_stderr ---                                                                                                                                                                       │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ ```                                                                                                                                                                                      │
+│ ------  END ISSUE  ------                                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ You can execute bash commands and edit files to implement the necessary changes.                                                                                                         │
+│                                                                                                                                                                                          │
+│ ## Recommended Workflow                                                                                                                                                                  │
+│                                                                                                                                                                                          │
+│ This workflows should be done step-by-step so that you can iterate on your changes and any possible problems.                                                                            │
+│                                                                                                                                                                                          │
+│ 1. Analyze the codebase by finding and reading relevant files                                                                                                                            │
+│ 2. Edit the source code to resolve the issue                                                                                                                                             │
+│ 3. Verify your fix works by running the `submit-patch` command                                                                                                                           │
+│ 4. Based on the output of `submit-patch`, repeat steps 1-3 as necessary until the issue is resolved                                                                                      │
+│                                                                                                                                                                                          │
+│ ## Important Rules                                                                                                                                                                       │
+│                                                                                                                                                                                          │
+│ 1. Every response must contain exactly one action                                                                                                                                        │
+│ 2. The action must be enclosed in triple backticks                                                                                                                                       │
+│ 3. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.                                                                             │
+│    However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files                                           │
+│ 4. Solving this issue does not require deleting any files or accessing the internet, so you are not permitted to use tools such as: rm, curl, wget, git, ssh, scp, ftp, telnet, ping,    │
+│ traceroute, nslookup, dig, nmap, apt, apt-get, yum, dnf, pacman, brew.                                                                                                                   │
+│                                                                                                                                                                                          │
+│ <system_information>                                                                                                                                                                     │
+│ Linux 5.15.0-143-generic #153-Ubuntu SMP Fri Jun 13 19:10:45 UTC 2025 x86_64                                                                                                             │
+│ </system_information>                                                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ ## Formatting your response                                                                                                                                                              │
+│                                                                                                                                                                                          │
+│ Here is an example of a correct response:                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ <example_response>                                                                                                                                                                       │
+│ THOUGHT: I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.                 │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ ls -la                                                                                                                                                                                   │
+│ ```                                                                                                                                                                                      │
+│ </example_response>                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ## Useful command examples                                                                                                                                                               │
+│                                                                                                                                                                                          │
+│ ### Create a new file:                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ cat <<'EOF' > newfile.py                                                                                                                                                                 │
+│ import numpy as np                                                                                                                                                                       │
+│ hello = "world"                                                                                                                                                                          │
+│ print(hello)                                                                                                                                                                             │
+│ EOF                                                                                                                                                                                      │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### Edit files with sed:```bash                                                                                                                                                          │
+│ # Replace all occurrences                                                                                                                                                                │
+│ sed -i 's/old_string/new_string/g' filename.py                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ # Replace only first occurrence                                                                                                                                                          │
+│ sed -i 's/old_string/new_string/' filename.py                                                                                                                                            │
+│                                                                                                                                                                                          │
+│ # Replace first occurrence on line 1                                                                                                                                                     │
+│ sed -i '1s/old_string/new_string/' filename.py                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ # Replace all occurrences in lines 1-10                                                                                                                                                  │
+│ sed -i '1,10s/old_string/new_string/g' filename.py                                                                                                                                       │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### View file content:                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ # View specific lines with numbers                                                                                                                                                       │
+│ nl -ba filename.py | sed -n '10,20p'                                                                                                                                                     │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### Submit your patch:                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ # This command has no arguments                                                                                                                                                          │
+│ submit-patch                                                                                                                                                                             │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### Any other permitted command you want to run:                                                                                                                                         │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ anything                                                                                                                                                                                 │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #0, chat statistics so far: {'chat_rounds': 0, 'input_tokens': 0, 'cached_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ The user wants me to fix a miscompilation in LLVM's `instcombine` pass.                                                                                                                  │
+│ The issue is related to transforming `shufflevector(select(C, A, B))` into `select(C, shufflevector(A), shufflevector(B))`.                                                              │
+│                                                                                                                                                                                          │
+│ The provided reproducer is:                                                                                                                                                              │
+│ ```llvm                                                                                                                                                                                  │
+│ define <4 x i8> @shuf_cmp_may_be_poison(<4 x i8> %x, <4 x i8> %y, i1 %cmp) {                                                                                                             │
+│   %sel = select i1 %cmp, <4 x i8> %y, <4 x i8> <i8 0, i8 poison, i8 0, i8 poison>                                                                                                        │
+│   %shuf = shufflevector <4 x i8> %sel, <4 x i8> <i8 poison, i8 1, i8 poison, i8 3>, <4 x i32> <i32 0, i32 5, i32 2, i32 7>                                                               │
+│   ret <4 x i8> %shuf                                                                                                                                                                     │
+│ }                                                                                                                                                                                        │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ The `instcombine` pass incorrectly transforms this into:                                                                                                                                 │
+│ ```llvm                                                                                                                                                                                  │
+│ define <4 x i8> @shuf_cmp_may_be_poison(<4 x i8> %x, <4 x i8> %y, i1 %cmp) {                                                                                                             │
+│   %1 = shufflevector <4 x i8> %y, <4 x i8> <i8 poison, i8 1, i8 poison, i8 3>, <4 x i32> <i32 0, i32 5, i32 2, i32 7>                                                                    │
+│   %shuf = select i1 %cmp, <4 x i8> %1, <4 x i8> <i8 0, i8 1, i8 0, i8 3>                                                                                                                 │
+│   ret <4 x i8> %shuf                                                                                                                                                                     │
+│ }                                                                                                                                                                                        │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ The Alive2 verification tool points out the error with a counterexample:                                                                                                                 │
+│ `%y = <poison, poison, poison, poison>`                                                                                                                                                  │
+│ `%cmp = poison`                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ Let's analyze the source and target behavior with this counterexample.                                                                                                                   │
+│                                                                                                                                                                                          │
+│ **Source:**                                                                                                                                                                              │
+│ 1.  `%sel = select i1 poison, <4 x i8> %y, <4 x i8> <0, poison, 0, poison>`                                                                                                              │
+│     `%y` is `<poison, poison, poison, poison>`.                                                                                                                                          │
+│     The false value is `<0, poison, 0, poison>`.                                                                                                                                         │
+│     The select result `%sel` will have `poison` for elements where the operands differ, and the common value otherwise.                                                                  │
+│     -   `%sel[0]`: `select poison, poison, 0` -> `poison`                                                                                                                                │
+│     -   `%sel[1]`: `select poison, poison, poison` -> `poison`                                                                                                                           │
+│     -   `%sel[2]`: `select poison, poison, 0` -> `poison`                                                                                                                                │
+│     -   `%sel[3]`: `select poison, poison, poison` -> `poison`                                                                                                                           │
+│     So, `%sel` is `<poison, poison, poison, poison>`.                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ 2.  `%shuf = shufflevector <4 x i8> %sel, <4 x i8> <poison, 1, poison, 3>, <4 x i32> <0, 5, 2, 7>`                                                                                       │
+│     The shuffle mask selects elements from the two input vectors.                                                                                                                        │
+│     -   `%shuf[0]`: from `%sel` at index 0 -> `%sel[0]` -> `poison`                                                                                                                      │
+│     -   `%shuf[1]`: from the second vector at index 1 (5-4) -> `1`                                                                                                                       │
+│     -   `%shuf[2]`: from `%sel` at index 2 -> `%sel[2]` -> `poison`                                                                                                                      │
+│     -   `%shuf[3]`: from the second vector at index 3 (7-4) -> `3`                                                                                                                       │
+│     So, the source result is `<poison, 1, poison, 3>`.                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ **Target:**                                                                                                                                                                              │
+│ 1.  `%1 = shufflevector <4 x i8> %y, <4 x i8> <poison, 1, poison, 3>, <4 x i32> <0, 5, 2, 7>`                                                                                            │
+│     `%y` is `<poison, poison, poison, poison>`.                                                                                                                                          │
+│     -   `%1[0]`: from `%y` at index 0 -> `%y[0]` -> `poison`                                                                                                                             │
+│     -   `%1[1]`: from the second vector at index 1 -> `1`                                                                                                                                │
+│     -   `%1[2]`: from `%y` at index 2 -> `%y[2]` -> `poison`                                                                                                                             │
+│     -   `%1[3]`: from the second vector at index 3 -> `3`                                                                                                                                │
+│     So, `%1` is `<poison, 1, poison, 3>`.                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ 2.  `%shuf = select i1 poison, <4 x i8> %1, <4 x i8> <0, 1, 0, 3>`                                                                                                                       │
+│     The true value is `%1` = `<poison, 1, poison, 3>`.                                                                                                                                   │
+│     The false value is `<0, 1, 0, 3>`.                                                                                                                                                   │
+│     -   `%shuf[0]`: `select poison, poison, 0` -> `poison`                                                                                                                               │
+│     -   `%shuf[1]`: `select poison, 1, 1` -> `1`                                                                                                                                         │
+│     -   `%shuf[2]`: `select poison, poison, 0` -> `poison`                                                                                                                               │
+│     -   `%shuf[3]`: `select poison, 3, 3` -> `3`                                                                                                                                         │
+│     So, the target result is `<poison, 1, poison, 3>`.                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ Wait, my manual trace does not match the Alive2 output. Let me re-read the Alive2 log.                                                                                                   │
+│ `Source value: < poison, #x01 (1), poison, #x03 (3) >`                                                                                                                                   │
+│ `Target value: < poison, poison, poison, poison >`                                                                                                                                       │
+│ My source trace is correct. My target trace is wrong. Why?                                                                                                                               │
+│                                                                                                                                                                                          │
+│ Let's re-examine the target's final select:                                                                                                                                              │
+│ `%shuf = select i1 poison, <4 x i8> %1, <4 x i8> <0, 1, 0, 3>`                                                                                                                           │
+│ True val: `%1` = `<poison, 1, poison, 3>`                                                                                                                                                │
+│ False val: `<0, 1, 0, 3>`                                                                                                                                                                │
+│ - `%shuf[0]`: `select poison, poison, 0` -> `poison`                                                                                                                                     │
+│ - `%shuf[1]`: `select poison, 1, 1` -> `1`                                                                                                                                               │
+│ - `%shuf[2]`: `select poison, poison, 0` -> `poison`                                                                                                                                     │
+│ - `%shuf[3]`: `select poison, 3, 3` -> `3`                                                                                                                                               │
+│ Result: `<poison, 1, poison, 3>`.                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│ There must be a misunderstanding of `poison` propagation.                                                                                                                                │
+│ The rule for `select i1 C, T, F` is: if `C` is `poison`, the result is `poison` if `T` and `F` differ, and `T` (or `F`) if they are the same.                                            │
+│ Let's re-re-examine the target's final select:                                                                                                                                           │
+│ `%shuf = select i1 poison, <4 x i8> %1, <4 x i8> <0, 1, 0, 3>`                                                                                                                           │
+│ True val: `%1` = `<poison, 1, poison, 3>`                                                                                                                                                │
+│ False val: `<0, 1, 0, 3>`                                                                                                                                                                │
+│ - `%shuf[0]`: `select poison, poison, 0`. Operands `poison` and `0` differ. Result is `poison`. Correct.                                                                                 │
+│ - `%shuf[1]`: `select poison, 1, 1`. Operands are the same. Result is `1`. Correct.                                                                                                      │
+│ - `%shuf[2]`: `select poison, poison, 0`. Operands differ. Result is `poison`. Correct.                                                                                                  │
+│ - `%shuf[3]`: `select poison, 3, 3`. Operands are the same. Result is `3`. Correct.                                                                                                      │
+│ My manual trace consistently gives `<poison, 1, poison, 3>` for the target. The Alive2 log says `<poison, poison, poison, poison>`. This is confusing.                                   │
+│                                                                                                                                                                                          │
+│ Let's reconsider the transformation. The issue arises because `shuffle(select)` is not always `select(shuffle)`.                                                                         │
+│ The transformation is valid if the shuffle doesn't mix elements from the two select operands in a way that changes `poison` propagation.                                                 │
+│ In `shuffle(select(C, A, B))`, the `select` happens first. If `C` is poison, the result of `select` can be a mix of `A` and `B` elements (where they are equal) and `poison` (where they │
+│ differ). Then this mixed vector is shuffled.                                                                                                                                             │
+│ In `select(C, shuffle(A), shuffle(B))`, `A` and `B` are shuffled first. Then `select` is performed on the shuffled vectors.                                                              │
+│                                                                                                                                                                                          │
+│ The problem is that `shuffle(B)` might not be what we expect if `B` contains `poison`.                                                                                                   │
+│ In the reproducer, `B` is `<0, poison, 0, poison>`.                                                                                                                                      │
+│ The transformation calculates `shuffle(B)` to be `<0, 1, 0, 3>`.                                                                                                                         │
+│ Let's see how:                                                                                                                                                                           │
+│ `shufflevector(<0, poison, 0, poison>, <poison, 1, poison, 3>, <0, 5, 2, 7>)`                                                                                                            │
+│ - `res[0]`: from first vec, index 0 -> `0`                                                                                                                                               │
+│ - `res[1]`: from second vec, index 1 -> `1`                                                                                                                                              │
+│ - `res[2]`: from first vec, index 2 -> `0`                                                                                                                                               │
+│ - `res[3]`: from second vec, index 3 -> `3`                                                                                                                                              │
+│ Result: `<0, 1, 0, 3>`. This is correct.                                                                                                                                                 │
+│                                                                                                                                                                                          │
+│ The core of the miscompilation is that `poison` in an input vector to `shufflevector` can be replaced by a non-`poison` value if the shuffle mask index for that element refers to the   │
+│ *other* input vector.                                                                                                                                                                    │
+│ In `shuffle(B)`, `B` is `<0, poison, 0, poison>`. The shuffle mask is `<0, 5, 2, 7>`.                                                                                                    │
+│ The result is `<B[0], V2[1], B[2], V2[3]>` = `<0, 1, 0, 3>`.                                                                                                                             │
+│ The `poison` at `B[1]` and `B[3]` is ignored because the shuffle mask indices `5` and `7` select from the second vector.                                                                 │
+│                                                                                                                                                                                          │
+│ The transformation is only valid if, for any given element in the output, the shuffle mask selects from the same input vector (`A` or `B`) as it would from `select(C, A, B)`. This is   │
+│ not true. The shuffle mask is constant.                                                                                                                                                  │
+│                                                                                                                                                                                          │
+│ The transformation `shuffle(select(C, A, B)) -> select(C, shuffle(A), shuffle(B))` is valid if `shuffle` is a permutation of just one vector. Here, `shufflevector` takes two vectors.   │
+│ Let `shuf(V) = shufflevector(V, V2, M)`.                                                                                                                                                 │
+│ The transform is `shuf(select(C, A, B)) -> select(C, shuf(A), shuf(B))`.                                                                                                                 │
+│ This is `shufflevector(select(C, A, B), V2, M) -> select(C, shufflevector(A, V2, M), shufflevector(B, V2, M))`.                                                                          │
+│                                                                                                                                                                                          │
+│ The problem is that `shufflevector` is not distributive over `select` when the shuffle mask refers to the second operand.                                                                │
+│ The code that performs this transformation is in `InstCombiner::visitShuffleVector`.                                                                                                     │
+│ I'll search for `shufflevector` and `select` in `InstCombine.cpp`.                                                                                                                       │
+│ I found `InstCombiner::visitShuffleVector`. Inside, there's a section:                                                                                                                   │
+│ `// shuffle(select(c,v1,v2)) -> select(c,shuffle(v1),shuffle(v2))`                                                                                                                       │
+│ This is the code that needs to be fixed.                                                                                                                                                 │
+│                                                                                                                                                                                          │
+│ The condition for this transform is:                                                                                                                                                     │
+│ `if (auto *Sel = dyn_cast<SelectInst>(V1)) { ... }`                                                                                                                                      │
+│ It sinks a shuffle through a select.                                                                                                                                                     │
+│ The logic seems to be creating `NewShuf1 = shuffle(Sel->getTrueValue())` and `NewShuf2 = shuffle(Sel->getFalseValue())`.                                                                 │
+│ The problem is that `shuffle` here is `shufflevector(V, V2, Mask)`.                                                                                                                      │
+│ When creating `NewShuf2`, it does `Builder.CreateShuffleVector(Sel->getFalseValue(), V2, Mask)`.                                                                                         │
+│ If `Sel->getFalseValue()` has `poison` elements, but the mask selects from `V2` for those lanes, the `poison` is replaced by a concrete value from `V2`.                                 │
+│ However, in the original `shufflevector(select(C, V1, V2), ...)`, if `C` is false, the input to shuffle is `V2`, which has `poison`. The shuffle result will preserve that `poison` if   │
+│ the mask selects from it.                                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ The fix is to prevent this transformation when the second shuffle operand `V2` is not `undef` or `poison`. If `V2` has concrete values, it can "un-poison" `poison`s from `V1`'s         │
+│ operands.                                                                                                                                                                                │
+│ The check should be `isGuaranteedNotToBePoison(V2)` or something similar.                                                                                                                │
+│ Looking at the code                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Please always provide EXACTLY ONE action in triple backticks, found 0 actions.                                                                                                           │
+│ If you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`                                                                            │
+│ without any other command.                                                                                                                                                               │
+│ Else, please format your response exactly as follows:                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ <response_example>                                                                                                                                                                       │
+│ Here are some thoughts about why you want to perform the action.                                                                                                                         │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ <action>                                                                                                                                                                                 │
+│ ```                                                                                                                                                                                      │
+│ </response_example>                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ Note: In rare cases, if you need to reference a similar format in your command, you might have                                                                                           │
+│ to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.                                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #1, chat statistics so far: {'chat_rounds': 1, 'input_tokens': 1968, 'cached_tokens': 0, 'output_tokens': 3096, 'total_tokens': 6062}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ The user wants me to fix an LLVM miscompilation.                                                                                                                                         │
+│ The issue is in the `instcombine` pass, where a `shufflevector` over a `select` is incorrectly transformed.                                                                              │
+│ The transformation is `shufflevector(select(C, A, B), D, M) -> select(C, shufflevector(A, D, M), shufflevector(B, D, M))`.                                                               │
+│ The provided reproducer shows that this is incorrect when `poison` values are involved.                                                                                                  │
+│                                                                                                                                                                                          │
+│ The Alive2 log shows the counterexample:                                                                                                                                                 │
+│ `%y = < poison, poison, poison, poison >`                                                                                                                                                │
+│ `%cmp = poison`                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ Let's trace the execution with these inputs.                                                                                                                                             │
+│                                                                                                                                                                                          │
+│ **Source IR:**                                                                                                                                                                           │
+│ ```llvm                                                                                                                                                                                  │
+│ define <4 x i8> @shuf_cmp_may_be_poison(<4 x i8> %x, <4 x i8> %y, i1 %cmp) {                                                                                                             │
+│   %sel = select i1 %cmp, <4 x i8> %y, <4 x i8> <i8 0, i8 poison, i8 0, i8 poison>                                                                                                        │
+│   %shuf = shufflevector <4 x i8> %sel, <4 x i8> <i8 poison, i8 1, i8 poison, i8 3>, <4 x i32> <i32 0, i32 5, i32 2, i32 7>                                                               │
+│   ret <4 x i8> %shuf                                                                                                                                                                     │
+│ }                                                                                                                                                                                        │
+│ ```                                                                                                                                                                                      │
+│ 1.  `%sel = select i1 poison, <poison, poison, poison, poison>, <0, poison, 0, poison>`                                                                                                  │
+│     -   `sel[0] = select poison, poison, 0` -> `poison`                                                                                                                                  │
+│     -   `sel[1] = select poison, poison, poison` -> `poison`                                                                                                                             │
+│     -   `sel[2] = select poison, poison, 0` -> `poison`                                                                                                                                  │
+│     -   `sel[3] = select poison, poison, poison` -> `poison`                                                                                                                             │
+│     So, `%sel` is `<poison, poison, poison, poison>`.                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ 2.  `%shuf = shufflevector <4 x i8> %sel, <4 x i8> <poison, 1, poison, 3>, <4 x i32> <0, 5, 2, 7>`                                                                                       │
+│     -   `shuf[0] = sel[0]` -> `poison`                                                                                                                                                   │
+│     -   `shuf[1] = V2[1]` (from index 5) -> `1`                                                                                                                                          │
+│     -   `shuf[2] = sel[2]` -> `poison`                                                                                                                                                   │
+│     -   `shuf[3] = V2[3]` (from index 7) -> `3`                                                                                                                                          │
+│     Source result: `<poison, 1, poison, 3>`. This matches the Alive2 log.                                                                                                                │
+│                                                                                                                                                                                          │
+│ **Target IR (transformed):**                                                                                                                                                             │
+│ ```llvm                                                                                                                                                                                  │
+│ define <4 x i8> @shuf_cmp_may_be_poison(<4 x i8> %x, <4 x i8> %y, i1 %cmp) {                                                                                                             │
+│   %1 = shufflevector <4 x i8> %y, <4 x i8> <i8 poison, i8 1, i8 poison, i8 3>, <4 x i32> <i32 0, i32 5, i32 2, i32 7>                                                                    │
+│   %shuf = select i1 %cmp, <4 x i8> %1, <4 x i8> <i8 0, i8 1, i8 0, i8 3>                                                                                                                 │
+│   ret <4 x i8> %shuf                                                                                                                                                                     │
+│ }                                                                                                                                                                                        │
+│ ```                                                                                                                                                                                      │
+│ 1.  `%1 = shufflevector <4 x i8> %y, <4 x i8> <poison, 1, poison, 3>, <4 x i32> <0, 5, 2, 7>`                                                                                            │
+│     `%y` is `<poison, poison, poison, poison>`.                                                                                                                                          │
+│     -   `%1[0] = y[0]` -> `poison`                                                                                                                                                       │
+│     -   `%1[1] = V2[1]` -> `1`                                                                                                                                                           │
+│     -   `%1[2] = y[2]` -> `poison`                                                                                                                                                       │
+│     -   `%1[3] = V2[3]` -> `3`                                                                                                                                                           │
+│     So, `%1` is `<poison, 1, poison, 3>`.                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ 2.  `%shuf = select i1 %cmp, <4 x i8> %1, <4 x i8> <0, 1, 0, 3>`                                                                                                                         │
+│     `%cmp` is `poison`. `%1` is `<poison, 1, poison, 3>`.                                                                                                                                │
+│     -   `shuf[0] = select poison, poison, 0` -> `poison`                                                                                                                                 │
+│     -   `shuf[1] = select poison, 1, 1` -> `1`                                                                                                                                           │
+│     -   `shuf[2] = select poison, poison, 0` -> `poison`                                                                                                                                 │
+│     -   `shuf[3] = select poison, 3, 3` -> `3`                                                                                                                                           │
+│     Target result: `<poison, 1, poison, 3>`.                                                                                                                                             │
+│                                                                                                                                                                                          │
+│ My manual trace shows source and target produce the same result. However, the Alive2 log says:                                                                                           │
+│ `Target value: < poison, poison, poison, poison >`                                                                                                                                       │
+│ This discrepancy is confusing. There might be a subtle rule about `poison` I'm missing, or the Alive2 log might be simplified. The key point is that Alive2 flags this as a              │
+│ miscompilation, and the transformation is indeed suspect.                                                                                                                                │
+│                                                                                                                                                                                          │
+│ The transformation `shuffle(select(C,A,B),D) -> select(C,shuffle(A,D),shuffle(B,D))` is not generally valid. It is valid if `D` is `undef`. If `D` has concrete values, it can           │
+│ "un-poison" lanes. For example, `shuffle(<poison>, <42>, <1>)` results in `<42>`, but if the `<poison>` came from a `select`, this might be wrong.                                       │
+│                                                                                                                                                                                          │
+│ The code for this transformation is in `InstCombineVectorext.cpp`. I need to find it and restrict it. A simple fix is to only allow this transformation if the second operand to the     │
+│ `shufflevector` is `undef`. This is safe because `shufflevector(V, undef, M)` will propagate `poison` from `V` correctly, and any lanes that select from `undef` will be `undef`, which  │
+│ is compatible with `poison` propagation.                                                                                                                                                 │
+│                                                                                                                                                                                          │
+│ I will now locate the code and apply this restriction. I'll search for the pattern `shuffle(select...` in `llvm/lib/Transforms/InstCombine/InstCombineVectorext.cpp`.                    │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ cat <<'EOF' | patch -p1                                                                                                                                                                  │
+│ --- a/llvm/lib/Transforms/InstCombine/InstCombineVectorext.cpp                                                                                                                           │
+│ +++ b/llvm/lib/Transforms/InstCombine/InstCombineVectorext.cpp                                                                                                                           │
+│ @@ -100,7 +100,10 @@                                                                                                                                                                     │
+│    // shuffle(select(c,v1,v2)) -> select(c,shuffle(v1),shuffle(v2))                                                                                                                      │
+│    if (auto *SI = dyn_cast<SelectInst>(V1)) {                                                                                                                                            │
+│      // This is only valid if the shuffle is not using the second vector,                                                                                                                │
+│ -    // otherwise we can't distribute the shuffle.                                                                                                                                       │
+│ +    // otherwise we can't distribute the shuffle. This is because the second                                                                                                            │
+│ +    // vector may have non-poison values that can replace poison values from                                                                                                            │
+│ +    // the select operands. This is only safe if the second vector is all                                                                                                               │
+│ +    // undef.                                                                                                                                                                           │
+│      if (ShuffleVectorInst::isZeroEltSplat(V2)) {                                                                                                                                        │
+│        Value *ShufV1 = Builder.CreateShuffleVector(SI->getTrueValue(), Mask);                                                                                                            │
+│        Value *ShufV2 = Builder.CreateShuffleVector(SI->getFalseValue(), Mask);                                                                                                           │
+│ @@ -108,7 +111,7 @@                                                                                                                                                                      │
+│        return ReplaceInstUsesWith(I, Sel);                                                                                                                                               │
+│      }                                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ -    if (isa<UndefValue>(V2)) {                                                                                                                                                          │
+│ +    if (isa<UndefValue>(V2) || isa<PoisonValue>(V2)) {                                                                                                                                  │
+│        Value *ShufV1 = Builder.CreateShuffleVector(SI->getTrueValue(), V2, Mask);                                                                                                        │
+│        Value *ShufV2 = Builder.CreateShuffleVector(SI->getFalseValue(), V2, Mask);                                                                                                       │
+│        Value *Sel = Builder.CreateSelect(SI->getCondition(), ShufV1, ShufV2);                                                                                                            │
+│                                                                                                                                                                                          │
+│ EOF                                                                                                                                                                                      │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>1</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ can't find file to patch at input line 3                                                                                                                                                 │
+│ Perhaps you used the wrong -p or --strip option?                                                                                                                                         │
+│ The text leading up to this was:                                                                                                                                                         │
+│ --------------------------                                                                                                                                                               │
+│ |--- a/llvm/lib/Transforms/InstCombine/InstCombineVectorext.cpp                                                                                                                          │
+│ |+++ b/llvm/lib/Transforms/InstCombine/InstCombineVectorext.cpp                                                                                                                          │
+│ --------------------------                                                                                                                                                               │
+│ File to patch:                                                                                                                                                                           │
+│ Skip this patch? [y]                                                                                                                                                                     │
+│ Skipping patch.                                                                                                                                                                          │
+│ 2 out of 2 hunks ignored                                                                                                                                                                 │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #2, chat statistics so far: {'chat_rounds': 2, 'input_tokens': 7177, 'cached_tokens': 0, 'output_tokens': 5041, 'total_tokens': 14220}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ The patch command failed because the file path `llvm/lib/Transforms/InstCombine/InstCombineVectorext.cpp` was not found. I need to find the correct location of this file within the     │
+│ current directory structure. I'll use the `find` command to locate `InstCombineVectorext.cpp`. Once I have the correct path, I will re-create the patch with the correct file path and   │
+│ apply it.                                                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ find . -name InstCombineVectorext.cpp                                                                                                                                                    │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #3, chat statistics so far: {'chat_rounds': 3, 'input_tokens': 14462, 'cached_tokens': 0, 'output_tokens': 5153, 'total_tokens': 21724}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ The `find` command did not find the file `InstCombineVectorext.cpp`. This suggests that the logic for vector instruction combining might be in a different file in this version of LLVM. │
+│ It's common for code to be refactored. The logic for `shufflevector` is likely within the main `InstCombine` implementation. I'll search for the relevant code in                        │
+│ `llvm/lib/Transforms/InstCombine/InstCombine.cpp`. I'll look for code that handles a `ShuffleVectorInst` where the first operand is a `SelectInst`.                                      │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ grep -n "shuffle(select(c,v1,v2))" llvm/lib/Transforms/InstCombine/InstCombine.cpp                                                                                                       │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>2</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ grep: llvm/lib/Transforms/InstCombine/InstCombine.cpp: No such file or directory                                                                                                         │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #4, chat statistics so far: {'chat_rounds': 4, 'input_tokens': 21876, 'cached_tokens': 6088, 'output_tokens': 5312, 'total_tokens': 29472}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ It seems my assumption about the file path is still wrong. `llvm/lib/Transforms/InstCombine/InstCombine.cpp` does not exist. I need to find where the `InstCombine` source files are.    │
+│ I'll list the contents of `llvm/lib/Transforms/InstCombine` to see the file structure.                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ ls llvm/lib/Transforms/InstCombine                                                                                                                                                       │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ CMakeLists.txt                                                                                                                                                                           │
+│ InstCombineAddSub.cpp                                                                                                                                                                    │
+│ InstCombineAndOrXor.cpp                                                                                                                                                                  │
+│ InstCombineAtomicRMW.cpp                                                                                                                                                                 │
+│ InstCombineCalls.cpp                                                                                                                                                                     │
+│ InstCombineCasts.cpp                                                                                                                                                                     │
+│ InstCombineCompares.cpp                                                                                                                                                                  │
+│ InstCombineInternal.h                                                                                                                                                                    │
+│ InstCombineLoadStoreAlloca.cpp                                                                                                                                                           │
+│ InstCombineMulDivRem.cpp                                                                                                                                                                 │
+│ InstCombineNegator.cpp                                                                                                                                                                   │
+│ InstCombinePHI.cpp                                                                                                                                                                       │
+│ InstCombineSelect.cpp                                                                                                                                                                    │
+│ InstCombineShifts.cpp                                                                                                                                                                    │
+│ InstCombineSimplifyDemanded.cpp                                                                                                                                                          │
+│ InstCombineVectorOps.cpp                                                                                                                                                                 │
+│ InstructionCombining.cpp                                                                                                                                                                 │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #5, chat statistics so far: {'chat_rounds': 5, 'input_tokens': 29488, 'cached_tokens': 12169, 'output_tokens': 5398, 'total_tokens': 37170}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ Okay, the `ls` command shows that the `InstCombine` logic is split into multiple files. Based on the names, `InstCombineVectorOps.cpp` is the most likely candidate to contain the logic │
+│ for `ShuffleVectorInst`.                                                                                                                                                                 │
+│                                                                                                                                                                                          │
+│ I will now search for the code comment `shuffle(select(c,v1,v2))` inside `llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp` to locate the problematic transformation.            │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ grep -C 10 "shuffle(select(c,v1,v2))" llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp                                                                                           │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>1</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #6, chat statistics so far: {'chat_rounds': 6, 'input_tokens': 37321, 'cached_tokens': 18244, 'output_tokens': 5537, 'total_tokens': 45231}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ The `grep` command returned no results, which means the comment I was searching for is not present in `InstCombineVectorOps.cpp`. However, it's still the most likely place for this     │
+│ logic. I'll examine the `visitShuffleVector` function within that file to find the transformation. I'll search for `visitShuffleVector` and then look for a `dyn_cast<SelectInst>`.      │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ grep -n "visitShuffleVector" llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp                                                                                                    │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ 2791:Instruction *InstCombinerImpl::visitShuffleVectorInst(ShuffleVectorInst &SVI) {                                                                                                     │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #7, chat statistics so far: {'chat_rounds': 7, 'input_tokens': 45310, 'cached_tokens': 22290, 'output_tokens': 5655, 'total_tokens': 53338}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ Okay, I have the function name and line number for `visitShuffleVectorInst`. Now I need to examine the code inside this function to find the part that handles `shuffle(select(...))`.   │
+│ I'll dump the contents of the function and look for a `dyn_cast` of the shuffle's operand to a `SelectInst`. I'll start by looking at the 100 lines following the function definition.   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ nl -ba llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp | sed -n '2791,2891p'                                                                                                    │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│   2791  Instruction *InstCombinerImpl::visitShuffleVectorInst(ShuffleVectorInst &SVI) {                                                                                                  │
+│   2792    Value *LHS = SVI.getOperand(0);                                                                                                                                                │
+│   2793    Value *RHS = SVI.getOperand(1);                                                                                                                                                │
+│   2794    SimplifyQuery ShufQuery = SQ.getWithInstruction(&SVI);                                                                                                                         │
+│   2795    if (auto *V = simplifyShuffleVectorInst(LHS, RHS, SVI.getShuffleMask(),                                                                                                        │
+│   2796                                            SVI.getType(), ShufQuery))                                                                                                             │
+│   2797      return replaceInstUsesWith(SVI, V);                                                                                                                                          │
+│   2798                                                                                                                                                                                   │
+│   2799    if (Instruction *I = simplifyBinOpSplats(SVI))                                                                                                                                 │
+│   2800      return I;                                                                                                                                                                    │
+│   2801                                                                                                                                                                                   │
+│   2802    // Canonicalize splat shuffle to use poison RHS. Handle this explicitly in                                                                                                     │
+│   2803    // order to support scalable vectors.                                                                                                                                          │
+│   2804    if (match(SVI.getShuffleMask(), m_ZeroMask()) && !isa<PoisonValue>(RHS))                                                                                                       │
+│   2805      return replaceOperand(SVI, 1, PoisonValue::get(RHS->getType()));                                                                                                             │
+│   2806                                                                                                                                                                                   │
+│   2807    if (isa<ScalableVectorType>(LHS->getType()))                                                                                                                                   │
+│   2808      return nullptr;                                                                                                                                                              │
+│   2809                                                                                                                                                                                   │
+│   2810    unsigned VWidth = cast<FixedVectorType>(SVI.getType())->getNumElements();                                                                                                      │
+│   2811    unsigned LHSWidth = cast<FixedVectorType>(LHS->getType())->getNumElements();                                                                                                   │
+│   2812                                                                                                                                                                                   │
+│   2813    // shuffle (bitcast X), (bitcast Y), Mask --> bitcast (shuffle X, Y, Mask)                                                                                                     │
+│   2814    //                                                                                                                                                                             │
+│   2815    // if X and Y are of the same (vector) type, and the element size is not                                                                                                       │
+│   2816    // changed by the bitcasts, we can distribute the bitcasts through the                                                                                                         │
+│   2817    // shuffle, hopefully reducing the number of instructions. We make sure that                                                                                                   │
+│   2818    // at least one bitcast only has one use, so we don't *increase* the number of                                                                                                 │
+│   2819    // instructions here.                                                                                                                                                          │
+│   2820    Value *X, *Y;                                                                                                                                                                  │
+│   2821    if (match(LHS, m_BitCast(m_Value(X))) && match(RHS, m_BitCast(m_Value(Y))) &&                                                                                                  │
+│   2822        X->getType()->isVectorTy() && X->getType() == Y->getType() &&                                                                                                              │
+│   2823        X->getType()->getScalarSizeInBits() ==                                                                                                                                     │
+│   2824            SVI.getType()->getScalarSizeInBits() &&                                                                                                                                │
+│   2825        (LHS->hasOneUse() || RHS->hasOneUse())) {                                                                                                                                  │
+│   2826      Value *V = Builder.CreateShuffleVector(X, Y, SVI.getShuffleMask(),                                                                                                           │
+│   2827                                             SVI.getName() + ".uncasted");                                                                                                         │
+│   2828      return new BitCastInst(V, SVI.getType());                                                                                                                                    │
+│   2829    }                                                                                                                                                                              │
+│   2830                                                                                                                                                                                   │
+│   2831    ArrayRef<int> Mask = SVI.getShuffleMask();                                                                                                                                     │
+│   2832                                                                                                                                                                                   │
+│   2833    // Peek through a bitcasted shuffle operand by scaling the mask. If the                                                                                                        │
+│   2834    // simulated shuffle can simplify, then this shuffle is unnecessary:                                                                                                           │
+│   2835    // shuf (bitcast X), undef, Mask --> bitcast X'                                                                                                                                │
+│   2836    // TODO: This could be extended to allow length-changing shuffles.                                                                                                             │
+│   2837    //       The transform might also be obsoleted if we allowed canonicalization                                                                                                  │
+│   2838    //       of bitcasted shuffles.                                                                                                                                                │
+│   2839    if (match(LHS, m_BitCast(m_Value(X))) && match(RHS, m_Undef()) &&                                                                                                              │
+│   2840        X->getType()->isVectorTy() && VWidth == LHSWidth) {                                                                                                                        │
+│   2841      // Try to create a scaled mask constant.                                                                                                                                     │
+│   2842      auto *XType = cast<FixedVectorType>(X->getType());                                                                                                                           │
+│   2843      unsigned XNumElts = XType->getNumElements();                                                                                                                                 │
+│   2844      SmallVector<int, 16> ScaledMask;                                                                                                                                             │
+│   2845      if (scaleShuffleMaskElts(XNumElts, Mask, ScaledMask)) {                                                                                                                      │
+│   2846        // If the shuffled source vector simplifies, cast that value to this                                                                                                       │
+│   2847        // shuffle's type.                                                                                                                                                         │
+│   2848        if (auto *V = simplifyShuffleVectorInst(X, UndefValue::get(XType),                                                                                                         │
+│   2849                                                ScaledMask, XType, ShufQuery))                                                                                                     │
+│   2850          return BitCastInst::Create(Instruction::BitCast, V, SVI.getType());                                                                                                      │
+│   2851      }                                                                                                                                                                            │
+│   2852    }                                                                                                                                                                              │
+│   2853                                                                                                                                                                                   │
+│   2854    // shuffle x, x, mask --> shuffle x, undef, mask'                                                                                                                              │
+│   2855    if (LHS == RHS) {                                                                                                                                                              │
+│   2856      assert(!match(RHS, m_Undef()) &&                                                                                                                                             │
+│   2857             "Shuffle with 2 undef ops not simplified?");                                                                                                                          │
+│   2858      return new ShuffleVectorInst(LHS, createUnaryMask(Mask, LHSWidth));                                                                                                          │
+│   2859    }                                                                                                                                                                              │
+│   2860                                                                                                                                                                                   │
+│   2861    // shuffle undef, x, mask --> shuffle x, undef, mask'                                                                                                                          │
+│   2862    if (match(LHS, m_Undef())) {                                                                                                                                                   │
+│   2863      SVI.commute();                                                                                                                                                               │
+│   2864      return &SVI;                                                                                                                                                                 │
+│   2865    }                                                                                                                                                                              │
+│   2866                                                                                                                                                                                   │
+│   2867    if (Instruction *I = canonicalizeInsertSplat(SVI, Builder))                                                                                                                    │
+│   2868      return I;                                                                                                                                                                    │
+│   2869                                                                                                                                                                                   │
+│   2870    if (Instruction *I = foldSelectShuffle(SVI))                                                                                                                                   │
+│   2871      return I;                                                                                                                                                                    │
+│   2872                                                                                                                                                                                   │
+│   2873    if (Instruction *I = foldTruncShuffle(SVI, DL.isBigEndian()))                                                                                                                  │
+│   2874      return I;                                                                                                                                                                    │
+│   2875                                                                                                                                                                                   │
+│   2876    if (Instruction *I = narrowVectorSelect(SVI, Builder))                                                                                                                         │
+│   2877      return I;                                                                                                                                                                    │
+│   2878                                                                                                                                                                                   │
+│   2879    if (Instruction *I = foldShuffleOfUnaryOps(SVI, Builder))                                                                                                                      │
+│   2880      return I;                                                                                                                                                                    │
+│   2881                                                                                                                                                                                   │
+│   2882    if (Instruction *I = foldCastShuffle(SVI, Builder))                                                                                                                            │
+│   2883      return I;                                                                                                                                                                    │
+│   2884                                                                                                                                                                                   │
+│   2885    APInt PoisonElts(VWidth, 0);                                                                                                                                                   │
+│   2886    APInt AllOnesEltMask(APInt::getAllOnes(VWidth));                                                                                                                               │
+│   2887    if (Value *V = SimplifyDemandedVectorElts(&SVI, AllOnesEltMask, PoisonElts)) {                                                                                                 │
+│   2888      if (V != &SVI)                                                                                                                                                               │
+│   2889        return replaceInstUsesWith(SVI, V);                                                                                                                                        │
+│   2890      return &SVI;                                                                                                                                                                 │
+│   2891    }                                                                                                                                                                              │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #8, chat statistics so far: {'chat_rounds': 8, 'input_tokens': 53460, 'cached_tokens': 28353, 'output_tokens': 5786, 'total_tokens': 61619}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ I see a call to `foldSelectShuffle` at line 2870. This is a promising candidate for the transformation I'm looking for. I'll search for the definition of `foldSelectShuffle` in the     │
+│ same file.                                                                                                                                                                               │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ grep -n "foldSelectShuffle" llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp                                                                                                     │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ 2099:static Instruction *foldSelectShuffleOfSelectShuffle(ShuffleVectorInst &Shuf) {                                                                                                     │
+│ 2146:static Instruction *foldSelectShuffleWith1Binop(ShuffleVectorInst &Shuf,                                                                                                            │
+│ 2247:Instruction *InstCombinerImpl::foldSelectShuffle(ShuffleVectorInst &Shuf) {                                                                                                         │
+│ 2262:  if (Instruction *I = foldSelectShuffleOfSelectShuffle(Shuf))                                                                                                                      │
+│ 2265:  if (Instruction *I = foldSelectShuffleWith1Binop(                                                                                                                                 │
+│ 2870:  if (Instruction *I = foldSelectShuffle(SVI))                                                                                                                                      │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #9, chat statistics so far: {'chat_rounds': 9, 'input_tokens': 63626, 'cached_tokens': 28353, 'output_tokens': 5868, 'total_tokens': 71867}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ Okay, `foldSelectShuffle` is defined at line 2247. I'll examine its implementation to find the `shuffle(select(...))` transform.                                                         │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ nl -ba llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp | sed -n '2247,2300p'                                                                                                    │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│   2247  Instruction *InstCombinerImpl::foldSelectShuffle(ShuffleVectorInst &Shuf) {                                                                                                      │
+│   2248    if (!Shuf.isSelect())                                                                                                                                                          │
+│   2249      return nullptr;                                                                                                                                                              │
+│   2250                                                                                                                                                                                   │
+│   2251    // Canonicalize to choose from operand 0 first unless operand 1 is undefined.                                                                                                  │
+│   2252    // Commuting undef to operand 0 conflicts with another canonicalization.                                                                                                       │
+│   2253    unsigned NumElts = cast<FixedVectorType>(Shuf.getType())->getNumElements();                                                                                                    │
+│   2254    if (!match(Shuf.getOperand(1), m_Undef()) &&                                                                                                                                   │
+│   2255        Shuf.getMaskValue(0) >= (int)NumElts) {                                                                                                                                    │
+│   2256      // TODO: Can we assert that both operands of a shuffle-select are not undef                                                                                                  │
+│   2257      // (otherwise, it would have been folded by instsimplify?                                                                                                                    │
+│   2258      Shuf.commute();                                                                                                                                                              │
+│   2259      return &Shuf;                                                                                                                                                                │
+│   2260    }                                                                                                                                                                              │
+│   2261                                                                                                                                                                                   │
+│   2262    if (Instruction *I = foldSelectShuffleOfSelectShuffle(Shuf))                                                                                                                   │
+│   2263      return I;                                                                                                                                                                    │
+│   2264                                                                                                                                                                                   │
+│   2265    if (Instruction *I = foldSelectShuffleWith1Binop(                                                                                                                              │
+│   2266            Shuf, getSimplifyQuery().getWithInstruction(&Shuf)))                                                                                                                   │
+│   2267      return I;                                                                                                                                                                    │
+│   2268                                                                                                                                                                                   │
+│   2269    BinaryOperator *B0, *B1;                                                                                                                                                       │
+│   2270    if (!match(Shuf.getOperand(0), m_BinOp(B0)) ||                                                                                                                                 │
+│   2271        !match(Shuf.getOperand(1), m_BinOp(B1)))                                                                                                                                   │
+│   2272      return nullptr;                                                                                                                                                              │
+│   2273                                                                                                                                                                                   │
+│   2274    // If one operand is "0 - X", allow that to be viewed as "X * -1"                                                                                                              │
+│   2275    // (ConstantsAreOp1) by getAlternateBinop below. If the neg is not paired                                                                                                      │
+│   2276    // with a multiply, we will exit because C0/C1 will not be set.                                                                                                                │
+│   2277    Value *X, *Y;                                                                                                                                                                  │
+│   2278    Constant *C0 = nullptr, *C1 = nullptr;                                                                                                                                         │
+│   2279    bool ConstantsAreOp1;                                                                                                                                                          │
+│   2280    if (match(B0, m_BinOp(m_Constant(C0), m_Value(X))) &&                                                                                                                          │
+│   2281        match(B1, m_BinOp(m_Constant(C1), m_Value(Y))))                                                                                                                            │
+│   2282      ConstantsAreOp1 = false;                                                                                                                                                     │
+│   2283    else if (match(B0, m_CombineOr(m_BinOp(m_Value(X), m_Constant(C0)),                                                                                                            │
+│   2284                                   m_Neg(m_Value(X)))) &&                                                                                                                          │
+│   2285             match(B1, m_CombineOr(m_BinOp(m_Value(Y), m_Constant(C1)),                                                                                                            │
+│   2286                                   m_Neg(m_Value(Y)))))                                                                                                                            │
+│   2287      ConstantsAreOp1 = true;                                                                                                                                                      │
+│   2288    else                                                                                                                                                                           │
+│   2289      return nullptr;                                                                                                                                                              │
+│   2290                                                                                                                                                                                   │
+│   2291    // We need matching binops to fold the lanes together.                                                                                                                         │
+│   2292    BinaryOperator::BinaryOps Opc0 = B0->getOpcode();                                                                                                                              │
+│   2293    BinaryOperator::BinaryOps Opc1 = B1->getOpcode();                                                                                                                              │
+│   2294    bool DropNSW = false;                                                                                                                                                          │
+│   2295    if (ConstantsAreOp1 && Opc0 != Opc1) {                                                                                                                                         │
+│   2296      // TODO: We drop "nsw" if shift is converted into multiply because it may                                                                                                    │
+│   2297      // not be correct when the shift amount is BitWidth - 1. We could examine                                                                                                    │
+│   2298      // each vector element to determine if it is safe to keep that flag.                                                                                                         │
+│   2299      if (Opc0 == Instruction::Shl || Opc1 == Instruction::Shl)                                                                                                                    │
+│   2300        DropNSW = true;                                                                                                                                                            │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #10, chat statistics so far: {'chat_rounds': 10, 'input_tokens': 74028, 'cached_tokens': 38468, 'output_tokens': 5945, 'total_tokens': 82346}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ This `foldSelectShuffle` function seems to be for a very specific pattern where the shuffle itself is a `select` (i.e., it only has indices from the start of the first vector and the   │
+│ start of the second vector). The initial check `if (!Shuf.isSelect())` confirms this. This is not the transformation I'm looking for.                                                    │
+│                                                                                                                                                                                          │
+│ The transformation I'm looking for is `shuffle(select(...))`, not a shuffle that *is* a select. This means the `select` is an *operand* to the shuffle.                                  │
+│                                                                                                                                                                                          │
+│ Let's go back to `visitShuffleVectorInst` and look more carefully.                                                                                                                       │
+│                                                                                                                                                                                          │
+│ ```                                                                                                                                                                                      │
+│ Instruction *InstCombinerImpl::visitShuffleVectorInst(ShuffleVectorInst &SVI) {                                                                                                          │
+│   Value *LHS = SVI.getOperand(0);                                                                                                                                                        │
+│   Value *RHS = SVI.getOperand(1);                                                                                                                                                        │
+│ ...                                                                                                                                                                                      │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ The transformation I'm looking for should start with something like `if (auto *SI = dyn_cast<SelectInst>(LHS))`. I'll search for that pattern inside `visitShuffleVectorInst`.           │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ nl -ba llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp | sed -n '2791,$p' | grep -B 5 -A 10 "dyn_cast<SelectInst>(LHS)"                                                         │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│   2899      return I;                                                                                                                                                                    │
+│   2900    if (Instruction *I = foldIdentityPaddedShuffles(SVI))                                                                                                                          │
+│   2901      return I;                                                                                                                                                                    │
+│   2902                                                                                                                                                                                   │
+│   2903    if (match(RHS, m_Constant())) {                                                                                                                                                │
+│   2904      if (auto *SI = dyn_cast<SelectInst>(LHS)) {                                                                                                                                  │
+│   2905        // We cannot do this fold for elementwise select since ShuffleVector is                                                                                                    │
+│   2906        // not elementwise.                                                                                                                                                        │
+│   2907        if (SI->getCondition()->getType()->isIntegerTy()) {                                                                                                                        │
+│   2908          if (Instruction *I = FoldOpIntoSelect(SVI, SI))                                                                                                                          │
+│   2909            return I;                                                                                                                                                              │
+│   2910        }                                                                                                                                                                          │
+│   2911      }                                                                                                                                                                            │
+│   2912      if (auto *PN = dyn_cast<PHINode>(LHS)) {                                                                                                                                     │
+│   2913        if (Instruction *I = foldOpIntoPhi(SVI, PN))                                                                                                                               │
+│   2914          return I;                                                                                                                                                                │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #11, chat statistics so far: {'chat_rounds': 11, 'input_tokens': 85588, 'cached_tokens': 48587, 'output_tokens': 6242, 'total_tokens': 94203}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ Okay, I've found the code at line 2904. It's inside `visitShuffleVectorInst`.                                                                                                            │
+│                                                                                                                                                                                          │
+│ ```cpp                                                                                                                                                                                   │
+│   if (match(RHS, m_Constant())) {                                                                                                                                                        │
+│     if (auto *SI = dyn_cast<SelectInst>(LHS)) {                                                                                                                                          │
+│       // We cannot do this fold for elementwise select since ShuffleVector is                                                                                                            │
+│       // not elementwise.                                                                                                                                                                │
+│       if (SI->getCondition()->getType()->isIntegerTy()) {                                                                                                                                │
+│         if (Instruction *I = FoldOpIntoSelect(SVI, SI))                                                                                                                                  │
+│           return I;                                                                                                                                                                      │
+│       }                                                                                                                                                                                  │
+│     }                                                                                                                                                                                    │
+│ ...                                                                                                                                                                                      │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ This code tries to fold a `shufflevector` into a `select` instruction using the `FoldOpIntoSelect` helper. The condition `match(RHS, m_Constant())` is interesting. In the reproducer,   │
+│ the second operand to the shuffle is `<i8 poison, i8 1, i8 poison, i8 3>`, which is a constant. So this path is taken.                                                                   │
+│                                                                                                                                                                                          │
+│ The problem description says the transformation is `shuffle(select(C, A, B)) -> select(C, shuffle(A), shuffle(B))`. This is exactly what `FoldOpIntoSelect` does.                        │
+│                                                                                                                                                                                          │
+│ The miscompilation happens because the second shuffle operand (`RHS`) contains non-poison/non-undef values, which can "un-poison" values from the select's operands. The current check   │
+│ `match(RHS, m_Constant())` is too broad. It allows any constant, including ones with concrete values.                                                                                    │
+│                                                                                                                                                                                          │
+│ A simple fix is to restrict this transformation to cases where `RHS` is `undef` or `poison`. `isa<UndefValue>(RHS)` would be a good check. `PoisonValue` is also a constant, so          │
+│ `match(RHS, m_Poison())` would also work. A `ConstantAggregateZero` is also safe. A splat of zero is also safe.                                                                          │
+│                                                                                                                                                                                          │
+│ The original patch attempt was:                                                                                                                                                          │
+│ ```diff                                                                                                                                                                                  │
+│ -    if (isa<UndefValue>(V2)) {                                                                                                                                                          │
+│ +    if (isa<UndefValue>(V2) || isa<PoisonValue>(V2)) {                                                                                                                                  │
+│ ```                                                                                                                                                                                      │
+│ This was for a different location. Here, the check is `match(RHS, m_Constant())`.                                                                                                        │
+│                                                                                                                                                                                          │
+│ The reproducer has `RHS = <i8 poison, i8 1, i8 poison, i8 3>`. This is a `ConstantVector`. It is not `undef` or `poison`. It contains concrete values `1` and `3`.                       │
+│                                                                                                                                                                                          │
+│ The transformation is valid if `RHS` does not introduce any new non-poison values. This is true if `RHS` is `undef`, `poison`, or a vector of all zeros.                                 │
+│                                                                                                                                                                                          │
+│ Let's look at the check in the old code base from the first patch attempt: `ShuffleVectorInst::isZeroEltSplat(V2)`. This checks if the value is a splat of a zero or poison element.     │
+│ This seems like a reasonable check to add. Another check was `isa<UndefValue>(V2)`.                                                                                                      │
+│                                                                                                                                                                                          │
+│ So, the condition `match(RHS, m_Constant())` should be tightened. It should be something like `isa<UndefValue>(RHS) || isa<PoisonValue>(RHS) || match(RHS, m_Zero())`. `m_Zero()`        │
+│ matches any zero constant, including vector splats.                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ In the reproducer, `RHS` is `<poison, 1, poison, 3>`. This is not `undef`, not `poison`, and not a zero vector. So a stricter check would prevent the miscompilation.                    │
+│                                                                                                                                                                                          │
+│ The existing check is `match(RHS, m_Constant())`. I will change it to `isa<UndefValue>(RHS) || isa<PoisonValue>(RHS)`. `FoldOpIntoSelect` is a generic helper, so I need to be careful.  │
+│ It's used for other instructions too. The check is performed in the caller, `visitShuffleVectorInst`.                                                                                    │
+│                                                                                                                                                                                          │
+│ Let's look at `FoldOpIntoSelect`. It clones the instruction.                                                                                                                             │
+│ ```cpp                                                                                                                                                                                   │
+│ Instruction *InstCombinerImpl::FoldOpIntoSelect(Instruction &I, SelectInst *SI) {                                                                                                        │
+│   // Don't modify shared select instructions.                                                                                                                                            │
+│   if (!SI->hasOneUse())                                                                                                                                                                  │
+│     return nullptr;                                                                                                                                                                      │
+│ ...                                                                                                                                                                                      │
+│   // We are replacing the select with a new one, so the new one will be using                                                                                                            │
+│   // the inputs to the old one.                                                                                                                                                          │
+│   Value *TrueVal = SI->getTrueValue();                                                                                                                                                   │
+│   Value *FalseVal = SI->getFalseValue();                                                                                                                                                 │
+│                                                                                                                                                                                          │
+│   // Create a new instruction that uses the true value of the select.                                                                                                                    │
+│   Instruction *TrueInst = I.clone();                                                                                                                                                     │
+│   TrueInst->setOperand(OpToFold, TrueVal);                                                                                                                                               │
+│ ...                                                                                                                                                                                      │
+│   // Create a new instruction that uses the false value of the select.                                                                                                                   │
+│   Instruction *FalseInst = I.clone();                                                                                                                                                    │
+│   FalseInst->setOperand(OpToFold, FalseVal);                                                                                                                                             │
+│ ...                                                                                                                                                                                      │
+│   return SelectInst::Create(SI->getCondition(), TrueInst, FalseInst, ...);                                                                                                               │
+│ }                                                                                                                                                                                        │
+│ ```                                                                                                                                                                                      │
+│ The logic is exactly as suspected. It creates `shuffle(TrueVal, RHS)` and `shuffle(FalseVal, RHS)`. The problem is that `RHS` is shared between them and can de-poison values.           │
+│                                                                                                                                                                                          │
+│ The fix is to restrict the condition for calling `FoldOpIntoSelect`.                                                                                                                     │
+│ Instead of `match(RHS, m_Constant())`, I'll use `isa<UndefValue>(RHS) || isa<PoisonValue>(RHS)`. This seems too restrictive, as a zero vector should also be safe.                       │
+│ `isGuaranteedNotToPoison` is not a thing. `isKnownToBeAPoisonOrUndef` exists.                                                                                                            │
+│                                                                                                                                                                                          │
+│ Let's check `isZeroEltSplat`.                                                                                                                                                            │
+│ `isZeroEltSplat` checks for `<0, 0, 0, ...>` or `<poison, poison, ...>`. This seems correct and safe. If the second vector is all zeros, it can't un-poison anything (except by turning  │
+│ it into zero, which is a valid transformation for many ops). For shuffle, it's fine.                                                                                                     │
+│                                                                                                                                                                                          │
+│ So, I'll change `match(RHS, m_Constant())` to `isa<UndefValue>(RHS) || ShuffleVectorInst::isZeroEltSplat(RHS)`. `isZeroEltSplat` handles `poison` splats too.                            │
+│                                                                                                                                                                                          │
+│ ```cpp                                                                                                                                                                                   │
+│ // In ShuffleVectorInst.h                                                                                                                                                                │
+│   /// Check if this is a splat of a zero element.                                                                                                                                        │
+│   /// This is a convenience wrapper for isSplat() and getSplatValue().                                                                                                                   │
+│   static bool isZeroEltSplat(Value *V) {                                                                                                                                                 │
+│     if (auto *CV = dyn_cast<Constant>(V))                                                                                                                                                │
+│       if (auto Splat = CV->getSplatValue())                                                                                                                                              │
+│         return Splat->isZero() || isa<PoisonValue>(Splat);                                                                                                                               │
+│     return false;                                                                                                                                                                        │
+│   }                                                                                                                                                                                      │
+│ ```                                                                                                                                                                                      │
+│ This looks good. It covers zero splats and poison splats. `isa<UndefValue>` is separate.                                                                                                 │
+│                                                                                                                                                                                          │
+│ So the new logic should be:                                                                                                                                                              │
+│ `if (isa<UndefValue>(RHS) || ShuffleVectorInst::isZeroEltSplat(RHS))`                                                                                                                    │
+│                                                                                                                                                                                          │
+│ Let's check the original code again.                                                                                                                                                     │
+│ `if (match(RHS, m_Constant()))`                                                                                                                                                          │
+│ This is what I want to change.                                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ I will now create the patch.                                                                                                                                                             │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ cat <<'EOF' | patch -p1                                                                                                                                                                  │
+│ --- a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp                                                                                                                           │
+│ +++ b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp                                                                                                                           │
+│ @@ -2900,7 +2900,11 @@                                                                                                                                                                   │
+│    if (Instruction *I = foldIdentityPaddedShuffles(SVI))                                                                                                                                 │
+│      return I;                                                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ -  if (match(RHS, m_Constant())) {                                                                                                                                                       │
+│ +  // We can fold a shuffle of a select if the second shuffle operand is not                                                                                                             │
+│ +  // "poison-producing". If it has concrete non-zero values, it may incorrectly                                                                                                         │
+│ +  // replace a poison operand of the select.                                                                                                                                            │
+│ +  if (isa<UndefValue>(RHS) || isa<PoisonValue>(RHS) ||                                                                                                                                  │
+│ +      match(RHS, m_Zero())) {                                                                                                                                                           │
+│      if (auto *SI = dyn_cast<SelectInst>(LHS)) {                                                                                                                                         │
+│        // We cannot do this fold for elementwise select since ShuffleVector is                                                                                                           │
+│        // not elementwise.                                                                                                                                                               │
+│ EOF                                                                                                                                                                                      │
+│ ```                                                                                                                                                                                      │
+│ I'm using `isa<UndefValue>(RHS) || isa<PoisonValue>(RHS) || match(RHS, m_Zero())`. This seems safe. `m_Zero()` matches any kind of zero constant, including vector splats. This is       │
+│ slightly more general than `isZeroEltSplat` if the vector is not a splat but happens to be all zeros. This seems correct.                                                                │
+│                                                                                                                                                                                          │
+│ Let's apply this patch.                                                                                                                                                                  │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ patch -p1 <<'EOF'                                                                                                                                                                        │
+│ --- a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp                                                                                                                           │
+│ +++ b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp                                                                                                                           │
+│ @@ -2900,7 +2900,11 @@                                                                                                                                                                   │
+│    if (Instruction *I = foldIdentityPaddedShuffles(SVI))                                                                                                                                 │
+│      return I;                                                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ -  if (match(RHS, m_Constant())) {                                                                                                                                                       │
+│ +  // We can fold a shuffle of a select if the second shuffle operand is not                                                                                                             │
+│ +  // "poison-producing". If it has concrete non-zero values, it may incorrectly                                                                                                         │
+│ +  // replace a poison operand of the select.                                                                                                                                            │
+│ +  if (isa<UndefValue>(RHS) || isa<PoisonValue>(RHS) ||                                                                                                                                  │
+│ +      match(RHS, m_Zero())) {                                                                                                                                                           │
+│      if (auto *SI = dyn_cast<SelectInst>(LHS)) {                                                                                                                                         │
+│        // We cannot do this fold for elementwise select since ShuffleVector is                                                                                                           │
+│        // not elementwise.                                                                                                                                                               │
+│ EOF                                                                                                                                                                                      │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Please always provide EXACTLY ONE action in triple backticks, found 2 actions.                                                                                                           │
+│ If you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`                                                                            │
+│ without any other command.                                                                                                                                                               │
+│ Else, please format your response exactly as follows:                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ <response_example>                                                                                                                                                                       │
+│ Here are some thoughts about why you want to perform the action.                                                                                                                         │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ <action>                                                                                                                                                                                 │
+│ ```                                                                                                                                                                                      │
+│ </response_example>                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ Note: In rare cases, if you need to reference a similar format in your command, you might have                                                                                           │
+│ to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.                                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #12, chat statistics so far: {'chat_rounds': 12, 'input_tokens': 97731, 'cached_tokens': 58703, 'output_tokens': 8463, 'total_tokens': 108567}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ I apologize for the formatting error. I will now provide the single patch command.                                                                                                       │
+│                                                                                                                                                                                          │
+│ The issue is a miscompilation in `instcombine` where `shufflevector(select(C, A, B), D, M)` is incorrectly transformed into `select(C, shufflevector(A, D, M), shufflevector(B, D, M))`. │
+│ This is unsafe when `D` contains concrete values that can replace `poison` values from `A` or `B`.                                                                                       │
+│                                                                                                                                                                                          │
+│ The code performing this transformation is in `InstCombineVectorOps.cpp`, inside `visitShuffleVectorInst`. It currently allows this for any constant `D` (`RHS` in the code). I will     │
+│ restrict this to only allow the transformation when `D` is `undef`, `poison`, or a zero constant. This prevents the incorrect "un-poisoning" of values.                                  │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ patch -p1 <<'EOF'                                                                                                                                                                        │
+│ --- a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp                                                                                                                           │
+│ +++ b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp                                                                                                                           │
+│ @@ -2900,7 +2900,11 @@                                                                                                                                                                   │
+│    if (Instruction *I = foldIdentityPaddedShuffles(SVI))                                                                                                                                 │
+│      return I;                                                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ -  if (match(RHS, m_Constant())) {                                                                                                                                                       │
+│ +  // We can fold a shuffle of a select if the second shuffle operand is not                                                                                                             │
+│ +  // "poison-producing". If it has concrete non-zero values, it may incorrectly                                                                                                         │
+│ +  // replace a poison operand of the select.                                                                                                                                            │
+│ +  if (isa<UndefValue>(RHS) || isa<PoisonValue>(RHS) ||                                                                                                                                  │
+│ +      match(RHS, m_Zero())) {                                                                                                                                                           │
+│      if (auto *SI = dyn_cast<SelectInst>(LHS)) {                                                                                                                                         │
+│        // We cannot do this fold for elementwise select since ShuffleVector is                                                                                                           │
+│        // not elementwise.                                                                                                                                                               │
+│ EOF                                                                                                                                                                                      │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@50120] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ patching file llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp                                                                                                                   │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #13, chat statistics so far: {'chat_rounds': 13, 'input_tokens': 112240, 'cached_tokens': 70858, 'output_tokens': 8888, 'total_tokens': 123501}
+╭─ assistant [MainThread@50120] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT                                                                                                                                                                                  │
+│ The patch has been applied successfully. Now I need to verify that the fix resolves the issue. I will use the `submit-patch` command, which will run the regression tests, including the │
+│ one for the issue I'm fixing.                                                                                                                                                            │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ submit-patch                                                                                                                                                                             │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Generation statistics saved to /tmp/115465-gem25pro-12121920.json.
+Saved trajectory to '/tmp/115465-gem25pro-12121920.traj.json'
+Final Patch
+-----------
+diff --git a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp
+index 454fe5a91d37..b0910c37bcc3 100644
+--- a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp
++++ b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp
+@@ -2900,7 +2900,11 @@ Instruction *InstCombinerImpl::visitShuffleVectorInst(ShuffleVectorInst &SVI) {
+   if (Instruction *I = foldIdentityPaddedShuffles(SVI))
+     return I;
+
+-  if (match(RHS, m_Constant())) {
++  // We can fold a shuffle of a select if the second shuffle operand is not
++  // "poison-producing". If it has concrete non-zero values, it may incorrectly
++  // replace a poison operand of the select.
++  if (isa<UndefValue>(RHS) || isa<PoisonValue>(RHS) ||
++      match(RHS, m_Zero())) {
+     if (auto *SI = dyn_cast<SelectInst>(LHS)) {
+       // We cannot do this fold for elementwise select since ShuffleVector is
+       // not elementwise.
+
+Reference Patch
+---------------
+commit 27bf45aa36386136db179c494358670a994a98a5
+Author: Yingwei Zheng <dtcxzyw2333@gmail.com>
+Date:   Sun Nov 10 17:07:25 2024 +0800
+
+    [InstCombine] Fix poison safety of folding shufflevector into select (#115483)
+
+    We are allowed to fold shufflevector into select iff the condition is
+    guaranteed not to be poison or the RHS is a poison.
+    Alive2: https://alive2.llvm.org/ce/z/28zEWR
+
+    Closes https://github.com/llvm/llvm-project/issues/115465.
+
+diff --git a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp
+index 454fe5a91d37..ede89b099e8d 100644
+--- a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp
++++ b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp
+@@ -2904,7 +2904,9 @@ Instruction *InstCombinerImpl::visitShuffleVectorInst(ShuffleVectorInst &SVI) {
+     if (auto *SI = dyn_cast<SelectInst>(LHS)) {
+       // We cannot do this fold for elementwise select since ShuffleVector is
+       // not elementwise.
+-      if (SI->getCondition()->getType()->isIntegerTy()) {
++      if (SI->getCondition()->getType()->isIntegerTy() &&
++          (isa<PoisonValue>(RHS) ||
++           isGuaranteedNotToBePoison(SI->getCondition()))) {
+         if (Instruction *I = FoldOpIntoSelect(SVI, SI))
+           return I;
+       }
+
+Statistics
+----------
+{
+  "command": {
+    "issue": "115465",
+    "model": "gemini-2.5-pro"
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\nindex 454fe5a91d37..b0910c37bcc3 100644\n---
+a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\n@@ -2900,7 +2900,11 @@ Instruction
+*InstCombinerImpl::visitShuffleVectorInst(ShuffleVectorInst &SVI) {\n   if (Instruction *I = foldIdentityPaddedShuffles(SVI))\n     return I;\n \n-  if (match(RHS, m_Constant())) {\n+  //
+We can fold a shuffle of a select if the second shuffle operand is not\n+  // \"poison-producing\". If it has concrete non-zero values, it may incorrectly\n+  // replace a poison operand
+of the select.\n+  if (isa<UndefValue>(RHS) || isa<PoisonValue>(RHS) ||\n+      match(RHS, m_Zero())) {\n     if (auto *SI = dyn_cast<SelectInst>(LHS)) {\n       // We cannot do this fold
+for elementwise select since ShuffleVector is\n       // not elementwise.\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 127210,
+  "output_tokens": 8948,
+  "cached_tokens": 85034,
+  "total_tokens": 138531,
+  "chat_rounds": 14,
+  "total_time_sec": 163.74146008491516,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\nindex 454fe5a91d37..b0910c37bcc3 100644\n---
+a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\n@@ -2900,7 +2900,11 @@ Instruction
+*InstCombinerImpl::visitShuffleVectorInst(ShuffleVectorInst &SVI) {\n   if (Instruction *I = foldIdentityPaddedShuffles(SVI))\n     return I;\n \n-  if (match(RHS, m_Constant())) {\n+  //
+We can fold a shuffle of a select if the second shuffle operand is not\n+  // \"poison-producing\". If it has concrete non-zero values, it may incorrectly\n+  // replace a poison operand
+of the select.\n+  if (isa<UndefValue>(RHS) || isa<PoisonValue>(RHS) ||\n+      match(RHS, m_Zero())) {\n     if (auto *SI = dyn_cast<SelectInst>(LHS)) {\n       // We cannot do this fold
+for elementwise select since ShuffleVector is\n       // not elementwise.\n"
+  ]
+}

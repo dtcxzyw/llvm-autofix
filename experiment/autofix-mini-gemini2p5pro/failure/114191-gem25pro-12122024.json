@@ -1,0 +1,27 @@
+{
+  "command": {
+    "issue": "114191",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/114191-gem25pro-12122024.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 1238606,
+  "output_tokens": 26164,
+  "cached_tokens": 1063133,
+  "total_tokens": 1299959,
+  "chat_rounds": 62,
+  "total_time_sec": 1119.3510737419128,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineMulDivRem.cpp",
+    "llvm::InstCombinerImpl::visitUDiv",
+    1547
+  ],
+  "edit_points": [],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe `instcombine` pass incorrectly optimizes a vector `udiv` instruction to a zero vector, causing a miscompilation. The optimizer erroneously concludes that the result of the division is a zero vector, even when certain lanes of the input would produce a non-zero result.\n\n### 2. Analyzing `opt`'s Log\n\nThe provided `opt` log clearly identifies the source of the error. The log shows `instcombine` replacing the `udiv` instruction with a `zeroinitializer`, and the backtrace points to `commonIDivTransforms`.\n\n### 3. Root Cause Analysis\n\nThe root cause is in `commonIDivTransforms` (`llvm/lib/Transforms/InstCombine/InstCombineInternal.h`). The optimization `(X udiv Y) -> 0 if X < Y` uses the `isKnownLT` predicate. This predicate is not safe for vectors because it aggregates bit-knowledge across all lanes, leading to incorrect conclusions. For the reproducer, it incorrectly determines `X <u Y` is true for the entire vector when it is false for one lane.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to modify the code block to prevent it from running on vector types.\n\n**File**: `llvm/lib/Transforms/InstCombine/InstCombineInternal.h`\n\n**Edit**: Replace lines 998-1004 with the following code:\n```cpp\n// (X udiv Y) -> 0 if X < Y.\n// This transform is not safe for vectors.\nif (I.getOpcode() == Instruction::UDiv && !I.getType()->isVectorTy()) {\n  if (isKnownLT(Op0, Op1)) {\n    Constant *Zero = Constant::getNullValue(I.getType());\n    return replaceInstUsesWith(I, Zero);\n  }\n}\n```\n\n### 5. Conclusion\n\nThe bug is due to an unsafe application of a scalar optimization to vectors. The fix is to add a guard to restrict the optimization to scalar types, which is a safe and targeted solution.",
+  "test_traj": []
+}

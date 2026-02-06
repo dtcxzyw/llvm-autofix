@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "106523",
+    "model": "gemini-2.5-pro"
+  },
+  "patch": null,
+  "error": "NoAvailablePatchFound",
+  "errmsg": "All efforts tried yet no available patches found.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/mswe.py\", line 350, in main\n    raise NoAvailablePatchFound(\"All efforts tried yet no available patches found.\")\nautofix.main.NoAvailablePatchFound: All efforts tried yet no available patches found.\n",
+  "input_tokens": 1366575,
+  "output_tokens": 18019,
+  "cached_tokens": 1172902,
+  "total_tokens": 1390652,
+  "chat_rounds": 47,
+  "total_time_sec": 504.8639097213745,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "",
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 60a94ca1f86e..6e499ca4ccf7 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -8704,9 +8704,9 @@ VPRecipeBuilder::tryToCreateWidenRecipe(Instruction *Instr,\n     return Recipe;\n \n   // All widen recipes below deal only with VF > 1.\n-  if (LoopVectorizationPlanner::getDecisionAndClampRange(\n-          [&](ElementCount VF) { return VF.isScalar(); }, Range))\n-    return nullptr;\n+//  if (LoopVectorizationPlanner::getDecisionAndClampRange(\n+//          [&](ElementCount VF) { return VF.isScalar(); }, Range))\n+//    return nullptr;\n \n   if (auto *CI = dyn_cast<CallInst>(Instr))\n     return tryToWidenCall(CI, Operands, Range);\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 60a94ca1f86e..20326cad4d6a 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -1233,7 +1233,7 @@ public:\n     // check the primary induction variable since it will need an update\n     // instruction regardless.\n     Value *Op = Trunc->getOperand(0);\n-    if (Op != Legal->getPrimaryInduction() && TTI.isTruncateFree(SrcTy, DestTy))\n+    if (Op != Legal->getPrimaryInduction() && !VF.isScalar() && TTI.isTruncateFree(SrcTy, DestTy))\n       return false;\n \n     // If the truncated value is not an induction variable, return false.\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 60a94ca1f86e..f86315dece49 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -8706,7 +8706,7 @@ VPRecipeBuilder::tryToCreateWidenRecipe(Instruction *Instr,\n   // All widen recipes below deal only with VF > 1.\n   if (LoopVectorizationPlanner::getDecisionAndClampRange(\n           [&](ElementCount VF) { return VF.isScalar(); }, Range))\n-    return nullptr;\n+    return handleReplication(Instr, Range);\n \n   if (auto *CI = dyn_cast<CallInst>(Instr))\n     return tryToWidenCall(CI, Operands, Range);\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 60a94ca1f86e..c00292d7750a 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -8699,9 +8699,12 @@ VPRecipeBuilder::tryToCreateWidenRecipe(Instruction *Instr,\n     return PhiRecipe;\n   }\n \n-  if (isa<TruncInst>(Instr) && (Recipe = tryToOptimizeInductionTruncate(\n-                                    cast<TruncInst>(Instr), Operands, Range)))\n-    return Recipe;\n+  if (auto *TI = dyn_cast<TruncInst>(Instr)) {\n+    if ((Recipe = tryToOptimizeInductionTruncate(TI, Operands, Range)))\n+      return Recipe;\n+    if (Range.Start.isScalar())\n+      return handleReplication(Instr, Range);\n+  }\n \n   // All widen recipes below deal only with VF > 1.\n   if (LoopVectorizationPlanner::getDecisionAndClampRange(\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 60a94ca1f86e..5a2f22fe4639 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -1218,26 +1218,7 @@ public:\n   /// is an induction variable. Such a truncate will be removed by adding a new\n   /// induction variable with the destination type.\n   bool isOptimizableIVTruncate(Instruction *I, ElementCount VF) {\n-    // If the instruction is not a truncate, return false.\n-    auto *Trunc = dyn_cast<TruncInst>(I);\n-    if (!Trunc)\n-      return false;\n-\n-    // Get the source and destination types of the truncate.\n-    Type *SrcTy = ToVectorTy(cast<CastInst>(I)->getSrcTy(), VF);\n-    Type *DestTy = ToVectorTy(cast<CastInst>(I)->getDestTy(), VF);\n-\n-    // If the truncate is free for the given types, return false. Replacing a\n-    // free truncate with an induction variable would add an induction variable\n-    // update instruction to each iteration of the loop. We exclude from this\n-    // check the primary induction variable since it will need an update\n-    // instruction regardless.\n-    Value *Op = Trunc->getOperand(0);\n-    if (Op != Legal->getPrimaryInduction() && TTI.isTruncateFree(SrcTy, DestTy))\n-      return false;\n-\n-    // If the truncated value is not an induction variable, return false.\n-    return Legal->isInductionPhi(Op);\n+    return false;\n   }\n \n   /// Collects the instructions to scalarize for each predicated instruction in\n@@ -8699,9 +8680,12 @@ VPRecipeBuilder::tryToCreateWidenRecipe(Instruction *Instr,\n     return PhiRecipe;\n   }\n \n-  if (isa<TruncInst>(Instr) && (Recipe = tryToOptimizeInductionTruncate(\n-                                    cast<TruncInst>(Instr), Operands, Range)))\n-    return Recipe;\n+  if (auto *TI = dyn_cast<TruncInst>(Instr)) {\n+    if ((Recipe = tryToOptimizeInductionTruncate(TI, Operands, Range)))\n+      return Recipe;\n+    if (Range.Start.isScalar())\n+      return handleReplication(Instr, Range);\n+  }\n \n   // All widen recipes below deal only with VF > 1.\n   if (LoopVectorizationPlanner::getDecisionAndClampRange(\n"
+  ]
+}

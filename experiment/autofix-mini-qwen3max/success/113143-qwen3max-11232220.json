@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "113143",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/113143-qwen3max-11232220.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 1098bf578d2d..b65fbf4c5559 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -12471,6 +12471,9 @@ BoUpSLP::isGatherShuffledSingleRegisterEntry(\n       assert(any_of(TEPtr->Scalars,\n                     [&](Value *V) { return GatheredScalars.contains(V); }) &&\n              \"Must contain at least single gathered value.\");\n+      // Skip gather nodes with no users as they cannot contribute to shuffle analysis.\n+      if (TEPtr->UserTreeIndices.empty())\n+        continue;\n       assert(TEPtr->UserTreeIndices.size() == 1 &&\n              \"Expected only single user of a gather node.\");\n       const EdgeInfo &UseEI = TEPtr->UserTreeIndices.front();\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 1236004,
+  "output_tokens": 4058,
+  "cached_tokens": 689280,
+  "total_tokens": 1240062,
+  "chat_rounds": 70,
+  "total_time_sec": 326.2442510128021,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::isGatherShuffledSingleRegisterEntry",
+    12474
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      12474,
+      12475
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\n\nThe SLP vectorizer is crashing with an assertion failure in `isGatherShuffledSingleRegisterEntry()` at line 12474. The assertion expects that a gather node should have exactly one user (`TEPtr->UserTreeIndices.size() == 1`), but the debugger shows that `TEPtr->UserTreeIndices.size()` is 0 for the problematic tree entry.\n\nThis tree entry (index 0) represents the bundle containing `%cmp4.3 = icmp ne i32 %1, 0`, `%tobool10.not = icmp eq i32 %0, 0`, `%cmp4.2 = icmp ne i32 %2, %conv3.2`, and `%cmp4.1 = icmp ne i32 %2, %conv3.1`. It has state `NeedToGather` and contains 4 scalars.\n\nThe issue occurs during horizontal reduction analysis when the vectorizer tries to analyze gather nodes for potential shuffling. The code assumes that all gather nodes in `ValueToGatherNodes` should have exactly one user, but this assumption is violated.\n\n2. Analyzing `opt`'s Log:\n\nThe debug log shows that the vectorizer successfully identifies and schedules several bundles:\n- A bundle of compares (`%cmp4.2`, `%cmp4.1`)\n- A bundle of casts (`%conv3.2`, `%conv3.1`)\n- A bundle of xor operations (`%cmp2.2`, `%cmp2.1`)\n\nHowever, the initial bundle containing 4 icmp instructions (`%cmp4.3`, `%tobool10.not`, `%cmp4.2`, `%cmp4.1`) fails to schedule: \"We are not able to schedule this bundle!\"\n\nThis unscheduled bundle becomes a gather node (state `NeedToGather`) with no users in `UserTreeIndices`, which violates the assumption in `isGatherShuffledSingleRegisterEntry()`.\n\n3. Root Cause Analysis:\n\nThe root cause is that the assertion in `isGatherShuffledSingleRegisterEntry()` is too strict. When a gather node cannot be scheduled (as in this case), it may legitimately have zero users in `UserTreeIndices`. The code that populates `ValueToGatherNodes` includes such nodes, but the subsequent analysis assumes all gather nodes must have exactly one user.\n\nLooking at the context around line 12474, the function is trying to find tree entries that share gathered values to determine if they represent a shuffle permutation. However, it doesn't handle the case where a gather node has no users, which can happen when the initial scheduling attempt fails.\n\n4. Proposed Edit Point(s):\n\nThe assertion should be relaxed to allow gather nodes with zero users, since this is a valid state for unscheduled gather nodes. The code should handle this case gracefully by skipping such nodes rather than asserting.\n\n5. Conclusion:\n\nThe fix involves changing the assertion to allow `UserTreeIndices.size() == 0` in addition to the expected case of size 1. This handles the legitimate scenario where a gather node cannot be scheduled and thus has no recorded users. The surrounding code already has logic to handle empty `VToTEs` collections, so allowing zero-user gather nodes should not break the algorithm.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 1098bf578d2d..ef44da8fb611 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -12471,8 +12471,8 @@ BoUpSLP::isGatherShuffledSingleRegisterEntry(\n       assert(any_of(TEPtr->Scalars,\n                     [&](Value *V) { return GatheredScalars.contains(V); }) &&\n              \"Must contain at least single gathered value.\");\n-      assert(TEPtr->UserTreeIndices.size() == 1 &&\n-             \"Expected only single user of a gather node.\");\n+      assert((TEPtr->UserTreeIndices.size() == 1 || TEPtr->UserTreeIndices.empty()) &&\n+             \"Expected at most single user of a gather node.\");\n       const EdgeInfo &UseEI = TEPtr->UserTreeIndices.front();\n \n       PHINode *UserPHI = dyn_cast<PHINode>(UseEI.UserTE->getMainOp());\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 1098bf578d2d..b65fbf4c5559 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -12471,6 +12471,9 @@ BoUpSLP::isGatherShuffledSingleRegisterEntry(\n       assert(any_of(TEPtr->Scalars,\n                     [&](Value *V) { return GatheredScalars.contains(V); }) &&\n              \"Must contain at least single gathered value.\");\n+      // Skip gather nodes with no users as they cannot contribute to shuffle analysis.\n+      if (TEPtr->UserTreeIndices.empty())\n+        continue;\n       assert(TEPtr->UserTreeIndices.size() == 1 &&\n              \"Expected only single user of a gather node.\");\n       const EdgeInfo &UseEI = TEPtr->UserTreeIndices.front();\n"
+  ]
+}

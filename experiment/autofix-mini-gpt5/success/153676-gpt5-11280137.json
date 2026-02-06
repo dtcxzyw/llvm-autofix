@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "153676",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/153676-gpt5-11280137.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex a1123063d878..ae51ba4c1cff 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -5404,7 +5404,15 @@ private:\n \n         // Decrement the unscheduled counter and insert to ready list if ready.\n         auto DecrUnsched = [&](auto *Data, bool IsControl = false) {\n-          if ((IsControl || Data->hasValidDependencies()) &&\n+          // For control dependencies, ensure dependency counters are initialized\n+          // before attempting to decrement them. Control deps may be added\n+          // without calculating normal def-use deps yet.\n+          if (IsControl && !Data->hasValidDependencies()) {\n+            Data->initDependencies();\n+            Data->incDependencies();\n+            Data->resetUnscheduledDeps();\n+          }\n+          if (Data->hasValidDependencies() &&\n               Data->incrementUnscheduledDeps(-1) == 0) {\n             // There are no more unscheduled dependencies after\n             // decrementing, so we can put the dependent instruction\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 207296,
+  "output_tokens": 3763,
+  "cached_tokens": 163584,
+  "total_tokens": 211059,
+  "chat_rounds": 12,
+  "total_time_sec": 128.20013570785522,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::ScheduleData::incrementUnscheduledDeps",
+    4777
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      5405,
+      5439
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs due to an assertion in ScheduleData::incrementUnscheduledDeps that requires dependency information to be valid before modifying UnscheduledDeps. The scheduling code sometimes decrements control dependencies even when their dependency info has not been initialized, leading to this assertion failure.\n\n2. Analyzing opt's Log:\nThe debug log shows multiple scheduling attempts, including handling of control dependencies for a call instruction (%call12). The crash is triggered while processing control dependencies:\n  SLP:   check for readiness (ctrl): %call12 = tail call i32 @fn1(i32 %add)\nImmediately after that, schedule() tries to decrement dependencies via DecrUnsched with IsControl=true, even if dependency info for the control-dependent node is not yet valid.\nThe key code path:\n- BlockScheduling::schedule() creates lambda DecrUnsched that calls Data->incrementUnscheduledDeps(-1) if (IsControl || Data->hasValidDependencies()).\n- However, incrementUnscheduledDeps asserts hasValidDependencies(), regardless of IsControl. Thus, calling incrementUnscheduledDeps when IsControl==true but hasValidDependencies()==false violates the assertion.\n\n3. Root Cause Analysis:\nIn DecrUnsched, the condition allows decrement for control dependencies without ensuring the dependency counters are initialized. Yet, incrementUnscheduledDeps requires valid Dependencies state. This mismatch causes the assertion when encountering control dependencies whose dependency info was not yet calculated (Dependencies == InvalidDeps).\nControl dependencies are added via addControlDependency, but their dep counters may not have been initialized. When a bundle member is scheduled and its control dependencies are processed, DecrUnsched is invoked with IsControl=true. If the control dependency ScheduleData still has Dependencies==InvalidDeps, incrementUnscheduledDeps asserts.\n\n4. Proposed Edit Point(s):\nEdit file llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp, inside BlockScheduling::schedule() around the DecrUnsched lambda (lines ~5405-5439). Before calling incrementUnscheduledDeps for control dependencies, ensure the dependency counters are initialized. A minimal and safe fix is to initialize a single dependency for control deps when their dependency information is invalid. This models the scheduling dependency from the current instruction to the control-dependent one and allows a single decrement to transition to ready state.\n\nSuggested change:\nIn the DecrUnsched lambda, insert:\n  if (IsControl && !Data->hasValidDependencies()) {\n    // Initialize a single dependency for control-dependent nodes so that\n    // a single decrement makes them ready.\n    Data->initDependencies();\n    Data->incDependencies();\n    Data->resetUnscheduledDeps();\n  }\nThen proceed with incrementUnscheduledDeps(-1) as before.\n\nThis preserves the current control-dependency semantics used by the scheduler and avoids violating the assertion.\n\nEdit point specification:\n- File: llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n- Lines: 5405-5439 (the body of the DecrUnsched lambda)\n- Change: Add initialization for control dependencies if invalid before calling incrementUnscheduledDeps.\n\n5. Conclusion:\nThe crash is due to decrementing control dependencies without initializing dependency counters, violating the assert in incrementUnscheduledDeps. Initializing a single dependency for control-dependent nodes when their dependencies are invalid ensures that incrementUnscheduledDeps can safely be called and that the control-dependent node can become ready after one decrement. This fix aligns with the scheduler's intent and prevents the abort in the provided reproducer.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex a1123063d878..ae51ba4c1cff 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -5404,7 +5404,15 @@ private:\n \n         // Decrement the unscheduled counter and insert to ready list if ready.\n         auto DecrUnsched = [&](auto *Data, bool IsControl = false) {\n-          if ((IsControl || Data->hasValidDependencies()) &&\n+          // For control dependencies, ensure dependency counters are initialized\n+          // before attempting to decrement them. Control deps may be added\n+          // without calculating normal def-use deps yet.\n+          if (IsControl && !Data->hasValidDependencies()) {\n+            Data->initDependencies();\n+            Data->incDependencies();\n+            Data->resetUnscheduledDeps();\n+          }\n+          if (Data->hasValidDependencies() &&\n               Data->incrementUnscheduledDeps(-1) == 0) {\n             // There are no more unscheduled dependencies after\n             // decrementing, so we can put the dependent instruction\n"
+  ]
+}

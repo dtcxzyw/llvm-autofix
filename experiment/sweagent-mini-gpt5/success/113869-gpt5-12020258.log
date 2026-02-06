@@ -1,0 +1,684 @@
+Setting up the buggy LLVM environment ...
+Building LLVM and try reproducing the issue ...
+Issue reproduced successfully.
+Starting to fix the issue ...
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@77006] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ You are an expert LLVM developer. Please solve this LLVM issue:                                                                                                                          │
+│                                                                                                                                                                                          │
+│ ------ BEGIN ISSUE ------                                                                                                                                                                │
+│ Type: miscompilation                                                                                                                                                                     │
+│                                                                                                                                                                                          │
+│ Reproducer (LLVM IR): ```bash                                                                                                                                                            │
+│ cat /tmp/test.ll                                                                                                                                                                         │
+│ define <2 x i32> @uadd_sat_not_ugt_commute_add_partial_poison(<2 x i32> %x, <2 x i32> %yp) {                                                                                             │
+│   %notx = xor <2 x i32> %x, <i32 -1, i32 poison>                                                                                                                                         │
+│   %a = add nuw <2 x i32> %yp, %notx                                                                                                                                                      │
+│   %c = icmp ugt <2 x i32> %yp, %x                                                                                                                                                        │
+│   %r = select <2 x i1> %c, <2 x i32> splat (i32 -1), <2 x i32> %a                                                                                                                        │
+│   ret <2 x i32> %r                                                                                                                                                                       │
+│ }                                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ LLVM's Symptom: ```bash                                                                                                                                                                  │
+│ /llvm-autofix/build/llvm-build/113869/bin/opt /tmp/test.ll -passes=instcombine -S                                                                                                        │
+│ --- src ---                                                                                                                                                                              │
+│ define <2 x i32> @uadd_sat_not_ugt_commute_add_partial_poison(<2 x i32> %x, <2 x i32> %yp) {                                                                                             │
+│   %notx = xor <2 x i32> %x, <i32 -1, i32 poison>                                                                                                                                         │
+│   %a = add nuw <2 x i32> %yp, %notx                                                                                                                                                      │
+│   %c = icmp ugt <2 x i32> %yp, %x                                                                                                                                                        │
+│   %r = select <2 x i1> %c, <2 x i32> splat (i32 -1), <2 x i32> %a                                                                                                                        │
+│   ret <2 x i32> %r                                                                                                                                                                       │
+│ }                                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ --- tgt ---                                                                                                                                                                              │
+│ ; ModuleID = '<stdin>'                                                                                                                                                                   │
+│ source_filename = "<stdin>"                                                                                                                                                              │
+│                                                                                                                                                                                          │
+│ define <2 x i32> @uadd_sat_not_ugt_commute_add_partial_poison(<2 x i32> %x, <2 x i32> %yp) {                                                                                             │
+│   %notx = xor <2 x i32> %x, <i32 -1, i32 poison>                                                                                                                                         │
+│   %r = call <2 x i32> @llvm.uadd.sat.v2i32(<2 x i32> %yp, <2 x i32> %notx)                                                                                                               │
+│   ret <2 x i32> %r                                                                                                                                                                       │
+│ }                                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│ ; Function Attrs: nocallback nosync nounwind speculatable willreturn memory(none)                                                                                                        │
+│ declare <2 x i32> @llvm.uadd.sat.v2i32(<2 x i32>, <2 x i32>) #0                                                                                                                          │
+│                                                                                                                                                                                          │
+│ attributes #0 = { nocallback nosync nounwind speculatable willreturn memory(none) }                                                                                                      │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ --- log ---                                                                                                                                                                              │
+│                                                                                                                                                                                          │
+│ ----------------------------------------                                                                                                                                                 │
+│ define <2 x i32> @uadd_sat_not_ugt_commute_add_partial_poison(<2 x i32> %x, <2 x i32> %yp) {                                                                                             │
+│ #0:                                                                                                                                                                                      │
+│   %notx = xor <2 x i32> %x, { 4294967295, poison }                                                                                                                                       │
+│   %a = add nuw <2 x i32> %yp, %notx                                                                                                                                                      │
+│   %c = icmp ugt <2 x i32> %yp, %x                                                                                                                                                        │
+│   %r = select <2 x i1> %c, <2 x i32> { 4294967295, 4294967295 }, <2 x i32> %a                                                                                                            │
+│   ret <2 x i32> %r                                                                                                                                                                       │
+│ }                                                                                                                                                                                        │
+│ =>                                                                                                                                                                                       │
+│ define <2 x i32> @uadd_sat_not_ugt_commute_add_partial_poison(<2 x i32> %x, <2 x i32> %yp) {                                                                                             │
+│ #0:                                                                                                                                                                                      │
+│   %notx = xor <2 x i32> %x, { 4294967295, poison }                                                                                                                                       │
+│   %r = uadd_sat <2 x i32> %yp, %notx                                                                                                                                                     │
+│   ret <2 x i32> %r                                                                                                                                                                       │
+│ }                                                                                                                                                                                        │
+│ Transformation doesn't verify!                                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ ERROR: Target is more poisonous than source                                                                                                                                              │
+│                                                                                                                                                                                          │
+│ Example:                                                                                                                                                                                 │
+│ <2 x i32> %x = < #x00000000 (0), #x00000000 (0) >                                                                                                                                        │
+│ <2 x i32> %yp = < #x00000000 (0), #x00000001 (1) >                                                                                                                                       │
+│                                                                                                                                                                                          │
+│ Source:                                                                                                                                                                                  │
+│ <2 x i32> %notx = < #xffffffff (4294967295, -1), poison >                                                                                                                                │
+│ <2 x i32> %a = < #xffffffff (4294967295, -1), poison >                                                                                                                                   │
+│ <2 x i1> %c = < #x0 (0), #x1 (1) >                                                                                                                                                       │
+│ <2 x i32> %r = < #xffffffff (4294967295, -1), #xffffffff (4294967295, -1) >                                                                                                              │
+│                                                                                                                                                                                          │
+│ Target:                                                                                                                                                                                  │
+│ <2 x i32> %notx = < #xffffffff (4294967295, -1), poison >                                                                                                                                │
+│ <2 x i32> %r = < #xffffffff (4294967295, -1), poison >                                                                                                                                   │
+│ Source value: < #xffffffff (4294967295, -1), #xffffffff (4294967295, -1) >                                                                                                               │
+│ Target value: < #xffffffff (4294967295, -1), poison >                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ Summary:                                                                                                                                                                                 │
+│   0 correct transformations                                                                                                                                                              │
+│   1 incorrect transformations                                                                                                                                                            │
+│   0 failed-to-prove transformations                                                                                                                                                      │
+│   0 Alive2 errors                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ --- opt_stderr ---                                                                                                                                                                       │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ ```                                                                                                                                                                                      │
+│ ------  END ISSUE  ------                                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ You can execute bash commands and edit files to implement the necessary changes.                                                                                                         │
+│                                                                                                                                                                                          │
+│ ## Recommended Workflow                                                                                                                                                                  │
+│                                                                                                                                                                                          │
+│ This workflows should be done step-by-step so that you can iterate on your changes and any possible problems.                                                                            │
+│                                                                                                                                                                                          │
+│ 1. Analyze the codebase by finding and reading relevant files                                                                                                                            │
+│ 2. Edit the source code to resolve the issue                                                                                                                                             │
+│ 3. Verify your fix works by running the `submit-patch` command                                                                                                                           │
+│ 4. Based on the output of `submit-patch`, repeat steps 1-3 as necessary until the issue is resolved                                                                                      │
+│                                                                                                                                                                                          │
+│ ## Important Rules                                                                                                                                                                       │
+│                                                                                                                                                                                          │
+│ 1. Every response must contain exactly one action                                                                                                                                        │
+│ 2. The action must be enclosed in triple backticks                                                                                                                                       │
+│ 3. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.                                                                             │
+│    However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files                                           │
+│ 4. Solving this issue does not require deleting any files or accessing the internet, so you are not permitted to use tools such as: rm, curl, wget, git, ssh, scp, ftp, telnet, ping,    │
+│ traceroute, nslookup, dig, nmap, apt, apt-get, yum, dnf, pacman, brew.                                                                                                                   │
+│                                                                                                                                                                                          │
+│ <system_information>                                                                                                                                                                     │
+│ Linux 5.15.0-143-generic #153-Ubuntu SMP Fri Jun 13 19:10:45 UTC 2025 x86_64                                                                                                             │
+│ </system_information>                                                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ ## Formatting your response                                                                                                                                                              │
+│                                                                                                                                                                                          │
+│ Here is an example of a correct response:                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ <example_response>                                                                                                                                                                       │
+│ THOUGHT: I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.                 │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ ls -la                                                                                                                                                                                   │
+│ ```                                                                                                                                                                                      │
+│ </example_response>                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ## Useful command examples                                                                                                                                                               │
+│                                                                                                                                                                                          │
+│ ### Create a new file:                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ cat <<'EOF' > newfile.py                                                                                                                                                                 │
+│ import numpy as np                                                                                                                                                                       │
+│ hello = "world"                                                                                                                                                                          │
+│ print(hello)                                                                                                                                                                             │
+│ EOF                                                                                                                                                                                      │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### Edit files with sed:```bash                                                                                                                                                          │
+│ # Replace all occurrences                                                                                                                                                                │
+│ sed -i 's/old_string/new_string/g' filename.py                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ # Replace only first occurrence                                                                                                                                                          │
+│ sed -i 's/old_string/new_string/' filename.py                                                                                                                                            │
+│                                                                                                                                                                                          │
+│ # Replace first occurrence on line 1                                                                                                                                                     │
+│ sed -i '1s/old_string/new_string/' filename.py                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ # Replace all occurrences in lines 1-10                                                                                                                                                  │
+│ sed -i '1,10s/old_string/new_string/g' filename.py                                                                                                                                       │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### View file content:                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ # View specific lines with numbers                                                                                                                                                       │
+│ nl -ba filename.py | sed -n '10,20p'                                                                                                                                                     │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### Submit your patch:                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ # This command has no arguments                                                                                                                                                          │
+│ submit-patch                                                                                                                                                                             │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### Any other permitted command you want to run:                                                                                                                                         │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ anything                                                                                                                                                                                 │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #0, chat statistics so far: {'chat_rounds': 0, 'input_tokens': 0, 'cached_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}
+╭─ assistant [MainThread@77006] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT: I will start by listing the repository contents to locate InstCombine code handling uadd.sat or select folding with poison so I can investigate the miscompilation source.      │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ ls -R | head -100                                                                                                                                                                        │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@77006] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ .:                                                                                                                                                                                       │
+│ bolt                                                                                                                                                                                     │
+│ clang                                                                                                                                                                                    │
+│ clang-tools-extra                                                                                                                                                                        │
+│ cmake                                                                                                                                                                                    │
+│ CODE_OF_CONDUCT.md                                                                                                                                                                       │
+│ compiler-rt                                                                                                                                                                              │
+│ CONTRIBUTING.md                                                                                                                                                                          │
+│ cross-project-tests                                                                                                                                                                      │
+│ flang                                                                                                                                                                                    │
+│ libc                                                                                                                                                                                     │
+│ libclc                                                                                                                                                                                   │
+│ libcxx                                                                                                                                                                                   │
+│ libcxxabi                                                                                                                                                                                │
+│ libunwind                                                                                                                                                                                │
+│ LICENSE.TXT                                                                                                                                                                              │
+│ lld                                                                                                                                                                                      │
+│ lldb                                                                                                                                                                                     │
+│ llvm                                                                                                                                                                                     │
+│ llvm-libgcc                                                                                                                                                                              │
+│ mlir                                                                                                                                                                                     │
+│ offload                                                                                                                                                                                  │
+│ openmp                                                                                                                                                                                   │
+│ polly                                                                                                                                                                                    │
+│ pstl                                                                                                                                                                                     │
+│ pyproject.toml                                                                                                                                                                           │
+│ README.md                                                                                                                                                                                │
+│ runtimes                                                                                                                                                                                 │
+│ SECURITY.md                                                                                                                                                                              │
+│ third-party                                                                                                                                                                              │
+│ utils                                                                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ ./bolt:                                                                                                                                                                                  │
+│ cmake                                                                                                                                                                                    │
+│ CMakeLists.txt                                                                                                                                                                           │
+│ CODE_OWNERS.TXT                                                                                                                                                                          │
+│ docs                                                                                                                                                                                     │
+│ include                                                                                                                                                                                  │
+│ lib                                                                                                                                                                                      │
+│ LICENSE.TXT                                                                                                                                                                              │
+│ README.md                                                                                                                                                                                │
+│ runtime                                                                                                                                                                                  │
+│ test                                                                                                                                                                                     │
+│ tools                                                                                                                                                                                    │
+│ unittests                                                                                                                                                                                │
+│ utils                                                                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ ./bolt/cmake:                                                                                                                                                                            │
+│ modules                                                                                                                                                                                  │
+│                                                                                                                                                                                          │
+│ ./bolt/cmake/modules:                                                                                                                                                                    │
+│ AddBOLT.cmake                                                                                                                                                                            │
+│                                                                                                                                                                                          │
+│ ./bolt/docs:                                                                                                                                                                             │
+│ BAT.md                                                                                                                                                                                   │
+│ CMakeLists.txt                                                                                                                                                                           │
+│ CommandLineArgumentReference.md                                                                                                                                                          │
+│ conf.py                                                                                                                                                                                  │
+│ doxygen.cfg.in                                                                                                                                                                           │
+│ doxygen-mainpage.dox                                                                                                                                                                     │
+│ generate_doc.py                                                                                                                                                                          │
+│ HeatmapHeader.png                                                                                                                                                                        │
+│ Heatmap.png                                                                                                                                                                              │
+│ Heatmaps.md                                                                                                                                                                              │
+│ index.rst                                                                                                                                                                                │
+│ OptimizingClang.md                                                                                                                                                                       │
+│ OptimizingLinux.md                                                                                                                                                                       │
+│ README.txt                                                                                                                                                                               │
+│ RuntimeLibrary.md                                                                                                                                                                        │
+│ _static                                                                                                                                                                                  │
+│                                                                                                                                                                                          │
+│ ./bolt/docs/_static:                                                                                                                                                                     │
+│ favicon.ico                                                                                                                                                                              │
+│                                                                                                                                                                                          │
+│ ./bolt/include:                                                                                                                                                                          │
+│ bolt                                                                                                                                                                                     │
+│                                                                                                                                                                                          │
+│ ./bolt/include/bolt:                                                                                                                                                                     │
+│ Core                                                                                                                                                                                     │
+│ Passes                                                                                                                                                                                   │
+│ Profile                                                                                                                                                                                  │
+│ Rewrite                                                                                                                                                                                  │
+│ RuntimeLibs                                                                                                                                                                              │
+│ Utils                                                                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ ./bolt/include/bolt/Core:                                                                                                                                                                │
+│ AddressMap.h                                                                                                                                                                             │
+│ BinaryBasicBlock.h                                                                                                                                                                       │
+│ BinaryContext.h                                                                                                                                                                          │
+│ BinaryData.h                                                                                                                                                                             │
+│ BinaryDomTree.h                                                                                                                                                                          │
+│ BinaryEmitter.h                                                                                                                                                                          │
+│ BinaryFunctionCallGraph.h                                                                                                                                                                │
+│ BinaryFunction.h                                                                                                                                                                         │
+│ BinaryLoop.h                                                                                                                                                                             │
+│ BinarySection.h                                                                                                                                                                          │
+│ CallGraph.h                                                                                                                                                                              │
+│ CallGraphWalker.h                                                                                                                                                                        │
+│ DebugData.h                                                                                                                                                                              │
+│ DebugNames.h                                                                                                                                                                             │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #1, chat statistics so far: {'chat_rounds': 1, 'input_tokens': 1870, 'cached_tokens': 0, 'output_tokens': 59, 'total_tokens': 1929}
+╭─ assistant [MainThread@77006] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT: I will locate the InstCombine code that performs the uadd.sat fold by grepping, inspect it, and then patch it to bail out if any of the operands involved contain a poison      │
+│ element (e.g. the xor constant). After patching I will run submit-patch to validate.                                                                                                     │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ grep -Rn "uadd.sat" llvm/lib/Transforms/InstCombine && grep -Rn "saturating" llvm/lib/Transforms/InstCombine/InstCombineAddSub.cpp || true                                               │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@77006] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:999:  // (a == -1) ? -1 : a + 1 -> uadd.sat(a, 1)                                                                                  │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1004:          Intrinsic::uadd_sat, Cmp0, ConstantInt::get(Cmp0->getType(), 1));                                                   │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1012:    // (X u> ~C) ? -1 : (X + C) --> uadd.sat(X, C)                                                                            │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1013:    // (X u>= ~C)? -1 : (X + C) --> uadd.sat(X, C)                                                                            │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1014:    return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, Cmp0,                                                           │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1023:    // (X u> ~C - 1) ? -1 : (X + C) --> uadd.sat(X, C)                                                                        │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1024:    return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, Cmp0,                                                           │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1033:    // (X u >= -C) ? -1 : (X + C) --> uadd.sat(X, C)                                                                          │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1034:    return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, Cmp0,                                                           │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1051:    // (~X u< Y) ? -1 : (X + Y) --> uadd.sat(X, Y)                                                                            │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1052:    // (~X u< Y) ? -1 : (Y + X) --> uadd.sat(X, Y)                                                                            │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1053:    return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, X, Y);                                                          │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1060:    // (X u< Y) ? -1 : (~X + Y) --> uadd.sat(~X, Y)                                                                           │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1061:    // (X u< Y) ? -1 : (Y + ~X) --> uadd.sat(Y, ~X)                                                                           │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1064:        Intrinsic::uadd_sat, BO->getOperand(0), BO->getOperand(1));                                                           │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1071:    // ((X + Y) u< X) ? -1 : (X + Y) --> uadd.sat(X, Y)                                                                       │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1072:    // ((X + Y) u< Y) ? -1 : (X + Y) --> uadd.sat(X, Y)                                                                       │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:1073:    return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, Cmp1, Y);                                                       │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:2089:/// Turn X + Y overflows ? -1 : X + Y -> uadd_sat X, Y                                                                        │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:2173:    // X + Y overflows ? -1 : X + Y -> uadd_sat X, Y                                                                          │
+│ llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:2174:    NewIntrinsicID = Intrinsic::uadd_sat;                                                                                     │
+│ llvm/lib/Transforms/InstCombine/InstCombineAddSub.cpp:1235:    return Intrinsic::getOrInsertDeclaration(I.getModule(), Intrinsic::uadd_sat,                                              │
+│ llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp:3761:  case Intrinsic::uadd_sat: {                                                                                               │
+│ llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp:3762:    // uadd.sat(a, b) == 0  ->  (a | b) == 0                                                                                │
+│ llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp:3964:        "This function only works with usub_sat and uadd_sat for now!");                                                    │
+│ llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp:3965:  case Intrinsic::uadd_sat:                                                                                                 │
+│ llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp:4080:  case Intrinsic::uadd_sat:                                                                                                 │
+│ llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp:2249:  case Intrinsic::uadd_sat:                                                                                                    │
+│ llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp:2313:          IID == Intrinsic::uadd_sat || IID == Intrinsic::usub_sat;                                                            │
+│ llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp:2319:          NewVal = Val->uadd_sat(*Val2);                                                                                       │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #2, chat statistics so far: {'chat_rounds': 2, 'input_tokens': 4161, 'cached_tokens': 1792, 'output_tokens': 1459, 'total_tokens': 5620}
+╭─ assistant [MainThread@77006] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT: I will inspect the relevant section of InstCombineSelect.cpp around the pattern (~X u< Y) ? -1 : (X + Y) that folded to uadd.sat, then patch it to bail out if the NOT/XOR uses │
+│ a constant vector containing poison elements to avoid unsound transformation. After patch I'll run submit-patch.                                                                         │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ nl -ba llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp | sed -n '1035,1078p' && apply_patch <<'EOF'                                                                                │
+│ *** Begin Patch                                                                                                                                                                          │
+│ *** Update File: llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp                                                                                                                   │
+│ @@                                                                                                                                                                                       │
+│      // (~X u< Y) ? -1 : (X + Y) --> uadd.sat(X, Y)                                                                                                                                      │
+│      // (~X u< Y) ? -1 : (Y + X) --> uadd.sat(X, Y)                                                                                                                                      │
+│      if (CmpInst::isUnsigned(CmpPred) && (CmpPred == ICmpInst::ICMP_ULT ||                                                                                                               │
+│                                           CmpPred == ICmpInst::ICMP_ULE) &&                                                                                                              │
+│          match(Cmp0, m_Not(m_Value(X))) && (Y == Cmp1)) {                                                                                                                                │
+│ +      // Do not fold if the bitwise not is implemented as xor with a constant                                                                                                           │
+│ +      // vector that contains poison elements. The original select can mask                                                                                                             │
+│ +      // the poison (by choosing the all-ones constant), while the intrinsic                                                                                                            │
+│ +      // would propagate it, causing increased poison.                                                                                                                                  │
+│ +      if (auto *XorI = dyn_cast<Instruction>(Cmp0)) {                                                                                                                                   │
+│ +        if (XorI->getOpcode() == Instruction::Xor) {                                                                                                                                    │
+│ +          if (auto *C = dyn_cast<Constant>(XorI->getOperand(1))) {                                                                                                                      │
+│ +            if (C->containsPoisonElement())                                                                                                                                             │
+│ +              return nullptr;                                                                                                                                                           │
+│ +          }                                                                                                                                                                             │
+│ +        }                                                                                                                                                                               │
+│ +      } else if (auto *XorO = dyn_cast<Operator>(Cmp0)) {                                                                                                                               │
+│ +        if (XorO->getOpcode() == Instruction::Xor) {                                                                                                                                    │
+│ +          if (auto *C = dyn_cast<Constant>(XorO->getOperand(1))) {                                                                                                                      │
+│ +            if (C->containsPoisonElement())                                                                                                                                             │
+│ +              return nullptr;                                                                                                                                                           │
+│ +          }                                                                                                                                                                             │
+│ +        }                                                                                                                                                                               │
+│ +      }                                                                                                                                                                                 │
+│        return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, X, Y);                                                                                                                  │
+│      }                                                                                                                                                                                   │
+│ @@                                                                                                                                                                                       │
+│      // (X u< Y) ? -1 : (~X + Y) --> uadd.sat(~X, Y)                                                                                                                                     │
+│      // (X u< Y) ? -1 : (Y + ~X) --> uadd.sat(Y, ~X)                                                                                                                                     │
+│      if (CmpInst::isUnsigned(CmpPred) && (CmpPred == ICmpInst::ICMP_ULT ||                                                                                                               │
+│                                           CmpPred == ICmpInst::ICMP_ULE) &&                                                                                                              │
+│          X == Cmp0 && Y == Cmp1 && match(BO, m_Add(m_Value(X), m_Value(Y)))) {                                                                                                           │
+│ +      // If one of the add operands is a NOT implemented via xor with a poison                                                                                                          │
+│ +      // constant vector, folding would incorrectly propagate poison.                                                                                                                   │
+│ +      auto PoisonInNot = [](Value *V) {                                                                                                                                                 │
+│ +        if (!V)                                                                                                                                                                         │
+│ +          return false;                                                                                                                                                                 │
+│ +        if (auto *I = dyn_cast<Instruction>(V)) {                                                                                                                                       │
+│ +          if (I->getOpcode() == Instruction::Xor)                                                                                                                                       │
+│ +            if (auto *C = dyn_cast<Constant>(I->getOperand(1)))                                                                                                                         │
+│ +              return C->containsPoisonElement();                                                                                                                                        │
+│ +        } else if (auto *O = dyn_cast<Operator>(V)) {                                                                                                                                   │
+│ +          if (O->getOpcode() == Instruction::Xor)                                                                                                                                       │
+│ +            if (auto *C = dyn_cast<Constant>(O->getOperand(1)))                                                                                                                         │
+│ +              return C->containsPoisonElement();                                                                                                                                        │
+│ +        }                                                                                                                                                                               │
+│ +        return false;                                                                                                                                                                   │
+│ +      };                                                                                                                                                                                │
+│ +      if (PoisonInNot(BO->getOperand(0)) || PoisonInNot(BO->getOperand(1)))                                                                                                             │
+│ +        return nullptr;                                                                                                                                                                 │
+│        return Builder.CreateBinaryIntrinsic(                                                                                                                                             │
+│            Intrinsic::uadd_sat, BO->getOperand(0), BO->getOperand(1));                                                                                                                   │
+│      }                                                                                                                                                                                   │
+│ *** End Patch                                                                                                                                                                            │
+│ EOF                                                                                                                                                                                      │
+│  && submit-patch                                                                                                                                                                         │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@77006] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>2</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│   1035                                           ConstantInt::get(Cmp0->getType(), *C));                                                                                                 │
+│   1036    }                                                                                                                                                                              │
+│   1037                                                                                                                                                                                   │
+│   1038    // Canonicalize predicate to less-than or less-or-equal-than.                                                                                                                  │
+│   1039    if (Pred == ICmpInst::ICMP_UGT || Pred == ICmpInst::ICMP_UGE) {                                                                                                                │
+│   1040      std::swap(Cmp0, Cmp1);                                                                                                                                                       │
+│   1041      Pred = CmpInst::getSwappedPredicate(Pred);                                                                                                                                   │
+│   1042    }                                                                                                                                                                              │
+│   1043    if (Pred != ICmpInst::ICMP_ULT && Pred != ICmpInst::ICMP_ULE)                                                                                                                  │
+│   1044      return nullptr;                                                                                                                                                              │
+│   1045                                                                                                                                                                                   │
+│   1046    // Match unsigned saturated add of 2 variables with an unnecessary 'not'.                                                                                                      │
+│   1047    // Strictness of the comparison is irrelevant.                                                                                                                                 │
+│   1048    Value *Y;                                                                                                                                                                      │
+│   1049    if (match(Cmp0, m_Not(m_Value(X))) &&                                                                                                                                          │
+│   1050        match(FVal, m_c_Add(m_Specific(X), m_Value(Y))) && Y == Cmp1) {                                                                                                            │
+│   1051      // (~X u< Y) ? -1 : (X + Y) --> uadd.sat(X, Y)                                                                                                                               │
+│   1052      // (~X u< Y) ? -1 : (Y + X) --> uadd.sat(X, Y)                                                                                                                               │
+│   1053      return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, X, Y);                                                                                                             │
+│   1054    }                                                                                                                                                                              │
+│   1055    // The 'not' op may be included in the sum but not the compare.                                                                                                                │
+│   1056    // Strictness of the comparison is irrelevant.                                                                                                                                 │
+│   1057    X = Cmp0;                                                                                                                                                                      │
+│   1058    Y = Cmp1;                                                                                                                                                                      │
+│   1059    if (match(FVal, m_c_Add(m_Not(m_Specific(X)), m_Specific(Y)))) {                                                                                                               │
+│   1060      // (X u< Y) ? -1 : (~X + Y) --> uadd.sat(~X, Y)                                                                                                                              │
+│   1061      // (X u< Y) ? -1 : (Y + ~X) --> uadd.sat(Y, ~X)                                                                                                                              │
+│   1062      BinaryOperator *BO = cast<BinaryOperator>(FVal);                                                                                                                             │
+│   1063      return Builder.CreateBinaryIntrinsic(                                                                                                                                        │
+│   1064          Intrinsic::uadd_sat, BO->getOperand(0), BO->getOperand(1));                                                                                                              │
+│   1065    }                                                                                                                                                                              │
+│   1066    // The overflow may be detected via the add wrapping round.                                                                                                                    │
+│   1067    // This is only valid for strict comparison!                                                                                                                                   │
+│   1068    if (Pred == ICmpInst::ICMP_ULT &&                                                                                                                                              │
+│   1069        match(Cmp0, m_c_Add(m_Specific(Cmp1), m_Value(Y))) &&                                                                                                                      │
+│   1070        match(FVal, m_c_Add(m_Specific(Cmp1), m_Specific(Y)))) {                                                                                                                   │
+│   1071      // ((X + Y) u< X) ? -1 : (X + Y) --> uadd.sat(X, Y)                                                                                                                          │
+│   1072      // ((X + Y) u< Y) ? -1 : (X + Y) --> uadd.sat(X, Y)                                                                                                                          │
+│   1073      return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, Cmp1, Y);                                                                                                          │
+│   1074    }                                                                                                                                                                              │
+│   1075                                                                                                                                                                                   │
+│   1076    return nullptr;                                                                                                                                                                │
+│   1077  }                                                                                                                                                                                │
+│   1078                                                                                                                                                                                   │
+│ /bin/sh: 1: apply_patch: not found                                                                                                                                                       │
+│ /bin/sh: 60: Syntax error: "&&" unexpected                                                                                                                                               │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #3, chat statistics so far: {'chat_rounds': 3, 'input_tokens': 7697, 'cached_tokens': 3968, 'output_tokens': 3960, 'total_tokens': 11657}
+╭─ assistant [MainThread@77006] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT: I will patch InstCombineSelect.cpp to add poison-element checks before performing the two uadd.sat folds that use m_Not, preventing the miscompilation. Then I will submit the  │
+│ patch.                                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ python3 - <<'PY'                                                                                                                                                                         │
+│ import pathlib, re                                                                                                                                                                       │
+│ path = pathlib.Path("llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp")                                                                                                             │
+│ text = path.read_text()                                                                                                                                                                  │
+│                                                                                                                                                                                          │
+│ # Patch first fold (~X u< Y) ? -1 : (X + Y)                                                                                                                                              │
+│ pattern1 = re.compile(r'(// \(~X u< Y\) \? -1 : \(X \+ Y\) --> uadd\.sat\(X, Y\)\n\s*// \(~X u< Y\) \? -1 : \(Y \+ X\) --> uadd\.sat\(X, Y\)\n\s*return                                  │
+│ Builder\.CreateBinaryIntrinsic\(Intrinsic::uadd_sat, X, Y\);)')                                                                                                                          │
+│ def repl1(m):                                                                                                                                                                            │
+│     return m.group(1).replace(                                                                                                                                                           │
+│         'return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, X, Y);',                                                                                                              │
+│         '{\n      // Avoid folding if the NOT is an xor with a poison-containing constant.\n      auto HasPoisonNot = [](Value *V) {\n        if (!V) return false;\n        if (auto    │
+│ *BO = dyn_cast<BinaryOperator>(V)) {\n          if (BO->getOpcode() == Instruction::Xor)\n            if (auto *C = dyn_cast<Constant>(BO->getOperand(1)))\n              return         │
+│ C->containsPoisonElement();\n        } else if (auto *CE = dyn_cast<ConstantExpr>(V)) {\n          if (CE->getOpcode() == Instruction::Xor)\n            if (auto *C =                   │
+│ dyn_cast<Constant>(CE->getOperand(1)))\n              return C->containsPoisonElement();\n        }\n        return false;\n      };\n      if (HasPoisonNot(Cmp0))\n        return      │
+│ nullptr;\n      return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, X, Y);\n    }')                                                                                                │
+│ text_new = pattern1.sub(repl1, text)                                                                                                                                                     │
+│                                                                                                                                                                                          │
+│ # Patch second fold (X u< Y) ? -1 : (~X + Y)                                                                                                                                             │
+│ pattern2 = re.compile(r'(// \(X u< Y\) \? -1 : \(~X \+ Y\) --> uadd\.sat\(~X, Y\)\n\s*// \(X u< Y\) \? -1 : \(Y \+ ~X\) --> uadd\.sat\(Y, ~X\)\n\s*BinaryOperator \*BO =                 │
+│ cast<BinaryOperator>\(FVal\);\n\s*return Builder\.CreateBinaryIntrinsic\(\n\s*Intrinsic::uadd_sat, BO->getOperand\(0\), BO->getOperand\(1\)\);)', re.MULTILINE)                          │
+│ def repl2(m):                                                                                                                                                                            │
+│     return m.group(1).replace(                                                                                                                                                           │
+│         'return Builder.CreateBinaryIntrinsic(\n        Intrinsic::uadd_sat, BO->getOperand(0), BO->getOperand(1));',                                                                    │
+│         '{\n    // Avoid folding if either operand is a NOT encoded as xor with poison.\n    auto HasPoisonNot = [](Value *V) {\n      if (!V) return False;\n      if (auto *BO2 =      │
+│ dyn_cast<BinaryOperator>(V)) {\n        if (BO2->getOpcode() == Instruction::Xor)\n          if (auto *C = dyn_cast<Constant>(BO2->getOperand(1)))\n            return                   │
+│ C->containsPoisonElement();\n      } else if (auto *CE2 = dyn_cast<ConstantExpr>(V)) {\n        if (CE2->getOpcode() == Instruction::Xor)\n          if (auto *C =                       │
+│ dyn_cast<Constant>(CE2->getOperand(1)))\n            return C->containsPoisonElement();\n      }\n      return False;\n    };\n    if (HasPoisonNot(BO->getOperand(0)) ||                │
+│ HasPoisonNot(BO->getOperand(1)))\n      return nullptr;\n    return Builder.CreateBinaryIntrinsic(\n        Intrinsic::uadd_sat, BO->getOperand(0), BO->getOperand(1));\n  }')           │
+│ # Fix capitalization of 'False' to 'false' (typo) after replacement.                                                                                                                     │
+│ text_new = pattern2.sub(repl2, text_new).replace('return False;', 'return false;')                                                                                                       │
+│                                                                                                                                                                                          │
+│ if text_new == text:                                                                                                                                                                     │
+│     print("Patch did not apply; patterns not found.")                                                                                                                                    │
+│ else:                                                                                                                                                                                    │
+│     path.write_text(text_new)                                                                                                                                                            │
+│     print("Patch applied.")                                                                                                                                                              │
+│ PY                                                                                                                                                                                       │
+│ && submit-patch                                                                                                                                                                          │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@77006] ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>2</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ Patch applied.                                                                                                                                                                           │
+│ /bin/sh: 29: Syntax error: "&&" unexpected                                                                                                                                               │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #4, chat statistics so far: {'chat_rounds': 4, 'input_tokens': 12946, 'cached_tokens': 7424, 'output_tokens': 6074, 'total_tokens': 19020}
+╭─ assistant [MainThread@77006] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT: The patch was applied using a Python script; I now need to submit it to run the build/tests and verify the miscompilation is resolved.                                          │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ submit-patch                                                                                                                                                                             │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Generation statistics saved to /tmp/113869-gpt5-12020258.json.
+Saved trajectory to '/tmp/113869-gpt5-12020258.traj.json'
+Final Patch
+-----------
+diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
+index 162ebebf1b8f..ce141aa9808a 100644
+--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
++++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
+@@ -1050,7 +1050,25 @@ static Value *canonicalizeSaturatedAdd(ICmpInst *Cmp, Value *TVal, Value *FVal,
+       match(FVal, m_c_Add(m_Specific(X), m_Value(Y))) && Y == Cmp1) {
+     // (~X u< Y) ? -1 : (X + Y) --> uadd.sat(X, Y)
+     // (~X u< Y) ? -1 : (Y + X) --> uadd.sat(X, Y)
+-    return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, X, Y);
++    {
++      // Avoid folding if the NOT is an xor with a poison-containing constant.
++      auto HasPoisonNot = [](Value *V) {
++        if (!V) return false;
++        if (auto *BO = dyn_cast<BinaryOperator>(V)) {
++          if (BO->getOpcode() == Instruction::Xor)
++            if (auto *C = dyn_cast<Constant>(BO->getOperand(1)))
++              return C->containsPoisonElement();
++        } else if (auto *CE = dyn_cast<ConstantExpr>(V)) {
++          if (CE->getOpcode() == Instruction::Xor)
++            if (auto *C = dyn_cast<Constant>(CE->getOperand(1)))
++              return C->containsPoisonElement();
++        }
++        return false;
++      };
++      if (HasPoisonNot(Cmp0))
++        return nullptr;
++      return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, X, Y);
++    }
+   }
+   // The 'not' op may be included in the sum but not the compare.
+   // Strictness of the comparison is irrelevant.
+@@ -1060,9 +1078,27 @@ static Value *canonicalizeSaturatedAdd(ICmpInst *Cmp, Value *TVal, Value *FVal,
+     // (X u< Y) ? -1 : (~X + Y) --> uadd.sat(~X, Y)
+     // (X u< Y) ? -1 : (Y + ~X) --> uadd.sat(Y, ~X)
+     BinaryOperator *BO = cast<BinaryOperator>(FVal);
++    {
++    // Avoid folding if either operand is a NOT encoded as xor with poison.
++    auto HasPoisonNot = [](Value *V) {
++      if (!V) return false;
++      if (auto *BO2 = dyn_cast<BinaryOperator>(V)) {
++        if (BO2->getOpcode() == Instruction::Xor)
++          if (auto *C = dyn_cast<Constant>(BO2->getOperand(1)))
++            return C->containsPoisonElement();
++      } else if (auto *CE2 = dyn_cast<ConstantExpr>(V)) {
++        if (CE2->getOpcode() == Instruction::Xor)
++          if (auto *C = dyn_cast<Constant>(CE2->getOperand(1)))
++            return C->containsPoisonElement();
++      }
++      return false;
++    };
++    if (HasPoisonNot(BO->getOperand(0)) || HasPoisonNot(BO->getOperand(1)))
++      return nullptr;
+     return Builder.CreateBinaryIntrinsic(
+         Intrinsic::uadd_sat, BO->getOperand(0), BO->getOperand(1));
+   }
++  }
+   // The overflow may be detected via the add wrapping round.
+   // This is only valid for strict comparison!
+   if (Pred == ICmpInst::ICMP_ULT &&
+
+Reference Patch
+---------------
+commit e577f14b670ee2ae6bb717133310b215be4331b3
+Author: Yingwei Zheng <dtcxzyw2333@gmail.com>
+Date:   Fri Nov 1 22:18:44 2024 +0800
+
+    [InstCombine] Use `m_NotForbidPoison` when folding `(X u< Y) ? -1 : (~X + Y) --> uadd.sat(~X, Y)` (#114345)
+
+    Alive2: https://alive2.llvm.org/ce/z/mTGCo-
+    We cannot reuse `~X` if `m_AllOnes` matches a vector constant with some
+    poison elts. An alternative solution is to create a new not instead of
+    reusing `~X`. But it doesn't worth the effort because we need to add a
+    one-use check.
+
+    Fixes https://github.com/llvm/llvm-project/issues/113869.
+
+diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
+index 162ebebf1b8f..999ad1adff20 100644
+--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
++++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
+@@ -1056,7 +1056,7 @@ static Value *canonicalizeSaturatedAdd(ICmpInst *Cmp, Value *TVal, Value *FVal,
+   // Strictness of the comparison is irrelevant.
+   X = Cmp0;
+   Y = Cmp1;
+-  if (match(FVal, m_c_Add(m_Not(m_Specific(X)), m_Specific(Y)))) {
++  if (match(FVal, m_c_Add(m_NotForbidPoison(m_Specific(X)), m_Specific(Y)))) {
+     // (X u< Y) ? -1 : (~X + Y) --> uadd.sat(~X, Y)
+     // (X u< Y) ? -1 : (Y + ~X) --> uadd.sat(Y, ~X)
+     BinaryOperator *BO = cast<BinaryOperator>(FVal);
+
+Statistics
+----------
+{
+  "command": {
+    "issue": "113869",
+    "model": "gpt-5"
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex 162ebebf1b8f..ce141aa9808a 100644\n---
+a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -1050,7 +1050,25 @@ static Value *canonicalizeSaturatedAdd(ICmpInst
+*Cmp, Value *TVal, Value *FVal,\n       match(FVal, m_c_Add(m_Specific(X), m_Value(Y))) && Y == Cmp1) {\n     // (~X u< Y) ? -1 : (X + Y) --> uadd.sat(X, Y)\n     // (~X u< Y) ? -1 : (Y +
+X) --> uadd.sat(X, Y)\n-    return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, X, Y);\n+    {\n+      // Avoid folding if the NOT is an xor with a poison-containing constant.\n+
+auto HasPoisonNot = [](Value *V) {\n+        if (!V) return false;\n+        if (auto *BO = dyn_cast<BinaryOperator>(V)) {\n+          if (BO->getOpcode() == Instruction::Xor)\n+
+if (auto *C = dyn_cast<Constant>(BO->getOperand(1)))\n+              return C->containsPoisonElement();\n+        } else if (auto *CE = dyn_cast<ConstantExpr>(V)) {\n+          if
+(CE->getOpcode() == Instruction::Xor)\n+            if (auto *C = dyn_cast<Constant>(CE->getOperand(1)))\n+              return C->containsPoisonElement();\n+        }\n+        return
+false;\n+      };\n+      if (HasPoisonNot(Cmp0))\n+        return nullptr;\n+      return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, X, Y);\n+    }\n   }\n   // The 'not' op may
+be included in the sum but not the compare.\n   // Strictness of the comparison is irrelevant.\n@@ -1060,9 +1078,27 @@ static Value *canonicalizeSaturatedAdd(ICmpInst *Cmp, Value *TVal,
+Value *FVal,\n     // (X u< Y) ? -1 : (~X + Y) --> uadd.sat(~X, Y)\n     // (X u< Y) ? -1 : (Y + ~X) --> uadd.sat(Y, ~X)\n     BinaryOperator *BO = cast<BinaryOperator>(FVal);\n+    {\n+
+// Avoid folding if either operand is a NOT encoded as xor with poison.\n+    auto HasPoisonNot = [](Value *V) {\n+      if (!V) return false;\n+      if (auto *BO2 =
+dyn_cast<BinaryOperator>(V)) {\n+        if (BO2->getOpcode() == Instruction::Xor)\n+          if (auto *C = dyn_cast<Constant>(BO2->getOperand(1)))\n+            return
+C->containsPoisonElement();\n+      } else if (auto *CE2 = dyn_cast<ConstantExpr>(V)) {\n+        if (CE2->getOpcode() == Instruction::Xor)\n+          if (auto *C =
+dyn_cast<Constant>(CE2->getOperand(1)))\n+            return C->containsPoisonElement();\n+      }\n+      return false;\n+    };\n+    if (HasPoisonNot(BO->getOperand(0)) ||
+HasPoisonNot(BO->getOperand(1)))\n+      return nullptr;\n     return Builder.CreateBinaryIntrinsic(\n         Intrinsic::uadd_sat, BO->getOperand(0), BO->getOperand(1));\n   }\n+  }\n
+// The overflow may be detected via the add wrapping round.\n   // This is only valid for strict comparison!\n   if (Pred == ICmpInst::ICMP_ULT &&\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 19253,
+  "output_tokens": 6317,
+  "cached_tokens": 7424,
+  "total_tokens": 25570,
+  "chat_rounds": 5,
+  "total_time_sec": 92.83380722999573,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex 162ebebf1b8f..ce141aa9808a 100644\n---
+a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -1050,7 +1050,25 @@ static Value *canonicalizeSaturatedAdd(ICmpInst
+*Cmp, Value *TVal, Value *FVal,\n       match(FVal, m_c_Add(m_Specific(X), m_Value(Y))) && Y == Cmp1) {\n     // (~X u< Y) ? -1 : (X + Y) --> uadd.sat(X, Y)\n     // (~X u< Y) ? -1 : (Y +
+X) --> uadd.sat(X, Y)\n-    return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, X, Y);\n+    {\n+      // Avoid folding if the NOT is an xor with a poison-containing constant.\n+
+auto HasPoisonNot = [](Value *V) {\n+        if (!V) return false;\n+        if (auto *BO = dyn_cast<BinaryOperator>(V)) {\n+          if (BO->getOpcode() == Instruction::Xor)\n+
+if (auto *C = dyn_cast<Constant>(BO->getOperand(1)))\n+              return C->containsPoisonElement();\n+        } else if (auto *CE = dyn_cast<ConstantExpr>(V)) {\n+          if
+(CE->getOpcode() == Instruction::Xor)\n+            if (auto *C = dyn_cast<Constant>(CE->getOperand(1)))\n+              return C->containsPoisonElement();\n+        }\n+        return
+false;\n+      };\n+      if (HasPoisonNot(Cmp0))\n+        return nullptr;\n+      return Builder.CreateBinaryIntrinsic(Intrinsic::uadd_sat, X, Y);\n+    }\n   }\n   // The 'not' op may
+be included in the sum but not the compare.\n   // Strictness of the comparison is irrelevant.\n@@ -1060,9 +1078,27 @@ static Value *canonicalizeSaturatedAdd(ICmpInst *Cmp, Value *TVal,
+Value *FVal,\n     // (X u< Y) ? -1 : (~X + Y) --> uadd.sat(~X, Y)\n     // (X u< Y) ? -1 : (Y + ~X) --> uadd.sat(Y, ~X)\n     BinaryOperator *BO = cast<BinaryOperator>(FVal);\n+    {\n+
+// Avoid folding if either operand is a NOT encoded as xor with poison.\n+    auto HasPoisonNot = [](Value *V) {\n+      if (!V) return false;\n+      if (auto *BO2 =
+dyn_cast<BinaryOperator>(V)) {\n+        if (BO2->getOpcode() == Instruction::Xor)\n+          if (auto *C = dyn_cast<Constant>(BO2->getOperand(1)))\n+            return
+C->containsPoisonElement();\n+      } else if (auto *CE2 = dyn_cast<ConstantExpr>(V)) {\n+        if (CE2->getOpcode() == Instruction::Xor)\n+          if (auto *C =
+dyn_cast<Constant>(CE2->getOperand(1)))\n+            return C->containsPoisonElement();\n+      }\n+      return false;\n+    };\n+    if (HasPoisonNot(BO->getOperand(0)) ||
+HasPoisonNot(BO->getOperand(1)))\n+      return nullptr;\n     return Builder.CreateBinaryIntrinsic(\n         Intrinsic::uadd_sat, BO->getOperand(0), BO->getOperand(1));\n   }\n+  }\n
+// The overflow may be detected via the add wrapping round.\n   // This is only valid for strict comparison!\n   if (Pred == ICmpInst::ICMP_ULT &&\n"
+  ]
+}

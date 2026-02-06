@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "138345",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/138345-qwen3max-11251449.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Scalar/GVNSink.cpp b/llvm/lib/Transforms/Scalar/GVNSink.cpp\nindex 2058df33ea33..602ce75c997a 100644\n--- a/llvm/lib/Transforms/Scalar/GVNSink.cpp\n+++ b/llvm/lib/Transforms/Scalar/GVNSink.cpp\n@@ -548,6 +548,13 @@ private:\n     if (isa<PHINode>(I) || I->isEHPad() || isa<AllocaInst>(I) ||\n         I->getType()->isTokenTy())\n       return true;\n+    \n+    // Inline assembly calls cannot be sunk as they cannot be used as\n+    // PHI node values.\n+    if (auto *CB = dyn_cast<CallBase>(I))\n+      if (CB->isInlineAsm())\n+        return true;\n+    \n     return false;\n   }\n \n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 356507,
+  "output_tokens": 2673,
+  "cached_tokens": 87040,
+  "total_tokens": 359180,
+  "chat_rounds": 27,
+  "total_time_sec": 235.91101384162903,
+  "trans_point": [
+    "llvm/lib/IR/Verifier.cpp",
+    "llvm::VerifierPass::run",
+    7814
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/GVNSink.cpp",
+      546,
+      552
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The problem occurs when the `gvn-sink` pass attempts to sink inline assembly call instructions. The pass creates a PHI node containing the inline assembly expressions as incoming values, which is invalid LLVM IR because inline assembly expressions cannot be treated as first-class values or stored in PHI nodes. This causes the verifier to fail with the error \"Cannot take the address of an inline asm!\".\n\n2. **Analyzing `opt`'s Log**: The log shows that both inline assembly calls are being analyzed for sinking, and the alias analysis reports them as having ModRef behavior. The critical observation is that the pass proceeds to transform these calls despite their special nature, leading to the creation of an invalid PHI node containing inline assembly expressions.\n\n3. **Root Cause Analysis**: The root cause is in the `shouldAvoidSinkingInstruction` function in `GVNSink.cpp`. This function currently filters out certain instruction types that shouldn't be sunk (PHINodes, EHPads, AllocaInst, token types), but it doesn't account for inline assembly calls. When call instructions that are inline assembly are processed by the sinking logic, the pass attempts to create PHIs of these inline assembly expressions, which violates LLVM's IR constraints.\n\n4. **Proposed Edit Point(s)**\n   + The fix is to modify the `shouldAvoidSinkingInstruction` function to also return `true` for call instructions that are inline assembly. This can be done by adding a check for `CallInst` (and `InvokeInst`) that uses `CallBase::isInlineAsm()` to detect inline assembly calls.\n\n5. **Conclusion**: By preventing inline assembly calls from being considered for sinking in the `shouldAvoidSinkingInstruction` function, we avoid the invalid transformation that creates PHI nodes containing inline assembly expressions. This ensures that the `gvn-sink` pass maintains IR validity while still allowing other valid sinking optimizations to proceed.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Scalar/GVNSink.cpp b/llvm/lib/Transforms/Scalar/GVNSink.cpp\nindex 2058df33ea33..602ce75c997a 100644\n--- a/llvm/lib/Transforms/Scalar/GVNSink.cpp\n+++ b/llvm/lib/Transforms/Scalar/GVNSink.cpp\n@@ -548,6 +548,13 @@ private:\n     if (isa<PHINode>(I) || I->isEHPad() || isa<AllocaInst>(I) ||\n         I->getType()->isTokenTy())\n       return true;\n+    \n+    // Inline assembly calls cannot be sunk as they cannot be used as\n+    // PHI node values.\n+    if (auto *CB = dyn_cast<CallBase>(I))\n+      if (CB->isInlineAsm())\n+        return true;\n+    \n     return false;\n   }\n \n"
+  ]
+}

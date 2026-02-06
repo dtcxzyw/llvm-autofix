@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "131281",
+    "model": "deepseek-chat"
+  },
+  "patch": null,
+  "error": "NoAvailablePatchFound",
+  "errmsg": "All efforts tried yet no available patches found.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/mswe.py\", line 346, in main\n    raise NoAvailablePatchFound(\"All efforts tried yet no available patches found.\")\nautofix.main.NoAvailablePatchFound: All efforts tried yet no available patches found.\n",
+  "input_tokens": 1964595,
+  "output_tokens": 21898,
+  "cached_tokens": 1936832,
+  "total_tokens": 1986493,
+  "chat_rounds": 87,
+  "total_time_sec": 1015.3305640220642,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\nindex d429fe96f9be..9f693ef41bf2 100644\n--- a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n+++ b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n@@ -2399,12 +2399,15 @@ void SCEVExpanderCleaner::cleanup() {\n   // Remove all inserted instructions.\n   for (Instruction *I : reverse(InsertedInstructions)) {\n #ifndef NDEBUG\n-    assert(all_of(I->users(),\n-                  [&InsertedSet](Value *U) {\n-                    return InsertedSet.contains(cast<Instruction>(U));\n-                  }) &&\n+    assert(all_of(I->users(), [&InsertedSet, this](Value *U) {\n+              if (InsertedSet.contains(cast<Instruction>(U)))\n+                return true;\n+              if (Expander.ReusedValues.contains(U))\n+                return true;\n+              return false;\n+            }) &&\n            \"removed instruction should only be used by instructions inserted \"\n-           \"during expansion\");\n+           \"during expansion or reused instructions\");\n #endif\n     assert(!I->getType()->isVoidTy() &&\n            \"inserted instruction should have non-void types\");\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 0e38ccc565ea..b7795f5480b4 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -2061,11 +2061,14 @@ public:\n   ~GeneratedRTChecks() {\n     SCEVExpanderCleaner SCEVCleaner(SCEVExp);\n     SCEVExpanderCleaner MemCheckCleaner(MemCheckExp);\n-    if (!SCEVCheckCond)\n+    // If either condition is used, we must not clean up either expander because\n+    // there may be cross-dependencies between inserted instructions.\n+    if (!SCEVCheckCond || !MemRuntimeCheckCond) {\n       SCEVCleaner.markResultUsed();\n-\n-    if (!MemRuntimeCheckCond)\n       MemCheckCleaner.markResultUsed();\n+    } else {\n+      // Both conditions are unused, we can clean up both expanders.\n+    }\n \n     if (MemRuntimeCheckCond) {\n       auto &SE = *MemCheckExp.getSE();\n",
+    "diff --git a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\nindex d429fe96f9be..224c296175fe 100644\n--- a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n+++ b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n@@ -2387,10 +2387,26 @@ void SCEVExpanderCleaner::cleanup() {\n   for (auto [I, Flags] : Expander.OrigFlags)\n     Flags.apply(I);\n \n+  // Collect all inserted instructions.\n   auto InsertedInstructions = Expander.getAllInsertedInstructions();\n-#ifndef NDEBUG\n+\n   SmallPtrSet<Instruction *, 8> InsertedSet(InsertedInstructions.begin(),\n                                             InsertedInstructions.end());\n+\n+  // If any inserted instruction has a user that is not inserted, we cannot\n+  // safely remove them. Bail out.\n+  for (Instruction *I : InsertedInstructions)\n+    for (User *U : I->users()) {\n+      if (auto *UI = dyn_cast<Instruction>(U)) {\n+        if (!InsertedSet.contains(UI))\n+          return;\n+      } else {\n+        // Non-instruction user (e.g., ConstantExpr). This is unexpected; bail out.\n+        return;\n+      }\n+    }\n+\n+#ifndef NDEBUG\n   (void)InsertedSet;\n #endif\n   // Remove sets with value handles.\n"
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "131465",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/131465-qwen3max-11250538.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 808, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 627, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 467, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 323, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 5064612,
+  "output_tokens": 12624,
+  "cached_tokens": 2932224,
+  "total_tokens": 5077236,
+  "chat_rounds": 111,
+  "total_time_sec": 2371.1226358413696,
+  "trans_point": [
+    "llvm/lib/IR/BasicBlock.cpp",
+    "llvm::BasicBlock::splitBasicBlock",
+    618
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/LoopUnrollRuntime.cpp",
+      777,
+      781
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The issue manifests when the loop unroller attempts to perform runtime unrolling on a loop with a trip count that involves division by a value that can be zero. In the reproducer, `%inc = zext i1 %x to i32` can be 0 when `%x` is false, and the SCEV analysis computes the backedge count as `((-1 * %inc) /u %inc)`. When `%inc` is 0, this division by zero creates undefined behavior (UB) in the generated code. The Alive2 error shows that when `%x = 0`, the source executes normally (jumping directly to the exit), but the target triggers UB in the `udiv` instruction.\n\n2. Analyzing `opt`'s Log: The log shows that Scalar Evolution computes the backedge-taken count as `((-1 * (zext i1 %x to i32))<nuw><nsw> /u (zext i1 %x to i32))`. The unroller then expands this into IR code that includes `%1 = udiv i32 %0, %inc` where `%0 = sub i32 0, %inc`. When `%inc` is 0, this division by zero causes undefined behavior. The log also shows that the loop has no other exits (`OtherExits.size() = 0`) and `SE->loopHasNoAbnormalExits(L)` returns true, so the condition on line 777 that would trigger the freeze path is not taken.\n\n3. Root Cause Analysis: The root cause is that the loop unroller assumes that when there are no other exits and the loop has no abnormal exits, the trip count computation is safe to use directly. However, this assumption is incorrect when the trip count expression involves division by a value that can be zero at runtime. The SCEV expression `((-1 * %inc) /u %inc)` is mathematically valid only when `%inc != 0`, but when `%inc = 0`, the original loop never executes (since the exit condition `%next == 2` is immediately true with `%indvar = 2` and `%inc = 0`), so the trip count should be treated as 0. The unroller fails to handle this case properly and generates code that performs division by zero.\n\n4. Proposed Edit Point(s): The issue occurs in the condition on lines 777-778 in `LoopUnrollRuntime.cpp`. The current condition only checks for other exits or abnormal exits, but it should also check if the trip count computation itself could be undefined (e.g., due to division by zero). However, a more direct fix is to ensure that when the trip count might be undefined, we take the freeze path. Since the freeze path already handles the case by freezing the trip count and computing BECount as `TripCount - 1`, this would avoid the undefined division. The condition should be modified to also consider cases where the trip count expansion might produce undefined behavior even in the absence of other exits.\n\n5. Conclusion: By modifying the condition to take the freeze path when the trip count might be undefined (which includes the division by zero case), we ensure that the generated code uses frozen values that avoid undefined behavior. This fix will make the unroller generate safe code that matches the semantics of the original loop, where division by zero in the trip count computation doesn't occur because the loop simply doesn't execute in that case.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/LoopUnrollRuntime.cpp b/llvm/lib/Transforms/Utils/LoopUnrollRuntime.cpp\nindex 524b268aee2f..1c3ce30f1e8a 100644\n--- a/llvm/lib/Transforms/Utils/LoopUnrollRuntime.cpp\n+++ b/llvm/lib/Transforms/Utils/LoopUnrollRuntime.cpp\n@@ -774,8 +774,7 @@ bool llvm::UnrollRuntimeLoopRemainder(\n   // TripCount. We will introduce two branches using these values, and it's\n   // important that they see a consistent value (which would not be guaranteed\n   // if were frozen independently.)\n-  if ((!OtherExits.empty() || !SE->loopHasNoAbnormalExits(L)) &&\n-      !isGuaranteedNotToBeUndefOrPoison(TripCount, AC, PreHeaderBR, DT)) {\n+  if (!isGuaranteedNotToBeUndefOrPoison(TripCount, AC, PreHeaderBR, DT)) {\n     TripCount = B.CreateFreeze(TripCount);\n     BECount =\n         B.CreateAdd(TripCount, Constant::getAllOnesValue(TripCount->getType()));\n",
+    "diff --git a/llvm/include/llvm/Transforms/Utils/ScalarEvolutionExpander.h b/llvm/include/llvm/Transforms/Utils/ScalarEvolutionExpander.h\nindex 7dd754a2bc0d..09fd7037be6a 100644\n--- a/llvm/include/llvm/Transforms/Utils/ScalarEvolutionExpander.h\n+++ b/llvm/include/llvm/Transforms/Utils/ScalarEvolutionExpander.h\n@@ -374,6 +374,12 @@ public:\n \n   void enableLSRMode() { LSRMode = true; }\n \n+  /// Enable safe UDiv mode to avoid division by zero during expansion.\n+  void enableSafeUDivMode() { SafeUDivMode = true; }\n+\n+  /// Disable safe UDiv mode.\n+  void disableSafeUDivMode() { SafeUDivMode = false; }\n+\n   /// Set the current insertion point. This is useful if multiple calls to\n   /// expandCodeFor() are going to be made with the same insert point and the\n   /// insert point may be moved during one of the expansions (e.g. if the\ndiff --git a/llvm/lib/Transforms/Utils/LoopUnrollRuntime.cpp b/llvm/lib/Transforms/Utils/LoopUnrollRuntime.cpp\nindex 524b268aee2f..1c3ce30f1e8a 100644\n--- a/llvm/lib/Transforms/Utils/LoopUnrollRuntime.cpp\n+++ b/llvm/lib/Transforms/Utils/LoopUnrollRuntime.cpp\n@@ -774,8 +774,7 @@ bool llvm::UnrollRuntimeLoopRemainder(\n   // TripCount. We will introduce two branches using these values, and it's\n   // important that they see a consistent value (which would not be guaranteed\n   // if were frozen independently.)\n-  if ((!OtherExits.empty() || !SE->loopHasNoAbnormalExits(L)) &&\n-      !isGuaranteedNotToBeUndefOrPoison(TripCount, AC, PreHeaderBR, DT)) {\n+  if (!isGuaranteedNotToBeUndefOrPoison(TripCount, AC, PreHeaderBR, DT)) {\n     TripCount = B.CreateFreeze(TripCount);\n     BECount =\n         B.CreateAdd(TripCount, Constant::getAllOnesValue(TripCount->getType()));\n"
+  ]
+}

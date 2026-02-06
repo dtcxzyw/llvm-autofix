@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "126974",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/126974-deepseekchat-12050447.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 804, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 4979662,
+  "output_tokens": 31096,
+  "cached_tokens": 4904000,
+  "total_tokens": 5010758,
+  "chat_rounds": 157,
+  "total_time_sec": 2198.52264046669,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp",
+    "llvm::InstCombinerImpl::foldICmpWithMinMax",
+    5741
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp",
+      5618,
+      5619
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The bug is in `foldICmpWithMinMax` where it incorrectly transforms `icmp samesign ult i8 umax(x, -46), -32` to `false`. The counterexample shows when `x = 0`, `umax(0, -46) = 210`, and `210 < 224` (unsigned) is true, not false. The transformation doesn't account for the `samesign` flag, which makes the comparison poison when operands have different signs.\n\n2. **Analyzing `opt`'s Log**: The log shows the transformation happens in `foldICmpWithMinMax`. The debugger shows we're at line 5741 returning `false`. The predicate is `ICMP_ULT` with `HasSameSign = true`. `*CmpXZ = false` (meaning `simplifyICmpInst` says `x < -32` is false), but this is wrong because `x` is unknown and could be 0.\n\n3. **Root Cause Analysis**: The issue is that `foldICmpWithMinMax` doesn't handle the `samesign` flag correctly. When `HasSameSign = true`, the comparison is poison if the operands have different signs. The transformation to `false` is only valid if we know the comparison always evaluates to false, but with `samesign`, it could be poison instead. Additionally, `simplifyICmpInst` might be returning incorrect results for `samesign` comparisons.\n\n   Looking at line 5618: `if (ICmpInst::isSigned(Pred) && !MinMax->isSigned())`. Since `Pred` is a `CmpPredicate` with `HasSameSign = true`, and `Pred.Pred = ICMP_ULT` (unsigned), this check passes (ICMP_ULT is not signed). But the real issue is that the entire transformation should be disabled when `Pred.hasSameSign()` is true, because the samesign flag adds poison semantics that the transformation doesn't account for.\n\n4. **Proposed Edit Point(s)**: We need to add a check at the beginning of `foldICmpWithMinMax` to return `nullptr` when the predicate has the `samesign` flag, since the transformations don't account for the poison semantics.\n\n   Edit `llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp` at line 5618:\n   ```cpp\n   Instruction *InstCombinerImpl::foldICmpWithMinMax(Instruction &I,\n                                                    MinMaxIntrinsic *MinMax,\n                                                    Value *Z, CmpPredicate Pred) {\n     // Don't fold if the comparison has samesign flag, as transformations\n     // don't account for the poison semantics.\n     if (Pred.hasSameSign())\n       return nullptr;\n     \n     Value *X = MinMax->getLHS();\n     Value *Y = MinMax->getRHS();\n     if (ICmpInst::isSigned(Pred) && !MinMax->isSigned())\n       return nullptr;\n   ```\n\n5. **Conclusion**: The fix is to bail out early when the predicate has the `samesign` flag, since the existing transformation logic doesn't properly handle the poison semantics introduced by `samesign`. This prevents the incorrect transformation while preserving correct optimizations for non-samesign comparisons.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp b/llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp\nindex 96d6db2ba5bf..24b6f7a7acf5 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp\n@@ -5613,6 +5613,11 @@ Instruction *InstCombinerImpl::foldICmpBinOp(ICmpInst &I,\n Instruction *InstCombinerImpl::foldICmpWithMinMax(Instruction &I,\n                                                   MinMaxIntrinsic *MinMax,\n                                                   Value *Z, CmpPredicate Pred) {\n+  // Don't fold if the comparison has samesign flag, as transformations\n+  // don't account for the poison semantics.\n+  if (Pred.hasSameSign())\n+    return nullptr;\n+  \n   Value *X = MinMax->getLHS();\n   Value *Y = MinMax->getRHS();\n   if (ICmpInst::isSigned(Pred) && !MinMax->isSigned())\n"
+  ]
+}

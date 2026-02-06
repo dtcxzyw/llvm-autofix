@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "147218",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/147218-gpt5-11272320.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex b9ce20ebd3e6..4d61d33b174a 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -563,7 +563,11 @@ static ExtractElementInst *translateExtract(ExtractElementInst *ExtElt,\n \n   Value *Shuf = createShiftShuffle(X, cast<ConstantInt>(C)->getZExtValue(),\n                                    NewIndex, Builder);\n-  return cast<ExtractElementInst>(Builder.CreateExtractElement(Shuf, NewIndex));\n+  Value *NewExtV = Builder.CreateExtractElement(Shuf, NewIndex);\n+  if (auto *NewExt = dyn_cast<ExtractElementInst>(NewExtV))\n+    return NewExt;\n+  // The extract was constant-folded; do not create unsimplified IR.\n+  return nullptr;\n }\n \n /// Try to reduce extract element costs by converting scalar compares to vector\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 40441,
+  "output_tokens": 2211,
+  "cached_tokens": 24576,
+  "total_tokens": 42652,
+  "chat_rounds": 6,
+  "total_time_sec": 64.6295120716095,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+    "translateExtract",
+    566
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+      559,
+      567
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs due to an invalid cast in translateExtract(): it assumes Builder.CreateExtractElement(...) always returns an ExtractElementInst. However, if the extract folds to a constant (e.g., because the shuffled vector lane is known to be zero), CreateExtractElement returns a Constant, not an instruction. The subsequent cast<ExtractElementInst> triggers an assertion when given a Value of incompatible type, leading to the abort.\n\n2. Analyzing opt's Log:\nThe log shows the first transformation replaced a shuffle with a constant vector: %shift gets replaced by <4 x i64> <i64 0, i64 undef, i64 undef, i64 undef>. Immediately after, VectorCombine visits the 'or' instruction and attempts foldExtractExtract, which calls translateExtract. Given the IR, extelt %shuffle.1, 1 extracts a lane that is effectively constant 0 due to the construction of %shuffle.1 from zeroinitializer. Thus, the translate creates a shuffle and immediately an extract which the builder constant folds into a Constant, not an instruction.\n\n3. Root Cause Analysis:\ntranslateExtract has a guard to avoid creating instructions if X is a Constant, but it does not guard against constant-folding of the created extract itself. In cases like the reproducer, the vector operand X is non-constant, but the specific extracted lane is provably constant after the inserted shuffle. Therefore Builder.CreateExtractElement(...) may return a Constant. The code then performs cast<ExtractElementInst>(...) unconditionally, violating the cast precondition and crashing.\n\n4. Proposed Edit Point(s):\nEdit translateExtract to handle the case where CreateExtractElement returns a Constant. Use dyn_cast and return nullptr if it is not an ExtractElementInst.\n\nEdit at llvm/lib/Transforms/Vectorize/VectorCombine.cpp lines 559-567:\n- Current:\n  Value *C = ExtElt->getIndexOperand();\n  assert(isa<ConstantInt>(C) && \"Expected a constant index operand\");\n  if (isa<Constant>(X))\n    return nullptr;\n  Value *Shuf = createShiftShuffle(X, cast<ConstantInt>(C)->getZExtValue(),\n                                   NewIndex, Builder);\n  return cast<ExtractElementInst>(Builder.CreateExtractElement(Shuf, NewIndex));\n\n- Replace with:\n  Value *C = ExtElt->getIndexOperand();\n  assert(isa<ConstantInt>(C) && \"Expected a constant index operand\");\n  if (isa<Constant>(X))\n    return nullptr;\n  Value *Shuf = createShiftShuffle(X, cast<ConstantInt>(C)->getZExtValue(),\n                                   NewIndex, Builder);\n  Value *NewExtV = Builder.CreateExtractElement(Shuf, NewIndex);\n  if (auto *NewExt = dyn_cast<ExtractElementInst>(NewExtV))\n    return NewExt;\n  // The extract was constant-folded; do not create unsimplified IR.\n  return nullptr;\n\nThis preserves the original intent stated in comments: \"Return null if the input can be constant folded, so that we are not creating unnecessary instructions.\" It extends the check to cover foldings introduced by the shuffle/extract sequence itself.\n\n5. Conclusion:\nBy safely handling the potential constant-folding result of CreateExtractElement, we prevent the invalid cast and subsequent crash. The pass will now gracefully skip the transformation when it would produce a constant, avoiding unsimplified IR and letting other passes handle the constant propagation as intended.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex b9ce20ebd3e6..4d61d33b174a 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -563,7 +563,11 @@ static ExtractElementInst *translateExtract(ExtractElementInst *ExtElt,\n \n   Value *Shuf = createShiftShuffle(X, cast<ConstantInt>(C)->getZExtValue(),\n                                    NewIndex, Builder);\n-  return cast<ExtractElementInst>(Builder.CreateExtractElement(Shuf, NewIndex));\n+  Value *NewExtV = Builder.CreateExtractElement(Shuf, NewIndex);\n+  if (auto *NewExt = dyn_cast<ExtractElementInst>(NewExtV))\n+    return NewExt;\n+  // The extract was constant-folded; do not create unsimplified IR.\n+  return nullptr;\n }\n \n /// Try to reduce extract element costs by converting scalar compares to vector\n"
+  ]
+}

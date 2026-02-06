@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "107139",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/107139-gpt5-12051335.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Coroutines/CoroSplit.cpp b/llvm/lib/Transforms/Coroutines/CoroSplit.cpp\nindex dc3829d7f28e..9dcb69c7e005 100644\n--- a/llvm/lib/Transforms/Coroutines/CoroSplit.cpp\n+++ b/llvm/lib/Transforms/Coroutines/CoroSplit.cpp\n@@ -2109,9 +2109,10 @@ static void updateCallGraphAfterCoroutineSplit(\n   }\n \n   // Do some cleanup and let the CGSCC infra see if we've cleaned up any edges\n-  // to the split functions.\n+  // to the split functions. This may refine internal edges (e.g., switch a\n+  // ref edge to a call edge). The subsequent CGSCC processing will observe\n+  // and handle any resulting graph changes via the worklist.\n   postSplitCleanup(N.getFunction());\n-  updateCGAndAnalysisManagerForFunctionPass(CG, C, N, AM, UR, FAM);\n }\n \n /// Replace a call to llvm.coro.prepare.retcon.\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 75715,
+  "output_tokens": 2984,
+  "cached_tokens": 37504,
+  "total_tokens": 78699,
+  "chat_rounds": 10,
+  "total_time_sec": 156.1334056854248,
+  "trans_point": [
+    "llvm/lib/Analysis/CGSCCPassManager.cpp",
+    "updateCGAndAnalysisManagerForPass",
+    1167
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Coroutines/CoroSplit.cpp",
+      2111,
+      2115
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs with an assertion in updateCGAndAnalysisManagerForPass complaining that the current SCC was invalidated: `!UR.InvalidatedSCCs.count(C)`. This is a CGSCC invariant violation\u2014function-level updates are not allowed to invalidate the SCC currently being processed. The reproducer involves mutually recursive coroutines, and the first logged transformation is switching an internal ref edge to a call edge from 'foo' to 'bar', which can change SCC membership or structure.\n\n2. Analyzing opt's Log:\nThe debug log shows:\n- \"Running an SCC pass across the RefSCC: [(foo), (bar)]\"\n- \"CoroSplit: Processing coroutine 'foo\"\n- \"Switch an internal ref edge to a call edge from 'foo' to 'bar'\"\nImmediately after, we hit the assertion in updateCGAndAnalysisManagerForPass.\nIn CoroSplit's updateCallGraphAfterCoroutineSplit, we first notify the CG about clones using CG.addSplitFunction/addSplitRefRecursiveFunctions and then call updateCGAndAnalysisManagerForCGSCCPass (safe for SCC changes). After that, we run postSplitCleanup and then call updateCGAndAnalysisManagerForFunctionPass. The latter is intended for function-level updates that do not invalidate the current SCC. However, the cleanup can precipitate an edge change (ref->call), as logged, within the same SCC, which may invalidate it.\n\n3. Root Cause Analysis:\nThe root cause is that updateCallGraphAfterCoroutineSplit calls updateCGAndAnalysisManagerForFunctionPass after postSplitCleanup, even in situations where this cleanup can trigger changes in the call graph that invalidate the SCC (e.g., converting a ref edge to a call edge between nodes within the SCC). In such cases, updateCGAndAnalysisManagerForFunctionPass asserts because it requires that the current SCC remains valid. For mutually recursive coroutines, this ref->call edge change is precisely what occurs, leading to SCC invalidation in a function-pass update context.\n\nThe CGSCC infrastructure provides two update helpers:\n- updateCGAndAnalysisManagerForCGSCCPass: safe when the SCC may be invalidated or structural changes occur.\n- updateCGAndAnalysisManagerForFunctionPass: expects no SCC invalidation.\n\nWe already use the CGSCC variant for handling clones. We must also use the CGSCC variant after cleanup if edges can change in ways that could invalidate the SCC.\n\n4. Proposed Edit Point(s):\nEdit file llvm/lib/Transforms/Coroutines/CoroSplit.cpp at lines 2111-2115.\nCurrent code:\n  // Do some cleanup and let the CGSCC infra see if we've cleaned up any edges\n  // to the split functions.\n  postSplitCleanup(N.getFunction());\n  updateCGAndAnalysisManagerForFunctionPass(CG, C, N, AM, UR, FAM);\n\nChange to:\n  // Do some cleanup and let the CGSCC infra see if we've cleaned up any edges\n  // to the split functions. This may refine internal edges (e.g., switch a\n  // ref edge to a call edge) and potentially invalidate the current SCC.\n  // Use the CGSCC update helper to safely handle SCC changes.\n  postSplitCleanup(N.getFunction());\n  updateCGAndAnalysisManagerForCGSCCPass(CG, C, N, AM, UR, FAM);\n\nRationale:\n- After postSplitCleanup, edges can change (as evidenced by the debug message), and using the function-pass updater triggers the assertion. Switching to the CGSCC updater allows SCC invalidation and properly updates the analysis manager and worklists.\n\n5. Conclusion:\nThe fix ensures that any call graph changes arising from postSplitCleanup are handled with the CGSCC-aware update helper, avoiding the invalidation-while-in-function-pass assertion. This preserves the CGSCC invariants and prevents the crash when mutually recursive coroutines cause the edge to switch from ref to call during coro-split.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Coroutines/CoroSplit.cpp b/llvm/lib/Transforms/Coroutines/CoroSplit.cpp\nindex dc3829d7f28e..1cf2963c4b0b 100644\n--- a/llvm/lib/Transforms/Coroutines/CoroSplit.cpp\n+++ b/llvm/lib/Transforms/Coroutines/CoroSplit.cpp\n@@ -2109,9 +2109,11 @@ static void updateCallGraphAfterCoroutineSplit(\n   }\n \n   // Do some cleanup and let the CGSCC infra see if we've cleaned up any edges\n-  // to the split functions.\n+  // to the split functions. This may refine internal edges (e.g., switch a\n+  // ref edge to a call edge) and potentially invalidate the current SCC.\n+  // Use the CGSCC update helper to safely handle SCC changes.\n   postSplitCleanup(N.getFunction());\n-  updateCGAndAnalysisManagerForFunctionPass(CG, C, N, AM, UR, FAM);\n+  updateCGAndAnalysisManagerForCGSCCPass(CG, C, N, AM, UR, FAM);\n }\n \n /// Replace a call to llvm.coro.prepare.retcon.\n",
+    "diff --git a/llvm/lib/Transforms/Coroutines/CoroSplit.cpp b/llvm/lib/Transforms/Coroutines/CoroSplit.cpp\nindex dc3829d7f28e..9dcb69c7e005 100644\n--- a/llvm/lib/Transforms/Coroutines/CoroSplit.cpp\n+++ b/llvm/lib/Transforms/Coroutines/CoroSplit.cpp\n@@ -2109,9 +2109,10 @@ static void updateCallGraphAfterCoroutineSplit(\n   }\n \n   // Do some cleanup and let the CGSCC infra see if we've cleaned up any edges\n-  // to the split functions.\n+  // to the split functions. This may refine internal edges (e.g., switch a\n+  // ref edge to a call edge). The subsequent CGSCC processing will observe\n+  // and handle any resulting graph changes via the worklist.\n   postSplitCleanup(N.getFunction());\n-  updateCGAndAnalysisManagerForFunctionPass(CG, C, N, AM, UR, FAM);\n }\n \n /// Replace a call to llvm.coro.prepare.retcon.\n"
+  ]
+}

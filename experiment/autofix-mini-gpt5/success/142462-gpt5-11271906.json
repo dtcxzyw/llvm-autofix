@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "142462",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/142462-gpt5-11271906.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Scalar/EarlyCSE.cpp b/llvm/lib/Transforms/Scalar/EarlyCSE.cpp\nindex 09cb2f4cb010..106bf3166010 100644\n--- a/llvm/lib/Transforms/Scalar/EarlyCSE.cpp\n+++ b/llvm/lib/Transforms/Scalar/EarlyCSE.cpp\n@@ -397,6 +397,18 @@ static bool isEqualImpl(SimpleValue LHS, SimpleValue RHS) {\n   auto *RII = dyn_cast<IntrinsicInst>(RHSI);\n   if (LII && RII && LII->getIntrinsicID() == RII->getIntrinsicID() &&\n       LII->isCommutative() && LII->arg_size() >= 2) {\n+    // When matching commutative intrinsics, also ensure that their attribute\n+    // lists can be intersected. The identical check above already enforced\n+    // this for non-commuted operand order. Without this guard, EarlyCSE may\n+    // consider calls equivalent and later fail to intersect attributes in\n+    // combineIRFlags(), triggering an assertion. This mirrors the behavior\n+    // used in other value numbering (e.g. GVN) which rejects non-intersectable\n+    // callsites.\n+    if ((!LII->getAttributes().isEmpty() || !RII->getAttributes().isEmpty()) &&\n+        !LII->getAttributes()\n+             .intersectWith(LII->getContext(), RII->getAttributes())\n+             .has_value())\n+      return false;\n     return LII->getArgOperand(0) == RII->getArgOperand(1) &&\n            LII->getArgOperand(1) == RII->getArgOperand(0) &&\n            std::equal(LII->arg_begin() + 2, LII->arg_end(),\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 558087,
+  "output_tokens": 13992,
+  "cached_tokens": 457600,
+  "total_tokens": 572079,
+  "chat_rounds": 29,
+  "total_time_sec": 294.9001839160919,
+  "trans_point": [
+    "llvm/lib/Transforms/Scalar/EarlyCSE.cpp",
+    "combineIRFlags",
+    1311
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/EarlyCSE.cpp",
+      396,
+      404
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nEarlyCSE crashes when attempting to CSE two calls to the commutative intrinsic llvm.smin.i32 that differ in their call site attribute sets (one has the strictfp attribute, the other does not). The crash occurs in combineIRFlags(), specifically at the assertion that attribute intersection must succeed for callsites that were considered identical earlier in the pass.\n\n2. Analyzing opt's Log:\nThe debug log shows: EarlyCSE CSE:   %call2 ... to: %call ... #1 meaning EarlyCSE decided the second intrinsic call (%call2) is redundant and should be replaced by the first (%call). This decision precedes combineIRFlags(), which tries to merge IR flags and callsite attributes. The assertion failure indicates the earlier equivalence test allowed matching of these two calls even though their attributes cannot be intersected.\n\n3. Root Cause Analysis:\nLooking at EarlyCSE.cpp, equality for value numbering relies on DenseMapInfo<SimpleValue>::isEqualImpl(). For non-identical instructions, special cases allow commuted equality: lines 396\u2013404 contain logic for commutative intrinsics:\n\nif (LII && RII && LII->getIntrinsicID() == RII->getIntrinsicID() && LII->isCommutative() && LII->arg_size() >= 2) {\n  return LII->getArgOperand(0) == RII->getArgOperand(1) && ... }\n\nThis branch ignores callsite attributes entirely. Thus two commutative intrinsic calls with mismatched attributes are treated as equal. Later, combineIRFlags() assumes (via the assert) that any calls deemed identical have attribute sets that can be intersected; it invokes tryIntersectAttributes(To <- From). For our reproducer the first path (normal identical check) fails due to differing attributes; then the commutative intrinsic path returns true based only on operands, so equality succeeds. However attribute intersection later fails, triggering the assertion. Therefore the invariant \u201ccalls judged equal must have intersectable attributes\u201d is broken specifically for the commutative intrinsic fallback.\n\n4. Proposed Edit Point(s):\nModify the commutative intrinsic equality branch in isEqualImpl (lines 396\u2013404) to also verify that the attribute sets can be intersected (same test used in hasSameSpecialState / Instruction::hasSameSpecialState for calls when IntersectAttrs=true). If the intersection fails, return false instead of treating the instructions as equal. This restores the invariant assumed by combineIRFlags(). Concretely, insert an attribute intersection check before returning true in the commutative intrinsic block:\n\nPseudo-diff:\n--- before\nif (LII && RII && ... ) {\n  return operands_commute_match && other_args_match;\n}\n--- after\nif (LII && RII && ... ) {\n  if (!LII->getAttributes().intersectWith(LII->getContext(), RII->getAttributes()).has_value())\n    return false;\n  return operands_commute_match && other_args_match;\n}\n\nThis change ensures calls with non-intersectable attribute sets (like differing strictfp presence if that cannot be intersected) are not CSE'd, avoiding the assertion in combineIRFlags.\n\n5. Conclusion:\nThe crash is due to attribute-insensitive equality for commutative intrinsics in EarlyCSE, violating an internal invariant relied upon later. Adding an attribute intersection feasibility check to the commutative intrinsic equality path prevents misclassification and resolves the abort without weakening correctness. After this fix EarlyCSE will refuse to CSE such mismatched calls, and combineIRFlags will no longer encounter impossible attribute intersections.\n",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Scalar/EarlyCSE.cpp b/llvm/lib/Transforms/Scalar/EarlyCSE.cpp\nindex 09cb2f4cb010..106bf3166010 100644\n--- a/llvm/lib/Transforms/Scalar/EarlyCSE.cpp\n+++ b/llvm/lib/Transforms/Scalar/EarlyCSE.cpp\n@@ -397,6 +397,18 @@ static bool isEqualImpl(SimpleValue LHS, SimpleValue RHS) {\n   auto *RII = dyn_cast<IntrinsicInst>(RHSI);\n   if (LII && RII && LII->getIntrinsicID() == RII->getIntrinsicID() &&\n       LII->isCommutative() && LII->arg_size() >= 2) {\n+    // When matching commutative intrinsics, also ensure that their attribute\n+    // lists can be intersected. The identical check above already enforced\n+    // this for non-commuted operand order. Without this guard, EarlyCSE may\n+    // consider calls equivalent and later fail to intersect attributes in\n+    // combineIRFlags(), triggering an assertion. This mirrors the behavior\n+    // used in other value numbering (e.g. GVN) which rejects non-intersectable\n+    // callsites.\n+    if ((!LII->getAttributes().isEmpty() || !RII->getAttributes().isEmpty()) &&\n+        !LII->getAttributes()\n+             .intersectWith(LII->getContext(), RII->getAttributes())\n+             .has_value())\n+      return false;\n     return LII->getArgOperand(0) == RII->getArgOperand(1) &&\n            LII->getArgOperand(1) == RII->getArgOperand(0) &&\n            std::equal(LII->arg_begin() + 2, LII->arg_end(),\n"
+  ]
+}

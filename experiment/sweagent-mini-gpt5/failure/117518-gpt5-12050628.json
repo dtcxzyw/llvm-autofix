@@ -1,0 +1,32 @@
+{
+  "command": {
+    "issue": "117518",
+    "model": "gpt-5"
+  },
+  "patch": null,
+  "error": "NoAvailablePatchFound",
+  "errmsg": "All efforts tried yet no available patches found.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/mswe.py\", line 348, in main\n    raise NoAvailablePatchFound(\"All efforts tried yet no available patches found.\")\nautofix.main.NoAvailablePatchFound: All efforts tried yet no available patches found.\n",
+  "input_tokens": 369351,
+  "output_tokens": 6338,
+  "cached_tokens": 296832,
+  "total_tokens": 375689,
+  "chat_rounds": 18,
+  "total_time_sec": 189.65541291236877,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 73218f377a06..4ae837ab7b42 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -10875,9 +10875,10 @@ public:\n           CommonMask[Idx] = Idx;\n       // Add subvectors permutation cost.\n       if (!SubVectorsMask.empty()) {\n+        if (SubVectorsMask.size() != CommonMask.size())\n+          SubVectorsMask.resize(CommonMask.size(), PoisonMaskElem);\n         assert(SubVectorsMask.size() == CommonMask.size() &&\n                \"Expected same size of masks for subvectors and common mask.\");\n-        SmallVector<int> SVMask(SubVectorsMask.begin(), SubVectorsMask.end());\n         for (auto [I1, I2] : zip(SVMask, CommonMask)) {\n           if (I2 != PoisonMaskElem) {\n             assert(I1 == PoisonMaskElem && \"Expected unused subvectors mask\");\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 73218f377a06..eac1c272d772 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -10873,22 +10873,52 @@ public:\n       for (unsigned Idx = 0, Sz = CommonMask.size(); Idx < Sz; ++Idx)\n         if (CommonMask[Idx] != PoisonMaskElem)\n           CommonMask[Idx] = Idx;\n-      // Add subvectors permutation cost.\n-      if (!SubVectorsMask.empty()) {\n-        assert(SubVectorsMask.size() == CommonMask.size() &&\n-               \"Expected same size of masks for subvectors and common mask.\");\n-        SmallVector<int> SVMask(SubVectorsMask.begin(), SubVectorsMask.end());\n-        for (auto [I1, I2] : zip(SVMask, CommonMask)) {\n-          if (I2 != PoisonMaskElem) {\n-            assert(I1 == PoisonMaskElem && \"Expected unused subvectors mask\");\n-            I1 = I2 + CommonMask.size();\n-          }\n-        }\n-        Cost += ::getShuffleCost(TTI, TTI::SK_PermuteTwoSrc,\n-                                 getWidenedType(ScalarTy, CommonMask.size()),\n-                                 SVMask, CostKind);\n-      }\n-      for (auto [E, Idx] : SubVectors) {\n+              // Add subvectors permutation cost.\n+              if (!SubVectorsMask.empty()) {\n+                SmallVector<int> SVMask(SubVectorsMask.begin(), SubVectorsMask.end());\n+                if (SVMask.size() != CommonMask.size())\n+                  SVMask.resize(CommonMask.size(), PoisonMaskElem);\n+                assert(SVMask.size() == CommonMask.size() &&\n+                       \"Expected same size of masks for subvectors and common mask.\");\n+                for (auto [I1, I2] : zip(SVMask, CommonMask)) {\n+                  if (I2 != PoisonMaskElem) {\n+                    assert(I1 == PoisonMaskElem && \"Expected unused subvectors mask\");\n+                    I1 = I2 + CommonMask.size();\n+                  }\n+                }\n+                Cost += ::getShuffleCost(TTI, TTI::SK_PermuteTwoSrc,\n+                                         getWidenedType(ScalarTy, CommonMask.size()),\n+                                         SVMask, CostKind);\n+              }\n+              for (auto [E, Idx] : SubVectors) {\n+                Type *EScalarTy = E->Scalars.front()->getType();\n+                bool IsSigned = true;\n+                if (auto It = R.MinBWs.find(E); It != R.MinBWs.end()) {\n+                  EScalarTy =\n+                      IntegerType::get(EScalarTy->getContext(), It->second.first);\n+                  IsSigned = It->second.second;\n+                }\n+                if (ScalarTy != EScalarTy) {\n+                  unsigned CastOpcode = Instruction::Trunc;\n+                  unsigned DstSz = R.DL->getTypeSizeInBits(ScalarTy);\n+                  unsigned SrcSz = R.DL->getTypeSizeInBits(EScalarTy);\n+                  if (DstSz > SrcSz)\n+                    CastOpcode = IsSigned ? Instruction::SExt : Instruction::ZExt;\n+                  Cost += TTI.getCastInstrCost(\n+                      CastOpcode, getWidenedType(ScalarTy, E->getVectorFactor()),\n+                      getWidenedType(EScalarTy, E->getVectorFactor()),\n+                      TTI::CastContextHint::Normal, CostKind);\n+                }\n+                Cost += ::getShuffleCost(\n+                    TTI, TTI::SK_InsertSubvector,\n+                    getWidenedType(ScalarTy, CommonMask.size()), {}, CostKind, Idx,\n+                    getWidenedType(ScalarTy, E->getVectorFactor()));\n+                if (!CommonMask.empty()) {\n+                  std::iota(std::next(CommonMask.begin(), Idx),\n+                            std::next(CommonMask.begin(), Idx + E->getVectorFactor()),\n+                            Idx);\n+                }\n+              }\n         Type *EScalarTy = E->Scalars.front()->getType();\n         bool IsSigned = true;\n         if (auto It = R.MinBWs.find(E); It != R.MinBWs.end()) {\n"
+  ]
+}

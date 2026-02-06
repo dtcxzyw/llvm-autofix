@@ -1,0 +1,40 @@
+{
+  "command": {
+    "issue": "116775",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/116775-gpt5-11260706.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp\nindex 5eb807dcb76c..19364ce5f09e 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp\n@@ -16,6 +16,7 @@\n #include \"llvm/IR/GetElementPtrTypeIterator.h\"\n #include \"llvm/IR/IntrinsicInst.h\"\n #include \"llvm/IR/PatternMatch.h\"\n+#include \"llvm/IR/Operator.h\"\n #include \"llvm/Support/KnownBits.h\"\n #include \"llvm/Transforms/InstCombine/InstCombiner.h\"\n \n@@ -997,7 +998,7 @@ Value *InstCombinerImpl::SimplifyDemandedUseBits(Instruction *I,\n             uint64_t MaskedGEPIndex = HighBitsGEPIndex | MaskedLowBitsGEPIndex;\n \n             if (MaskedGEPIndex != GEPIndex) {\n-              auto *GEP = cast<GetElementPtrInst>(II->getArgOperand(0));\n+              auto *GEP = cast<GEPOperator>(II->getArgOperand(0));\n               Builder.SetInsertPoint(I);\n               Type *GEPIndexType =\n                   DL.getIndexType(GEP->getPointerOperand()->getType());\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 334323,
+  "output_tokens": 16860,
+  "cached_tokens": 266624,
+  "total_tokens": 351183,
+  "chat_rounds": 22,
+  "total_time_sec": 446.4385013580322,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp",
+    "llvm::InstCombinerImpl::SimplifyDemandedUseBits",
+    1000
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp",
+      18,
+      18
+    ],
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp",
+      1000,
+      1000
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs in InstCombine when simplifying demanded bits for the llvm.ptrmask intrinsic. The backtrace points to a failing cast<GetElementPtrInst> in SimplifyDemandedUseBits(). The IR operand being matched is a GEP used as a constant expression, not necessarily a GetElementPtrInst. Using cast<GetElementPtrInst>() on a ConstantExpr GEP triggers the assertion.\n\n2. Analyzing opt's Log:\n- The crash happens immediately upon visiting the call to llvm.ptrmask in the first instcombine iteration:\n  %aligned_result = call ptr @llvm.ptrmask.p0.i64(ptr getelementptr inbounds (i8, ptr @GC_arrays, i64 1), i64 -8)\n- Debug-only output points to SimplifyDemandedUseBits(), confirming it\u2019s the first transformation site.\n- The relevant code path is the ptrmask case in InstCombineSimplifyDemanded.cpp, lines ~940\u20131015, where a pattern m_PtrAdd(...) matches a GEP. The matcher m_PtrAdd specifically matches a GEPOperator (which includes both GetElementPtrInst and ConstantExpr) with i8 source element type. After matching, the code incorrectly assumes the operand is a GetElementPtrInst and casts it as such at line 1000.\n\n3. Root Cause Analysis:\n- PatternMatch::m_PtrAdd matches GEPOperator, not strictly GetElementPtrInst. Given the reproducer uses a constant-expression GEP inside the intrinsic call operand, II->getArgOperand(0) is a ConstantExpr GEP (still a GEPOperator) and not a GetElementPtrInst.\n- The code then does: auto *GEP = cast<GetElementPtrInst>(II->getArgOperand(0)); This fails the isa<GetElementPtrInst> check and aborts.\n- The subsequent use only relies on APIs available on GEPOperator (getSourceElementType, isInBounds, getPointerOperand) and Value::getName. Therefore, it should use GEPOperator instead of GetElementPtrInst. It is okay to subsequently create a new instruction GEP with IRBuilder and replace the operand; replacing a constant expression use with an instruction is legal.\n\n4. Proposed Edit Point(s)\n- Edit Point 1 (include Operator.h explicitly for GEPOperator):\n  File: llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp, line 18\n  Add: #include \"llvm/IR/Operator.h\"\n  Reasoning: Ensure GEPOperator is fully declared. PatternMatch.h already includes Operator.h, but adding the include here makes the dependency explicit and avoids future ordering issues.\n\n- Edit Point 2 (fix the incorrect cast):\n  File: llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp, line 1000\n  Replace:\n    auto *GEP = cast<GetElementPtrInst>(II->getArgOperand(0));\n  With:\n    auto *GEP = cast<GEPOperator>(II->getArgOperand(0));\n  Reasoning: Align the cast with the matcher m_PtrAdd which matches GEPOperator (covers both instructions and constant expressions). The following uses (getSourceElementType, getPointerOperand, isInBounds, getName) are supported by GEPOperator/Value, so behavior is preserved. If the original was a ConstantExpr, getName() will just be empty, which is fine for naming the newly created instruction.\n\n5. Conclusion:\nThe crash is due to an invalid assumption that a matched GEP is always a GetElementPtrInst. Switching the cast to GEPOperator fixes the assertion and correctly handles both instruction and constant-expression GEPs. The additional include ensures the type is visible. After this change, instcombine will safely create a new GEP instruction when needed and replace the operand, avoiding the abort and preserving intended transformations.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp\nindex 5eb807dcb76c..19364ce5f09e 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp\n@@ -16,6 +16,7 @@\n #include \"llvm/IR/GetElementPtrTypeIterator.h\"\n #include \"llvm/IR/IntrinsicInst.h\"\n #include \"llvm/IR/PatternMatch.h\"\n+#include \"llvm/IR/Operator.h\"\n #include \"llvm/Support/KnownBits.h\"\n #include \"llvm/Transforms/InstCombine/InstCombiner.h\"\n \n@@ -997,7 +998,7 @@ Value *InstCombinerImpl::SimplifyDemandedUseBits(Instruction *I,\n             uint64_t MaskedGEPIndex = HighBitsGEPIndex | MaskedLowBitsGEPIndex;\n \n             if (MaskedGEPIndex != GEPIndex) {\n-              auto *GEP = cast<GetElementPtrInst>(II->getArgOperand(0));\n+              auto *GEP = cast<GEPOperator>(II->getArgOperand(0));\n               Builder.SetInsertPoint(I);\n               Type *GEPIndexType =\n                   DL.getIndexType(GEP->getPointerOperand()->getType());\n"
+  ]
+}

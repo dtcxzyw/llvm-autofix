@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "140444",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/140444-deepseekchat-12051945.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 804, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 5035464,
+  "output_tokens": 22833,
+  "cached_tokens": 4934272,
+  "total_tokens": 5058297,
+  "chat_rounds": 194,
+  "total_time_sec": 2553.806848526001,
+  "trans_point": [
+    "llvm/lib/IR/BasicBlock.cpp",
+    "llvm::BasicBlock::splitBasicBlockBefore",
+    665
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/LoopPeel.cpp",
+      1205,
+      1208
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The problem occurs when peeling the last iteration of a loop (`PeelLast=true`). The transformed IR shows that the peeled iteration's latch block has a conditional branch with both successors pointing to the same block (`exit.peel.next`), which then goes through an unnecessary intermediate block (`loop.header.peel.next`) before reaching the real exit. This creates incorrect control flow and violates the semantics of the original loop.\n\n2. **Analyzing `opt`'s Log**: The `opt` debug output shows \"PEELING loop %loop.header with iteration count 1!\" and the resulting IR has the problematic control flow. The Alive2 verification fails with \"The source program doesn't reach a return instruction,\" indicating the transformation is unsound.\n\n3. **Root Cause Analysis**: \n   - In `peelLoop()` when `PeelLast=true`, the code creates two blocks: `InsertTop` (`exit.peel.begin`) and `InsertBot` (`exit.peel.next`).\n   - In `cloneLoopBlocks()`, for `PeelLast`, the cloned latch's terminator has both successors set to `InsertBot` (lines 890-892).\n   - After cloning, the code at lines 1205-1208 splits `InsertBot` again, creating a third block (`loop.header.peel.next`).\n   - This results in the control flow: cloned latch \u2192 `exit.peel.next` \u2192 `loop.header.peel.next` \u2192 exit, which is incorrect.\n   - The cloned latch should exit directly to the real exit block, not to intermediate blocks.\n\n4. **Proposed Edit Point(s)**:\n   - In `llvm/lib/Transforms/Utils/LoopPeel.cpp` lines 1205-1208, wrap the splitting code to only execute when not peeling the last iteration:\n   ```cpp\n   if (!PeelLast) {\n     InsertTop = InsertBot;\n     InsertBot = SplitBlock(InsertBot, InsertBot->getTerminator(), &DT, LI);\n     InsertBot->setName(Header->getName() + \".peel.next\");\n   }\n   ```\n   - Additionally, in `cloneLoopBlocks()` lines 890-892, for `PeelLast`, the cloned latch should branch to the real exit, not to `InsertBot`. However, this requires more context about which block is the real exit.\n\n5. **Conclusion**: The fix ensures that when peeling the last iteration, we don't create unnecessary intermediate blocks, and the peeled iteration exits directly to the real exit block. This preserves the correctness of the transformation and resolves the Alive2 verification failure.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/LoopPeel.cpp b/llvm/lib/Transforms/Utils/LoopPeel.cpp\nindex 646354bba9df..a38d002736fe 100644\n--- a/llvm/lib/Transforms/Utils/LoopPeel.cpp\n+++ b/llvm/lib/Transforms/Utils/LoopPeel.cpp\n@@ -1202,9 +1202,11 @@ bool llvm::peelLoop(Loop *L, unsigned PeelCount, bool PeelLast, LoopInfo *LI,\n     auto *LatchTermCopy = cast<Instruction>(VMap[LatchTerm]);\n     LatchTermCopy->setMetadata(LLVMContext::MD_loop, nullptr);\n \n-    InsertTop = InsertBot;\n-    InsertBot = SplitBlock(InsertBot, InsertBot->getTerminator(), &DT, LI);\n-    InsertBot->setName(Header->getName() + \".peel.next\");\n+    if (!PeelLast) {\n+      InsertTop = InsertBot;\n+      InsertBot = SplitBlock(InsertBot, InsertBot->getTerminator(), &DT, LI);\n+      InsertBot->setName(Header->getName() + \".peel.next\");\n+    }\n \n     F->splice(InsertTop->getIterator(), F, NewBlocks[0]->getIterator(),\n               F->end());\n"
+  ]
+}

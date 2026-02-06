@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "120433",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/120433-deepseekchat-12041846.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex d967813075bb..de59b5107e92 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -21104,6 +21104,8 @@ static bool compareCmp(Value *V, Value *V2, TargetLibraryInfo &TLI,\n     auto *Op2 = CI2->getOperand(CI2Preds ? I : E - I - 1);\n     if (Op1 == Op2)\n       continue;\n+    if (!Op1 || !Op2)\n+      return false;\n     if (Op1->getValueID() < Op2->getValueID())\n       return !IsCompatibility;\n     if (Op1->getValueID() > Op2->getValueID())\n@@ -21147,9 +21149,12 @@ bool SLPVectorizerPass::vectorizeCmpInsts(iterator_range<ItT> CmpInsts,\n   for (CmpInst *I : CmpInsts) {\n     if (R.isDeleted(I))\n       continue;\n-    for (Value *Op : I->operands())\n+    for (Value *Op : I->operands()) {\n+      if (!Op)\n+        continue;\n       if (auto *RootOp = dyn_cast<Instruction>(Op))\n         Changed |= vectorizeRootInstruction(nullptr, RootOp, BB, R);\n+    }\n   }\n   // Try to vectorize operands as vector bundles.\n   for (CmpInst *I : CmpInsts) {\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 1414228,
+  "output_tokens": 13835,
+  "cached_tokens": 1342016,
+  "total_tokens": 1428063,
+  "chat_rounds": 73,
+  "total_time_sec": 657.7603576183319,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::SLPVectorizerPass::vectorizeCmpInsts<std::reverse_iterator<llvm::CmpInst* const*> >",
+    21151
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      21150,
+      21152
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs in vectorizeCmpInsts when iterating over operands of a CmpInst and attempting to dyn_cast<Instruction> on an operand that is nullptr. The debugger showed that I->getOperand(0) returns nullptr, indicating the CmpInst has a null operand. This is likely because earlier transformations (SLP vectorization) have replaced some instructions and left the CmpInst with dangling references. The opt log shows that after vectorizing the and/or/trunc chains, the cmp instructions %i23 and %i25 are still present but their operands may have been replaced with null due to erasure of scalar instructions.\n\n2. Analyzing `opt`'s Log: The log shows that SLP vectorization successfully vectorized a tree of 16 scalars, erasing many scalar instructions. At the end, it attempts to erase %i23 and %i25 (the cmp instructions). However, before that, vectorizeCmpInsts is called (as part of PostProcessCmps). The crash occurs inside vectorizeCmpInsts when iterating over operands of %i23. The operand %i22 was replaced with a vector extract (as seen in log: \"Replaced: %i22 = or i32 %6, %i21.\" and later \"Replaced: %i22 = or i32 %6, %8.\"). However, the replacement may have left the cmp instruction with a null operand because the original scalar instruction (%i22) was erased and the vector extract may have been incorrectly formed.\n\n3. Root Cause Analysis: The issue is that after vectorization, the BoUpSLP marks instructions as deleted (R.isDeleted) but the CmpInst still holds references to its original operands. When vectorizeCmpInsts iterates over operands, it encounters a Value* that is nullptr (likely because the original operand instruction was erased and its Value pointer became null). The dyn_cast<Instruction> on a null pointer triggers the assertion. The fix is to guard against null operands in the loop. Additionally, we should ensure that R.isDeleted check is sufficient, but the operand may be a constant (0) which is not an instruction. However, the crash shows the operand is null, not a constant zero. This suggests that the instruction's operand was set to null during replacement.\n\nLooking at the code at line 21150-21152: for (Value *Op : I->operands()) if (auto *RootOp = dyn_cast<Instruction>(Op)) ... If Op is nullptr, dyn_cast will assert. We need to skip null operands. Also, we should skip operands that are not instructions (constants, etc.) but dyn_cast will safely return nullptr for those. The assertion is about \"dyn_cast on a non-existent value\" meaning the pointer is not a valid Value (likely null). So we must check for Op != nullptr before dyn_cast.\n\n4. Proposed Edit Point(s): Modify the loop in vectorizeCmpInsts to skip null operands. The edit point is lines 21150-21152. We'll add a null check.\n\n5. Conclusion: The fix ensures that vectorizeCmpInsts does not crash when encountering null operands, which can happen after SLP vectorization replaces instructions and leaves dangling references. This is a defensive fix that aligns with typical LLVM patterns of checking for null before casting.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex d967813075bb..b02de86a1878 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -21104,6 +21104,8 @@ static bool compareCmp(Value *V, Value *V2, TargetLibraryInfo &TLI,\n     auto *Op2 = CI2->getOperand(CI2Preds ? I : E - I - 1);\n     if (Op1 == Op2)\n       continue;\n+    if (!Op1 || !Op2)\n+      return false;\n     if (Op1->getValueID() < Op2->getValueID())\n       return !IsCompatibility;\n     if (Op1->getValueID() > Op2->getValueID())\n@@ -21148,7 +21150,7 @@ bool SLPVectorizerPass::vectorizeCmpInsts(iterator_range<ItT> CmpInsts,\n     if (R.isDeleted(I))\n       continue;\n     for (Value *Op : I->operands())\n-      if (auto *RootOp = dyn_cast<Instruction>(Op))\n+      if (Op && (auto *RootOp = dyn_cast<Instruction>(Op)))\n         Changed |= vectorizeRootInstruction(nullptr, RootOp, BB, R);\n   }\n   // Try to vectorize operands as vector bundles.\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex d967813075bb..de59b5107e92 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -21104,6 +21104,8 @@ static bool compareCmp(Value *V, Value *V2, TargetLibraryInfo &TLI,\n     auto *Op2 = CI2->getOperand(CI2Preds ? I : E - I - 1);\n     if (Op1 == Op2)\n       continue;\n+    if (!Op1 || !Op2)\n+      return false;\n     if (Op1->getValueID() < Op2->getValueID())\n       return !IsCompatibility;\n     if (Op1->getValueID() > Op2->getValueID())\n@@ -21147,9 +21149,12 @@ bool SLPVectorizerPass::vectorizeCmpInsts(iterator_range<ItT> CmpInsts,\n   for (CmpInst *I : CmpInsts) {\n     if (R.isDeleted(I))\n       continue;\n-    for (Value *Op : I->operands())\n+    for (Value *Op : I->operands()) {\n+      if (!Op)\n+        continue;\n       if (auto *RootOp = dyn_cast<Instruction>(Op))\n         Changed |= vectorizeRootInstruction(nullptr, RootOp, BB, R);\n+    }\n   }\n   // Try to vectorize operands as vector bundles.\n   for (CmpInst *I : CmpInsts) {\n"
+  ]
+}

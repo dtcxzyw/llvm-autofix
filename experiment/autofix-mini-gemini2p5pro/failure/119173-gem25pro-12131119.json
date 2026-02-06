@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "119173",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/119173-gem25pro-12131119.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 1230855,
+  "output_tokens": 18687,
+  "cached_tokens": 1129673,
+  "total_tokens": 1277288,
+  "chat_rounds": 48,
+  "total_time_sec": 1033.5447220802307,
+  "trans_point": [
+    "llvm/lib/Transforms/Utils/LCSSA.cpp",
+    "formLCSSAForInstructionsImpl",
+    178
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+      10820,
+      10820
+    ]
+  ],
+  "reason_thou": "An incorrect transformation in the Loop Vectorizer is causing a miscompilation. The vectorizer is incorrectly identifying a recurrence as a reduction, leading to wrong code generation.\n\n### Understanding the Issue ###\n\nThe provided LLVM IR contains a loop with a recurrence relation defined by a PHI node and an `add` instruction. The recurrence is `%conv678.i.i_next = add i8 0, %conv678.i.i`. This is not a reduction; it simply propagates the initial value of the PHI node through the loop iterations. However, the Loop Vectorizer misidentifies this as an addition reduction.\n\n### Analyzing `opt`'s Log ###\n\nThe Alive2 verification fails, showing that the original code returns `1` while the vectorized code returns `2`. This discrepancy arises because the vectorizer generates code to perform a vector reduction `add <i8 1, i8 1>`, which results in `2`. The correct behavior would be to recognize that the value `1` is loop-invariant after the first iteration.\n\nThe suspicious PHI node in the vectorized code, `%vec.phi = phi <2 x i8> [ <i8 1, i8 0>, %vector.ph ], [ splat (i8 1), %vector.body ]`, confirms that the vectorizer is treating the recurrence as a reduction. The initial value `<i8 1, i8 0>` is constructed from the reduction's start value (`1`) and the identity element for addition (`0`). The reduction is then performed on `splat(i8 1)`, which is incorrect.\n\n### Root Cause Analysis ###\n\nThe root cause lies in `LoopVectorize.cpp` within the `LoopVectorizePass`. The logic for identifying reduction variables is too broad. Specifically, the code checks if a PHI node's value is used in a binary operation that feeds back into the PHI. In this case, `add i8 0, %conv678.i.i` is treated as a reduction because it's an `add` instruction.\n\nThe fix is to add a check to ensure that for a binary operation to be considered part of a reduction, both of its operands cannot be loop-invariant. If one operand is the PHI node and the other is a loop-invariant constant (like `0` in an `add`), it's not a true reduction if the constant is the identity element.\n\nThe proposed change adds a condition to `isReductionPHI` to check for this scenario. If the binary operator has an operand that is loop-invariant, it will not be considered a reduction, preventing the miscompilation.\n\n### Proposed Edit Point(s) ###\n\nI will add a check in `llvm/lib/Transforms/Vectorize/LoopVectorize.cpp` to prevent the misidentification of the recurrence.\n\n```cpp\n// Edit 1: llvm/lib/Transforms/Vectorize/LoopVectorize.cpp:10820\n// Add a check to ensure that not all other operands of the reduction operation\n// are loop-invariant.\nif (isa<Constant>(BinOp->getOperand(1 - OpIdx)))\n  continue;\n```\n\nThis change will be inserted at line 10820 in `llvm/lib/Transforms/Vectorize/LoopVectorize.cpp`.\n\n### Conclusion ###\n\nBy refining the reduction recognition logic to exclude cases where a binary operation involves the reduction PHI and a loop-invariant identity constant, we can prevent the Loop Vectorizer from incorrectly transforming such recurrences. This fix ensures that the vectorizer generates correct code for this and similar cases, resolving the miscompilation.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Analysis/IVDescriptors.cpp b/llvm/lib/Analysis/IVDescriptors.cpp\nindex f74ede4450ce..c1aed9ca1a63 100644\n--- a/llvm/lib/Analysis/IVDescriptors.cpp\n+++ b/llvm/lib/Analysis/IVDescriptors.cpp\n@@ -926,6 +926,21 @@ bool RecurrenceDescriptor::isReductionPHI(PHINode *Phi, Loop *TheLoop,\n                                           DemandedBits *DB, AssumptionCache *AC,\n                                           DominatorTree *DT,\n                                           ScalarEvolution *SE) {\n+  // If the recurrence is an integer add/sub of a loop-invariant zero, it's not a\n+  // reduction.\n+  if (Phi->hasOneUse()) {\n+    if (auto *I = dyn_cast<Instruction>(Phi->user_back())) {\n+      if (I->getOpcode() == Instruction::Add ||\n+          I->getOpcode() == Instruction::Sub) {\n+        unsigned OpIdx = (I->getOperand(0) == Phi) ? 0 : 1;\n+        if (auto *C = dyn_cast<ConstantInt>(I->getOperand(1 - OpIdx))) {\n+          if (C->isZero())\n+            return false;\n+        }\n+      }\n+    }\n+  }\n+\n   BasicBlock *Header = TheLoop->getHeader();\n   Function &F = *Header->getParent();\n   FastMathFlags FMF;\n"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "112350",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/112350-gem25pro-12120731.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 908767,
+  "output_tokens": 16775,
+  "cached_tokens": 807134,
+  "total_tokens": 951846,
+  "chat_rounds": 50,
+  "total_time_sec": 951.0338616371155,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+    "llvm::InstCombinerImpl::visitSelectInst",
+    4158
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/IR/Instructions.cpp",
+      1009,
+      1012
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe `instcombine` pass incorrectly transforms a `select` instruction with two `icmp` operands into an `xor`. The transformation is `select i1 C, i1 CMP1, i1 CMP2` -> `xor i1 C, i1 CMP2`, which is only valid if `CMP1` is the logical inverse of `CMP2`. In the provided reproducer, `CMP1` is `icmp ult %x, 11` and `CMP2` is `icmp samesign ugt %x, 10`. The core of the problem is that the analysis incorrectly assumes these two comparisons are logical inverses of each other.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log clearly shows the transformation happening in `InstCombineSelect.cpp::visitSelectInst`. The Alive2 output provides a concrete counterexample: when `%x` is `0x8000000000000000` (the most negative `i64`), the `samesign ugt` comparison produces `poison` because the signs of `%x` (negative) and `10` (positive) differ. The original `select` would have picked the non-poison `ult` result, but the transformed `xor` propagates the `poison` value, leading to a miscompilation.\n\n### 3. Root Cause Analysis\n\nThe transformation relies on a helper function, `ICmpInst::isInverse()`, to determine if one `icmp` is the inverse of another. This function is called from `InstCombineSelect.cpp`. The issue is that `ICmpInst::isInverse()` does not correctly handle the `samesign` comparison modifier, particularly for unsigned predicates (`ult`, `ule`, `ugt`, `uge`). When the signs of the operands differ, a `samesign` `icmp` with an unsigned predicate results in `poison`. An inverse predicate would need to be `true` in that case, but no simple `icmp` predicate can guarantee that. Therefore, a `samesign` `icmp` with an unsigned predicate is not safely invertible.\n\nThe current implementation of `ICmpInst::isInverse()` has a check `if (isSameSign()) return false;` which is too broad. It prevents inversion for *all* `samesign` comparisons. However, `samesign` comparisons with *signed* predicates (`slt`, `sle`, `sgt`, `sge`) are perfectly invertible. The check should be more specific: it should only return `false` for `samesign` comparisons that use *unsigned* predicates.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to refine the check in `ICmpInst::isInverse()` in `llvm/lib/IR/Instructions.cpp`. Instead of disallowing inversion for all `samesign` comparisons, we should only disallow it for those with unsigned predicates.\n\n```cpp\n// llvm/lib/IR/Instructions.cpp:1009\n\n  // Invertibility of samesign is not implemented yet.\n  // TODO: This can be improved.\n  if (isSameSign())\n    return false;\n```\n\nThis block should be changed to:\n\n```cpp\n// llvm/lib/IR/Instructions.cpp:1009\n\n  // Invertibility of samesign is not implemented for unsigned predicates because\n  // they can result in poison, which is not handled by getInversePredicate().\n  if (isSameSign() && getPredicate()->isUnsigned())\n    return false;\n```\n\nThis change correctly identifies the specific case that is unsafe to invert while allowing valid inversions for signed `samesign` comparisons to proceed.\n\n### 5. Conclusion\n\nThe miscompilation is caused by an overly conservative check in `ICmpInst::isInverse()` that was intended to handle the complexities of the `samesign` modifier but was not precise enough. By refining the check to only forbid inversion for `samesign` comparisons with unsigned predicates, we fix the immediate bug and also enable a new class of valid optimizations for signed `samesign` comparisons. This makes the compiler both more correct and potentially more powerful.",
+  "test_traj": []
+}

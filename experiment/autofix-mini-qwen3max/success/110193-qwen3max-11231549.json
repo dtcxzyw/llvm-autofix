@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "110193",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/110193-qwen3max-11231549.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 48a8627ab63e..5482f71f28fb 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -10346,7 +10346,8 @@ BoUpSLP::getEntryCost(const TreeEntry *E, ArrayRef<Value *> VectorizedVals,\n           const EdgeInfo &EI = E->UserTreeIndices.front();\n           if ((EI.UserTE->getOpcode() != Instruction::Select ||\n                EI.EdgeIdx != 0) &&\n-              It != MinBWs.end()) {\n+              It != MinBWs.end() &&\n+              EI.UserTE->getNumOperands() > EI.EdgeIdx) {\n             auto UserBWIt = MinBWs.find(EI.UserTE);\n             Type *UserScalarTy =\n                 EI.UserTE->getOperand(EI.EdgeIdx).front()->getType();\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 1701769,
+  "output_tokens": 3112,
+  "cached_tokens": 1165056,
+  "total_tokens": 1704881,
+  "chat_rounds": 47,
+  "total_time_sec": 392.38333106040955,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::TreeEntry::getOperand",
+    3247
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      10352,
+      10352
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs in the SLP vectorizer when trying to access an operand of a TreeEntry that has no operands. The assertion `OpIdx < Operands.size() && \"Off bounds\"` fails because `Operands.size()` is 0, but the code is trying to access an operand with index 0 (or potentially another index). This happens during cost calculation for a tree entry.\n\n2. Analyzing `opt`'s Log: The debug log shows that the SLP vectorizer is processing a bundle of select instructions (`%shl.i111.22.i335.i.i = select i1 %cmp3.i.22.i334.i.i, i32 0, i32 0` and similar). The log indicates that these selects are being processed as part of horizontal reduction detection. The crash occurs when calculating the cost for a tree entry that represents these select instructions.\n\n3. Root Cause Analysis: Looking at the backtrace and the code around line 10352 in `getEntryCost`, the issue is in this line:\n```cpp\nType *UserScalarTy = EI.UserTE->getOperand(EI.EdgeIdx).front()->getType();\n```\nHere, `EI.UserTE->getOperand(EI.EdgeIdx)` is being called, but the TreeEntry (`EI.UserTE`) has no operands (as confirmed by the debugger showing `Operands.size() = 0`). This happens because the TreeEntry represents a select instruction, but for some reason its operands were not properly initialized. The select instruction has 3 operands (condition, true value, false value), but the TreeEntry's Operands vector is empty.\n\nThe root cause is that when processing select instructions in horizontal reduction contexts, the SLP vectorizer creates TreeEntry objects that don't properly initialize their operands array. This leads to the assertion failure when later code tries to access these operands during cost calculation.\n\n4. Proposed Edit Point(s):\n+ The issue is at line 10352 where we assume that `EI.UserTE->getOperand(EI.EdgeIdx)` will return a valid operand list, but for certain TreeEntry types (particularly those created for select instructions in horizontal reduction scenarios), the operands may not be populated. We need to add a guard to check if the TreeEntry actually has operands before trying to access them.\n\n5. Conclusion: Adding a bounds check before accessing the operand will prevent the assertion failure. This is a defensive programming fix that ensures we don't access operands of TreeEntry objects that haven't been properly initialized with operand information. The fix will allow the SLP vectorizer to gracefully handle this edge case without crashing, and the cost calculation can proceed with appropriate default values when operand information is unavailable.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 48a8627ab63e..5482f71f28fb 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -10346,7 +10346,8 @@ BoUpSLP::getEntryCost(const TreeEntry *E, ArrayRef<Value *> VectorizedVals,\n           const EdgeInfo &EI = E->UserTreeIndices.front();\n           if ((EI.UserTE->getOpcode() != Instruction::Select ||\n                EI.EdgeIdx != 0) &&\n-              It != MinBWs.end()) {\n+              It != MinBWs.end() &&\n+              EI.UserTE->getNumOperands() > EI.EdgeIdx) {\n             auto UserBWIt = MinBWs.find(EI.UserTE);\n             Type *UserScalarTy =\n                 EI.UserTE->getOperand(EI.EdgeIdx).front()->getType();\n"
+  ]
+}

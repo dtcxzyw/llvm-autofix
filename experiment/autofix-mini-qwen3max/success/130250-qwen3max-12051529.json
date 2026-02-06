@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "130250",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/130250-qwen3max-12051529.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 4d4a1a6e04d3..7d0ad9961b85 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -2057,17 +2057,15 @@ bool VectorCombine::foldShuffleOfSelects(Instruction &I) {\n       SelOp, T1->getType(), C1VecTy, CmpInst::BAD_ICMP_PREDICATE, CostKind);\n   OldCost += TTI.getCmpSelInstrCost(SelOp, T2->getType(), C2VecTy,\n                                     CmpInst::BAD_ICMP_PREDICATE, CostKind);\n-  OldCost += TTI.getShuffleCost(SK, DstVecTy, Mask, CostKind, 0, nullptr,\n+  OldCost += TTI.getShuffleCost(SK, cast<FixedVectorType>(I.getOperand(0)->getType()), Mask, CostKind, 0, nullptr,\n                                 {I.getOperand(0), I.getOperand(1)}, &I);\n \n-  auto *C1C2VecTy = cast<FixedVectorType>(\n-      toVectorTy(Type::getInt1Ty(I.getContext()), DstVecTy->getNumElements()));\n   InstructionCost NewCost =\n-      TTI.getShuffleCost(SK, C1C2VecTy, Mask, CostKind, 0, nullptr, {C1, C2});\n+      TTI.getShuffleCost(SK, C1VecTy, Mask, CostKind, 0, nullptr, {C1, C2});\n   NewCost +=\n-      TTI.getShuffleCost(SK, DstVecTy, Mask, CostKind, 0, nullptr, {T1, T2});\n+      TTI.getShuffleCost(SK, cast<FixedVectorType>(T1->getType()), Mask, CostKind, 0, nullptr, {T1, T2});\n   NewCost +=\n-      TTI.getShuffleCost(SK, DstVecTy, Mask, CostKind, 0, nullptr, {F1, F2});\n+      TTI.getShuffleCost(SK, cast<FixedVectorType>(F1->getType()), Mask, CostKind, 0, nullptr, {F1, F2});\n   NewCost += TTI.getCmpSelInstrCost(SelOp, DstVecTy, DstVecTy,\n                                     CmpInst::BAD_ICMP_PREDICATE, CostKind);\n \n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 261823,
+  "output_tokens": 3831,
+  "cached_tokens": 84864,
+  "total_tokens": 265654,
+  "chat_rounds": 21,
+  "total_time_sec": 271.2623887062073,
+  "trans_point": [
+    "llvm/lib/IR/Instructions.cpp",
+    "isSingleSourceMaskImpl",
+    1906
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+      2060,
+      2061
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs in `isSingleSourceMaskImpl` when validating shuffle mask elements. The assertion fails because mask element `7` is out of bounds for the expected vector size. The shuffle instruction has operands of `<4 x float>` type (4 elements each), so valid mask indices should be 0-7 (since there are two 4-element vectors). However, the destination vector type is `<2 x float>`, and the cost model is being called with `DstVecTy->getNumElements()` (which is 2) as the `NumSrcElts` parameter, causing the validation to incorrectly expect only 0-3 as valid indices.\n\n2. Analyzing `opt`'s Log: The log shows that `foldShuffleOfSelects` is processing a shufflevector instruction with mask `<i32 4, i32 7>`. The function attempts to compute costs for transforming this pattern, but passes the wrong vector type size to the TTI cost model.\n\n3. Root Cause Analysis: In `foldShuffleOfSelects`, at line 2060, the code calls `TTI.getShuffleCost` with `DstVecTy` (the result type of the shuffle, which has 2 elements) as the vector type parameter. However, the shuffle operands are both `<4 x float>` vectors, so the correct vector type to pass should be the operand type (4 elements). The mask indices 4 and 7 are valid for 4-element operands (0-3 from first operand, 4-7 from second operand), but the cost model receives `DstVecTy` with 2 elements, leading it to validate against a range of 0-3 instead of 0-7.\n\n4. Proposed Edit Point(s): The fix is to change line 2060 in VectorCombine.cpp to pass the correct vector type (the operand type) instead of the destination type when computing the shuffle cost. The operand types can be obtained from `I.getOperand(0)->getType()`, which is a `<4 x float>` vector in this case.\n\n5. Conclusion: By passing the correct operand vector type to the shuffle cost calculation, the mask validation will use the proper bounds (0 to 2*operand_size-1), preventing the assertion failure. This ensures that valid shuffle masks are not incorrectly rejected due to using the destination vector size instead of the source vector size.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 4d4a1a6e04d3..c8e0281e7bb8 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -2057,7 +2057,7 @@ bool VectorCombine::foldShuffleOfSelects(Instruction &I) {\n       SelOp, T1->getType(), C1VecTy, CmpInst::BAD_ICMP_PREDICATE, CostKind);\n   OldCost += TTI.getCmpSelInstrCost(SelOp, T2->getType(), C2VecTy,\n                                     CmpInst::BAD_ICMP_PREDICATE, CostKind);\n-  OldCost += TTI.getShuffleCost(SK, DstVecTy, Mask, CostKind, 0, nullptr,\n+  OldCost += TTI.getShuffleCost(SK, cast<FixedVectorType>(I.getOperand(0)->getType()), Mask, CostKind, 0, nullptr,\n                                 {I.getOperand(0), I.getOperand(1)}, &I);\n \n   auto *C1C2VecTy = cast<FixedVectorType>(\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 4d4a1a6e04d3..7d0ad9961b85 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -2057,17 +2057,15 @@ bool VectorCombine::foldShuffleOfSelects(Instruction &I) {\n       SelOp, T1->getType(), C1VecTy, CmpInst::BAD_ICMP_PREDICATE, CostKind);\n   OldCost += TTI.getCmpSelInstrCost(SelOp, T2->getType(), C2VecTy,\n                                     CmpInst::BAD_ICMP_PREDICATE, CostKind);\n-  OldCost += TTI.getShuffleCost(SK, DstVecTy, Mask, CostKind, 0, nullptr,\n+  OldCost += TTI.getShuffleCost(SK, cast<FixedVectorType>(I.getOperand(0)->getType()), Mask, CostKind, 0, nullptr,\n                                 {I.getOperand(0), I.getOperand(1)}, &I);\n \n-  auto *C1C2VecTy = cast<FixedVectorType>(\n-      toVectorTy(Type::getInt1Ty(I.getContext()), DstVecTy->getNumElements()));\n   InstructionCost NewCost =\n-      TTI.getShuffleCost(SK, C1C2VecTy, Mask, CostKind, 0, nullptr, {C1, C2});\n+      TTI.getShuffleCost(SK, C1VecTy, Mask, CostKind, 0, nullptr, {C1, C2});\n   NewCost +=\n-      TTI.getShuffleCost(SK, DstVecTy, Mask, CostKind, 0, nullptr, {T1, T2});\n+      TTI.getShuffleCost(SK, cast<FixedVectorType>(T1->getType()), Mask, CostKind, 0, nullptr, {T1, T2});\n   NewCost +=\n-      TTI.getShuffleCost(SK, DstVecTy, Mask, CostKind, 0, nullptr, {F1, F2});\n+      TTI.getShuffleCost(SK, cast<FixedVectorType>(F1->getType()), Mask, CostKind, 0, nullptr, {F1, F2});\n   NewCost += TTI.getCmpSelInstrCost(SelOp, DstVecTy, DstVecTy,\n                                     CmpInst::BAD_ICMP_PREDICATE, CostKind);\n \n"
+  ]
+}

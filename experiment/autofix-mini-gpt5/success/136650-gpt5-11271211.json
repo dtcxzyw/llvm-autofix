@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "136650",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/136650-gpt5-11271211.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\nindex f1b225c0f238..074e24cd3933 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\n@@ -1480,7 +1480,12 @@ Value *InstCombinerImpl::foldLogicOfFCmps(FCmpInst *LHS, FCmpInst *RHS,\n     }\n   }\n \n-  if (IsAnd && stripSignOnlyFPOps(LHS0) == stripSignOnlyFPOps(RHS0)) {\n+  // Avoid folding a logical-select formed short-circuit AND. In that case,\n+  // the 2nd fcmp may produce poison that is masked by the select. Converting\n+  // to a single ordered fcmp would unconditionally use the potentially-poison\n+  // value and thus make the result more poisonous than the original.\n+  if (IsAnd && !IsLogicalSelect &&\n+      stripSignOnlyFPOps(LHS0) == stripSignOnlyFPOps(RHS0)) {\n     // and (fcmp ord x, 0), (fcmp u* x, inf) -> fcmp o* x, inf\n     // and (fcmp ord x, 0), (fcmp u* fabs(x), inf) -> fcmp o* x, inf\n     if (Value *Left = matchIsFiniteTest(Builder, LHS, RHS))\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 952033,
+  "output_tokens": 66287,
+  "cached_tokens": 837632,
+  "total_tokens": 1018320,
+  "chat_rounds": 39,
+  "total_time_sec": 1866.9077153205872,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp",
+    "llvm::InstCombinerImpl::visitFCmpInst",
+    8465
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp",
+      1483,
+      1490
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe failing transformation replaces a guarded boolean select:\n  select (fcmp ord x, 0.0), (fcmp uge |=> ueq fabs(x), +inf), false\nwith a single comparison:\n  fcmp oeq fabs(x), +inf\nThis is not semantics-preserving in the presence of poison. In the source IR, if x is a signaling NaN (or any NaN), the 'nnan' flagged fabs call produces poison, but that poison is not observed because the select chooses the false arm when the 'ord' compare is false. After transformation, the generated 'fcmp oeq' unconditionally uses the (potentially poison) fabs result, making the overall value poison where the original produced a defined false. Alive2 correctly reports the target as more poisonous than the source.\n\n2. Analyzing opt's Log:\nThe log shows two steps:\n  a) %cmp = fcmp uge ... +inf  -->  fcmp ueq ... +inf  (canonicalization in visitFCmpInst).\n  b) %and = select %ord, %cmp, false  -->  fcmp oeq ... +inf.\nThe second replacement occurs during InstCombine's visit of the select. It does not materialize an intermediate 'and'; it directly emits the folded fcmp. This implies foldSelectOfBools invoked foldBooleanAndOr with IsLogical=true, which in turn called foldLogicOfFCmps (InstCombineAndOrXor.cpp). There, the finite test pattern (isfinite lowering) matched and produced the ordered equality compare.\n\n3. Root Cause Analysis:\nThe folding logic for combining two fcmps inside foldLogicOfFCmps includes a finite-test transform:\n  and (fcmp ord x, 0), (fcmp u* x, inf) -> fcmp o* x, inf\nThis is valid for a true logical AND instruction because both operands are always evaluated, so poison exposure does not worsen (the original AND would already propagate poison from either operand). However, when the AND originates from a logical-select pattern (select cond, val, false) short-circuit semantics apply: the second operand (%cmp) would not be evaluated in the semantic sense if %ord is false, and more importantly, poison in the non-selected arm does not propagate through a select. Folding directly to a single fcmp drops the guarding 'ord' test and makes the poison from fabs(x) observable. The code attempts to be poison-safe by passing IsLogicalSelect to foldLogicOfFCmps, but the finite-test transform does not check IsLogicalSelect and therefore incorrectly fires in this context.\n\nThus, missing poison-safety gating for the finite-test combine when operating on a logical-select derived boolean expression causes the miscompile.\n\n4. Proposed Edit Point(s):\nEdit file llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp lines 1483-1490.\nChange the condition that triggers the finite test transform from:\n  if (IsAnd && stripSignOnlyFPOps(LHS0) == stripSignOnlyFPOps(RHS0)) {\n    ...\n  }\nto include a guard against logical-select contexts:\n  if (IsAnd && !IsLogicalSelect && stripSignOnlyFPOps(LHS0) == stripSignOnlyFPOps(RHS0)) {\n    ...\n  }\nAdd a comment explaining why this restriction is necessary (short-circuit select preserves poison in the non-taken arm; combining removes the guard and can expose poison).\nThis prevents the unsafe transform while retaining canonicalization for true bitwise AND expressions.\nOptionally, future work could attempt a more precise analysis (e.g., proving RHS cannot be poison or inserting freeze), but the minimal safe fix is to block the transform under IsLogicalSelect.\n\n5. Conclusion:\nBy adding '!IsLogicalSelect' to the finite-test folding condition, we ensure InstCombine does not collapse a select-based short-circuit pattern into a single fcmp that exposes poison. This preserves original semantics for cases where the second operand can be poison yet masked by the select, fixing the miscompile demonstrated by the reproducer and Alive2 failure while leaving other finite-test canonicalizations intact.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\nindex f1b225c0f238..074e24cd3933 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\n@@ -1480,7 +1480,12 @@ Value *InstCombinerImpl::foldLogicOfFCmps(FCmpInst *LHS, FCmpInst *RHS,\n     }\n   }\n \n-  if (IsAnd && stripSignOnlyFPOps(LHS0) == stripSignOnlyFPOps(RHS0)) {\n+  // Avoid folding a logical-select formed short-circuit AND. In that case,\n+  // the 2nd fcmp may produce poison that is masked by the select. Converting\n+  // to a single ordered fcmp would unconditionally use the potentially-poison\n+  // value and thus make the result more poisonous than the original.\n+  if (IsAnd && !IsLogicalSelect &&\n+      stripSignOnlyFPOps(LHS0) == stripSignOnlyFPOps(RHS0)) {\n     // and (fcmp ord x, 0), (fcmp u* x, inf) -> fcmp o* x, inf\n     // and (fcmp ord x, 0), (fcmp u* fabs(x), inf) -> fcmp o* x, inf\n     if (Value *Left = matchIsFiniteTest(Builder, LHS, RHS))\n"
+  ]
+}

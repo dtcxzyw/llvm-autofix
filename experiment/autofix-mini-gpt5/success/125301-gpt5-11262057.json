@@ -1,0 +1,29 @@
+{
+  "command": {
+    "issue": "125301",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/125301-gpt5-11262057.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VPlan.h b/llvm/lib/Transforms/Vectorize/VPlan.h\nindex 459222234bc3..f942a2ac4e2a 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlan.h\n+++ b/llvm/lib/Transforms/Vectorize/VPlan.h\n@@ -1060,7 +1060,10 @@ public:\n            R->getVPDefID() == VPRecipeBase::VPWidenCastSC ||\n            R->getVPDefID() == VPRecipeBase::VPReplicateSC ||\n            R->getVPDefID() == VPRecipeBase::VPReverseVectorPointerSC ||\n-           R->getVPDefID() == VPRecipeBase::VPVectorPointerSC;\n+           R->getVPDefID() == VPRecipeBase::VPVectorPointerSC ||\n+           R->getVPDefID() == VPRecipeBase::VPWidenIntrinsicSC ||\n+           R->getVPDefID() == VPRecipeBase::VPWidenCallSC ||\n+           R->getVPDefID() == VPRecipeBase::VPWidenSelectSC;\n   }\n \n   static inline bool classof(const VPUser *U) {\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 197264,
+  "output_tokens": 4355,
+  "cached_tokens": 161152,
+  "total_tokens": 201619,
+  "chat_rounds": 19,
+  "total_time_sec": 133.11244702339172,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/VPlanTransforms.cpp",
+    "operator()",
+    1926
+  ],
+  "edit_points": [],
+  "reason_thou": "1. Understanding the Issue:\nThe loop vectorizer crashes in VPlanTransforms::dropPoisonGeneratingRecipes with an assertion that an instruction with poison-generating flags is not covered by VPRecipeWithIRFlags. The reproducer involves a call to llvm.fabs with the nnan flag. During VPlan construction, we create VP recipes that are supposed to carry IR flags so that dropPoisonGeneratingRecipes can strip them when required. The assertion indicates that the recipe being visited is not recognized as VPRecipeWithIRFlags, yet its underlying instruction carries poison-generating flags (e.g., nnan), leading to the mismatch.\n\n2. Analyzing opt's Log:\nThe crash happens at VPlanTransforms.cpp:1926, inside the lambda in dropPoisonGeneratingRecipes. The code first tries to dyn_cast<VPRecipeWithIRFlags>(CurRec). If this fails, it asserts that the underlying IR instruction does not have poison-generating flags. Since we have nnan on a call to llvm.fabs, that condition fails. The reproducer\u2019s first transformation point is dropPoisonGeneratingRecipes, which matches the stack and indicates the issue is at the identification of recipes carrying flags.\n\n3. Root Cause Analysis:\nVPWidenIntrinsicRecipe is a subclass of VPRecipeWithIRFlags and is used to model widening of intrinsics such as llvm.fabs. However, VPRecipeWithIRFlags::classof currently does not include VPDef IDs for VPWidenIntrinsicSC, VPWidenCallSC, or VPWidenSelectSC (and possibly others). As a result, dyn_cast<VPRecipeWithIRFlags>(CurRec) returns false for these recipes, and the code takes the else branch with the assertion. The underlying CallInst for fabs has nnan set, which are poison-generating flags, causing the assertion. Therefore, the recipe hierarchy is correct, but the classof dispatch omits these recipe IDs, breaking type identification.\n\n4. Proposed Edit Point(s):\n- File: llvm/lib/Transforms/Vectorize/VPlan.h\n- Location: VPRecipeWithIRFlags::classof (lines ~1055-1064 in the provided snippet)\n- Change: Add missing VPDef IDs to classof so that VPWidenIntrinsicRecipe, VPWidenCallRecipe, and VPWidenSelectRecipe (and any other recipes deriving from VPRecipeWithIRFlags that carry IR flags) are recognized.\n\nProposed patch (conceptual):\nModify VPRecipeWithIRFlags::classof to include:\n  R->getVPDefID() == VPRecipeBase::VPWidenIntrinsicSC ||\n  R->getVPDefID() == VPRecipeBase::VPWidenCallSC ||\n  R->getVPDefID() == VPRecipeBase::VPWidenSelectSC\nin addition to the existing cases (VPInstructionSC, VPWidenSC, VPWidenEVLSC, VPWidenGEPSC, VPWidenCastSC, VPReplicateSC, VPReverseVectorPointerSC, VPVectorPointerSC).\n\nThis ensures that dyn_cast<VPRecipeWithIRFlags> succeeds for recipes that actually store and need to manage IR flags, and dropPoisonGeneratingFlags will properly clear poison-generating flags (e.g., nnan) when necessary, preventing the assertion.\n\n5. Conclusion:\nThe crash is due to incomplete type filtering in VPRecipeWithIRFlags::classof, which fails to recognize VPWidenIntrinsicRecipe (and similar) as carrying IR flags. Extending classof to include VPWidenIntrinsicSC, VPWidenCallSC, and VPWidenSelectSC fixes the mismatch, allowing dropPoisonGeneratingRecipes to operate correctly and prevents the assertion. This aligns with the assumption that assertions are correct and reveals an earlier error in type identification.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VPlan.h b/llvm/lib/Transforms/Vectorize/VPlan.h\nindex 459222234bc3..f942a2ac4e2a 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlan.h\n+++ b/llvm/lib/Transforms/Vectorize/VPlan.h\n@@ -1060,7 +1060,10 @@ public:\n            R->getVPDefID() == VPRecipeBase::VPWidenCastSC ||\n            R->getVPDefID() == VPRecipeBase::VPReplicateSC ||\n            R->getVPDefID() == VPRecipeBase::VPReverseVectorPointerSC ||\n-           R->getVPDefID() == VPRecipeBase::VPVectorPointerSC;\n+           R->getVPDefID() == VPRecipeBase::VPVectorPointerSC ||\n+           R->getVPDefID() == VPRecipeBase::VPWidenIntrinsicSC ||\n+           R->getVPDefID() == VPRecipeBase::VPWidenCallSC ||\n+           R->getVPDefID() == VPRecipeBase::VPWidenSelectSC;\n   }\n \n   static inline bool classof(const VPUser *U) {\n"
+  ]
+}

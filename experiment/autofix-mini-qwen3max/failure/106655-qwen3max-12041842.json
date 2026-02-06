@@ -1,0 +1,39 @@
+{
+  "command": {
+    "issue": "106655",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/106655-qwen3max-12041842.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 804, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 4998126,
+  "output_tokens": 18047,
+  "cached_tokens": 2373376,
+  "total_tokens": 5016173,
+  "chat_rounds": 75,
+  "total_time_sec": 1683.484564781189,
+  "trans_point": [
+    "llvm/lib/IR/Instructions.cpp",
+    "isSingleSourceMaskImpl",
+    1853
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      7992,
+      7994
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs in `isSingleSourceMaskImpl` when validating shuffle mask elements. The assertion fails because mask element `I=30` is not within the valid range `[0, NumOpElts*2) = [0, 8)` where `NumOpElts=4`. This happens when `isExtractSubvectorMask` is called with a mask of size 32 but `NumSrcElts=4`, which is inconsistent.\n\n2. Analyzing `opt`'s Log: The debug log shows that during vectorization, the SLP vectorizer creates a reuse shuffle with indices `{0, 1, 1, 1, ..., 30, 31}` for a bundle of size 32. However, when analyzing this mask in `isIdentityMask`, it's being checked against a vector type with only 4 elements (`VF=4` from the original cast operations). The mask contains indices up to 31, which far exceeds the valid range for a 4-element vector.\n\n3. Root Cause Analysis: The issue is in the `isIdentityMask` function in `BaseShuffleAnalysis`. When `IsStrict=false`, the code calls `isExtractSubvectorMask(Mask, VF, Index)` where `VF=4` (the original vector size) but `Mask.size()=32`. The `isExtractSubvectorMask` function then calls `isSingleSourceMaskImpl(Mask, VF)` which expects all mask elements to be within `[0, VF*2) = [0, 8)`. However, the actual mask contains elements like 30 and 31, causing the assertion failure.\n\nThe problem is that `isExtractSubvectorMask` is being called with an incompatible mask size. The mask represents a 32-element vector, but it's being validated against a 4-element source vector. The `isExtractSubvectorMask` check should only be performed when the mask size is compatible with the source vector size.\n\n4. Proposed Edit Point(s): The fix is to add a size check before calling `isExtractSubvectorMask` in the `isIdentityMask` function. We should only consider extract subvector masks when the mask size is less than or equal to the vector size, as extract operations produce smaller vectors.\n\n5. Conclusion: By adding a proper size validation before calling `isExtractSubvectorMask`, we prevent the assertion failure while maintaining correct functionality. The extract subvector check only makes sense when extracting to a smaller size, so this guard condition is both safe and necessary.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex edb2567fa057..3bc2907243d4 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -7989,7 +7989,10 @@ protected:\n       return true;\n     if (!IsStrict) {\n       // Consider extract subvector starting from index 0.\n-      if (ShuffleVectorInst::isExtractSubvectorMask(Mask, VF, Index) &&\n+      // Only check for extract subvector when mask size is not larger than VF,\n+      // as extract operations produce smaller vectors.\n+      if (Mask.size() <= (size_t)VF &&\n+          ShuffleVectorInst::isExtractSubvectorMask(Mask, VF, Index) &&\n           Index == 0)\n         return true;\n       // All VF-size submasks are identity (e.g.\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex edb2567fa057..740e3a3a9660 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -7989,7 +7989,10 @@ protected:\n       return true;\n     if (!IsStrict) {\n       // Consider extract subvector starting from index 0.\n-      if (ShuffleVectorInst::isExtractSubvectorMask(Mask, VF, Index) &&\n+      // Only check for extract subvector when mask size is smaller than VF,\n+      // as extract operations produce smaller vectors.\n+      if (Mask.size() < (size_t)VF &&\n+          ShuffleVectorInst::isExtractSubvectorMask(Mask, VF, Index) &&\n           Index == 0)\n         return true;\n       // All VF-size submasks are identity (e.g.\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex edb2567fa057..5e7cb2ca0b89 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -7989,7 +7989,10 @@ protected:\n       return true;\n     if (!IsStrict) {\n       // Consider extract subvector starting from index 0.\n-      if (ShuffleVectorInst::isExtractSubvectorMask(Mask, VF, Index) &&\n+      // Only check for extract subvector when all mask elements are within\n+      // the source vector bounds, as extract operations use only one source.\n+      if (all_of(Mask, [VF](int I) { return I < 0 || I < VF; }) &&\n+          ShuffleVectorInst::isExtractSubvectorMask(Mask, VF, Index) &&\n           Index == 0)\n         return true;\n       // All VF-size submasks are identity (e.g.\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex edb2567fa057..5238fda34ae1 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -7989,7 +7989,10 @@ protected:\n       return true;\n     if (!IsStrict) {\n       // Consider extract subvector starting from index 0.\n-      if (ShuffleVectorInst::isExtractSubvectorMask(Mask, VF, Index) &&\n+      // Only check for extract subvector when all mask elements are within\n+      // the valid range for a single source vector [0, VF) or are poison.\n+      if (all_of(Mask, [VF](int I) { return I < 0 || I < VF; }) &&\n+          ShuffleVectorInst::isExtractSubvectorMask(Mask, VF, Index) &&\n           Index == 0)\n         return true;\n       // All VF-size submasks are identity (e.g.\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex edb2567fa057..5238fda34ae1 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -7989,7 +7989,10 @@ protected:\n       return true;\n     if (!IsStrict) {\n       // Consider extract subvector starting from index 0.\n-      if (ShuffleVectorInst::isExtractSubvectorMask(Mask, VF, Index) &&\n+      // Only check for extract subvector when all mask elements are within\n+      // the valid range for a single source vector [0, VF) or are poison.\n+      if (all_of(Mask, [VF](int I) { return I < 0 || I < VF; }) &&\n+          ShuffleVectorInst::isExtractSubvectorMask(Mask, VF, Index) &&\n           Index == 0)\n         return true;\n       // All VF-size submasks are identity (e.g.\n"
+  ]
+}

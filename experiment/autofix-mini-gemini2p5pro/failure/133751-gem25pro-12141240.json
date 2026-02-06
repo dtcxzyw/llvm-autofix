@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "133751",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/133751-gem25pro-12141240.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 653179,
+  "output_tokens": 17140,
+  "cached_tokens": 561766,
+  "total_tokens": 692648,
+  "chat_rounds": 35,
+  "total_time_sec": 370.54255414009094,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::newTreeEntry",
+    3711
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      9645,
+      9653
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe SLP vectorizer is crashing with an assertion failure in `BoUpSLP::newTreeEntry`. The assertion `(hasFullVectorsOrPowerOf2(...) || ReuseShuffleIndices.empty())` is designed to prevent the vectorizer from creating shuffles for vectors whose size is not a power of two, unless the target explicitly supports such vector sizes (which is rare). This is because reshuffling non-power-of-two vectors often requires complex and inefficient code generation.\n\nIn the provided IR, the vectorizer attempts to vectorize four `select` instructions. These instructions share condition operands: two use `%cmp13.us` and two use `%cmp14.us`. The vectorizer correctly identifies this as an opportunity to form a vector of conditions by creating a smaller vector of the unique scalars (`%cmp13.us`, `%cmp14.us`) and then shuffling them into the final 4-element vector needed for the `select`s.\n\nThe crash occurs because the logic responsible for collecting these unique scalars is flawed. It incorrectly constructs a list (`VL`) of three operands instead of two, leading to a `VL.size()` of 3. Since 3 is not a power of two and `ReuseShuffleIndices` is not empty, the assertion fails.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log provides a clear trace of the vectorizer's actions leading to the crash:\n1.  It starts by trying to vectorize a list of four `phi` nodes.\n2.  It recursively moves to their operands, the four `select` instructions.\n3.  It then analyzes the operands of the `select`s. When it gets to the condition operands (`%cmp13.us`, `%cmp13.us`, `%cmp14.us`, `%cmp14.us`), it notes `Shuffle for reused scalars.` This confirms it has identified the optimization opportunity.\n4.  The very next step is the call to `newTreeEntry` for the `fcmp` instructions, which immediately triggers the assertion failure.\n\nThis sequence pinpoints the problem to the logic that handles reused scalars, specifically in the transition from analyzing the `select` instructions to building a new vectorization tree for their `fcmp` operands.\n\n### 3. Root Cause Analysis\n\nThe root cause lies in `BoUpSLP::buildTree_rec` within a specific code block that handles reused scalar operands. The logic for gathering the unique operands into a new list `VL` is incorrect.\n\nHere is the problematic code segment in `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp`:\n\n```cpp\n// at line 9644\n// Find the unique operands.\nVL.push_back(Op); // 'Op' is the first operand\nfor (unsigned i = 1, e = Operands.size(); i < e; ++i) {\n  Value *V = Operands[i];\n  if (isa<UndefValue>(V))\n    continue;\n  // Check if V is already in VL.\n  if (find(VL, V) == VL.end())\n    VL.push_back(V);\n}\n```\n\nThe logic is overly complex and bug-prone. A much simpler and more robust approach is to iterate through all operands and add them to `VL` only if they are not already present. The debugger state showing `VL.size() == 3` confirms that this logic, under the specific circumstances of the reproducer, incorrectly collects the unique scalars.\n\nThe correct approach is to replace this with a simple loop that rebuilds `VL` from scratch by iterating through all `Operands` and adding each unique value once.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to replace the faulty and complex logic for collecting unique operands with a simple, correct loop. This ensures that `VL` will contain exactly the set of unique scalar operands, with no duplicates.\n\n**File**: `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp`\n**Lines**: 9645-9653\n**Proposed Code**:\n```cpp\n              // Find the unique operands.\n              for (Value *V : Operands) {\n                if (isa<UndefValue>(V))\n                  continue;\n                if (!is_contained(VL, V))\n                  VL.push_back(V);\n              }\n```\nThis replaces the `VL.push_back(Op)` and the subsequent `for` loop with a single, clear range-based `for` loop that correctly populates `VL` with unique values from the `Operands` list.\n\n### 5. Conclusion\n\nThe proposed edit corrects a bug in the SLP vectorizer's logic for handling reused scalar operands. By replacing the flawed code with a straightforward and correct implementation for collecting unique operands, the vectorizer will no longer attempt to create illegally sized vectors. This resolves the assertion failure and allows the compilation to proceed correctly.",
+  "test_traj": []
+}

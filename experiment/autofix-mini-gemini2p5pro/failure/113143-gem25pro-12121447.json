@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "113143",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/113143-gem25pro-12121447.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 5004332,
+  "output_tokens": 18352,
+  "cached_tokens": 4538835,
+  "total_tokens": 5042272,
+  "chat_rounds": 165,
+  "total_time_sec": 594.141951084137,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::isGatherShuffledSingleRegisterEntry",
+    12474
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      10025,
+      10026
+    ]
+  ],
+  "reason_thou": "The user has encountered a `SIGABRT` due to an assertion failure in the `slp-vectorizer` module. The assertion `TEPtr->UserTreeIndices.size() == 1 && \"Expected only single user of a gather node.\"` fails within the `isGatherShuffledSingleRegisterEntry` function. This indicates that a `TreeEntry` representing a \"gather\" operation (like broadcasting a scalar) is found to have multiple users within the SLP-tree, which is an invalid state.\n\n### 1. Understanding the Issue ###\n\nThe SLP vectorizer builds a \"tree\" of instructions to vectorize, represented by `TreeEntry` objects. Each `TreeEntry` tracks its operands and its users within this tree structure. A \"gather\" node is a special `TreeEntry` that represents the collection of scalar values into a vector. A common case is broadcasting a single scalar value for use in a vector operation. The failing assertion indicates that such a broadcast `TreeEntry` has been registered as an operand for more than one other `TreeEntry` in the tree, which violates the tree's structural invariants.\n\n### 2. Analyzing `opt`'s Log ###\n\nThe debug log shows the vectorizer attempting to build a vectorization tree rooted at two `icmp` instructions:\n- `%cmp4.2 = icmp ne i32 %2, %conv3.2`\n- `%cmp4.1 = icmp ne i32 %2, %conv3.1`\n\nBoth instructions share a common operand, `%2`, which is a `load` instruction. The vectorizer correctly identifies that `%2` needs to be broadcasted. It creates a `TreeEntry` for this broadcast. The log then shows the cost calculation process, which traverses the tree. The crash occurs during the cost evaluation of the `TreeEntry` for `%2`. The assertion failure implies that this `TreeEntry` has been incorrectly associated with multiple users.\n\n### 3. Root Cause Analysis ###\n\nBy inspecting the debugger state at the point of the crash, we can analyze the problematic `TreeEntry`. The `TEPtr` variable points to the `TreeEntry` for the broadcast of the scalar `%2`. Evaluating `TEPtr->UserTreeIndices.size()` confirms it is `2`, causing the assertion to fail.\n\nThe `UserTreeIndices` contains two entries:\n1.  `{User: 0x... (TreeEntry for [%cmp4.2, %cmp4.1]), EdgeIdx: 0}`\n2.  `{User: 0x... (TreeEntry for [%cmp4.2, %cmp4.1]), EdgeIdx: 0}`\n\nBoth entries point to the *same* user `TreeEntry` (the one for the `icmp` instructions) and the *same* operand index (`EdgeIdx: 0`). This reveals the root cause: the `addUser` method was called twice for the same user-operand pair.\n\nThis happens in the `BoUpSLP::buildTree` function. When constructing the `TreeEntry` for `[%cmp4.2, %cmp4.1]`, it iterates through the operands. For operand 0, it processes `%2` for both lanes. The logic fails to recognize that it has already created and registered the broadcast `TreeEntry` for `%2` for this user. Instead, it finds the existing `TreeEntry` for `%2` and calls `addUser` on it again, leading to the duplicate user entry and the subsequent crash.\n\nThe fix is to ensure that `addUser` is not called if the user has already been registered for the given operand.\n\n### 4. Proposed Edit Point(s) ###\n\nThe issue lies in `BoUpSLP::buildTree` where it redundantly adds users to existing `TreeEntry` nodes. A check should be added to prevent this.\n\n```cpp\n// llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n\n10018   // The operand is a scalar. Check if it is a known scalar.\n10019   auto It = ScalarToTreeEntry.find(V);\n10020   if (It != ScalarToTreeEntry.end()) {\n10021     // Found a scalar that is used by multiple instructions in this\n10022     // bundle.\n10023     TE = It->second;\n10024     // If the user is not this entry, add it to the list of users.\n10025     if (TE->getSingleUser() != Entry)\n10026       TE->addUser(Entry, OpIdx);\n10027   } else {\n```\n\nThe check `if (TE->getSingleUser() != Entry)` is insufficient for cases with multiple users. It should be replaced with a more robust check that iterates through all users.\n\n**Edit Point 1:**\n\nFile: `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp`\nLines: `10025-10026`\n\n```cpp\n-    if (TE->getSingleUser() != Entry)\n-      TE->addUser(Entry, OpIdx);\n+    if (!TE->isUser(Entry))\n+      TE->addUser(Entry, OpIdx);\n```\n\nThis change replaces the simplistic single-user check with `isUser`, which correctly handles `TreeEntry` nodes that already have multiple users, preventing the addition of a duplicate user.\n\n### 5. Conclusion ###\n\nThe crash was caused by a flaw in the SLP-tree construction logic, where a `TreeEntry` for a broadcasted scalar was assigned the same user multiple times. This violated a core invariant of the tree data structure, leading to an assertion failure during the cost analysis phase. The proposed fix corrects the logic by adding a proper check to prevent duplicate user entries, ensuring the integrity of the SLP-tree and allowing the vectorizer to proceed correctly.",
+  "test_traj": []
+}

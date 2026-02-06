@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "118850",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/118850-gpt5-11260943.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp b/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp\nindex f653269713b3..69d424b3df6d 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp\n@@ -168,7 +168,7 @@ void UnrollState::unrollWidenInductionByUF(\n   auto *ConstStep = ScalarStep->isLiveIn()\n                         ? dyn_cast<ConstantInt>(ScalarStep->getLiveInIRValue())\n                         : nullptr;\n-  if (!ConstStep || ConstStep->getZExtValue() != 1) {\n+  if (!ConstStep || !ConstStep->isOne()) {\n     if (TypeInfo.inferScalarType(ScalarStep) != IVTy) {\n       ScalarStep =\n           Builder.createWidenCast(Instruction::Trunc, ScalarStep, IVTy);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 33025,
+  "output_tokens": 1101,
+  "cached_tokens": 4736,
+  "total_tokens": 34126,
+  "chat_rounds": 5,
+  "total_time_sec": 80.11514258384705,
+  "trans_point": [
+    "llvm/include/llvm/IR/Constants.h",
+    "llvm::ConstantInt::getZExtValue",
+    157
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp",
+      168,
+      173
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs during loop vectorization while unrolling VPlan induction recipes. Specifically, the code calls ConstantInt::getZExtValue() on a ConstantInt representing the induction step. In the reproducer, the induction step is an i65 with a negative value (-1). Calling getZExtValue on a 65-bit integer triggers an assertion in APInt::getZExtValue() requiring the number of active bits to be <= 64.\n\n2. Analyzing opt's Log:\nThe stack shows the first failing transformation in ConstantInt::getZExtValue, invoked from UnrollState::unrollWidenInductionByUF at VPlanUnroll.cpp:171. That function checks whether the induction step equals 1 to decide whether it needs to multiply the vector step by the scalar step. The check uses getZExtValue() == 1.\n\n3. Root Cause Analysis:\nThe code assumes the step fits within 64 bits when examining whether the step equals 1. This is not valid for wider integer types (like i65) or when the step is negative. Using getZExtValue() both imposes a 64-bit limit and is semantically wrong for signed negative values. LLVM provides ConstantInt::isOne(), which safely checks whether the constant equals 1 regardless of bitwidth or sign. Thus, the crash is caused by the incorrect use of getZExtValue() to test for the value 1 on potentially wide integers.\n\n4. Proposed Edit Point(s):\n- File: llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp\n- Lines: 168-173\n- Change the condition from using getZExtValue() to using isOne().\n\nCurrent code:\n  VPValue *ScalarStep = IV->getStepValue();\n  auto *ConstStep = ScalarStep->isLiveIn()\n                        ? dyn_cast<ConstantInt>(ScalarStep->getLiveInIRValue())\n                        : nullptr;\n  if (!ConstStep || ConstStep->getZExtValue() != 1) {\n\nProposed change:\n  VPValue *ScalarStep = IV->getStepValue();\n  auto *ConstStep = ScalarStep->isLiveIn()\n                        ? dyn_cast<ConstantInt>(ScalarStep->getLiveInIRValue())\n                        : nullptr;\n  if (!ConstStep || !ConstStep->isOne()) {\n\nThis removes the unsafe width-limited zero-extension and correctly detects a step of 1 for any integer bitwidth.\n\n5. Conclusion:\nBy replacing the getZExtValue() == 1 check with ConstantInt::isOne(), we avoid the APInt assertion for integers wider than 64 bits and correctly handle the semantics for the induction step. This prevents the crash in VPlan unrolling for wide induction types and negative steps, while preserving the intended optimization behavior.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp b/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp\nindex f653269713b3..69d424b3df6d 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp\n@@ -168,7 +168,7 @@ void UnrollState::unrollWidenInductionByUF(\n   auto *ConstStep = ScalarStep->isLiveIn()\n                         ? dyn_cast<ConstantInt>(ScalarStep->getLiveInIRValue())\n                         : nullptr;\n-  if (!ConstStep || ConstStep->getZExtValue() != 1) {\n+  if (!ConstStep || !ConstStep->isOne()) {\n     if (TypeInfo.inferScalarType(ScalarStep) != IVTy) {\n       ScalarStep =\n           Builder.createWidenCast(Instruction::Trunc, ScalarStep, IVTy);\n"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "133288",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/133288-gem25pro-12141222.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 852972,
+  "output_tokens": 12623,
+  "cached_tokens": 740185,
+  "total_tokens": 888741,
+  "chat_rounds": 58,
+  "total_time_sec": 391.061927318573,
+  "trans_point": [
+    "llvm/include/llvm/IR/BasicBlock.h",
+    "llvm::BasicBlock::getTerminator",
+    241
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      13364,
+      13369
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe `slp-vectorizer` is crashing with a segmentation fault. The backtrace indicates the crash happens inside `llvm::BasicBlock::getTerminator()`, which is being called from `BoUpSLP::getSpillCost`. A `SIGSEGV` in `getTerminator` strongly suggests it's being called on an invalid or null `BasicBlock` pointer.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log shows that the vectorizer is attempting to analyze a group of PHI nodes in basic block `bb12`. It builds a vectorization tree and then proceeds to calculate its cost. The crash occurs during this cost calculation phase (`getTreeCost`), specifically when calculating the cost of spilling (extracting) scalar values from the vectorized result.\n\n### 3. Root Cause Analysis\n\nThe crash is a null pointer dereference. Here's the sequence of events leading to it:\n\n1.  The function `BoUpSLP::getTreeCost` is called to evaluate the profitability of vectorizing a group of values.\n2.  This function iterates through the scalar `Value*`s that make up a candidate `TreeEntry`. In the provided test case, one of these entries (`TreeEntry` index 3) consists of `i32 0` constants.\n3.  Inside the loop, the code attempts to calculate the \"spill cost\" for each scalar. This involves finding an insertion point for a potential `extractelement` instruction.\n4.  The code calls `getInsertPointForSpills(TE, I)` to find a user of the scalar, and then `User->getParent()` to get the `BasicBlock` where the spill would occur.\n5.  However, when the scalar `Value*` is a `ConstantInt` (like `i32 0`), it does not belong to any basic block. While it might have users, the constant itself does not have a parent. The logic in `getTreeCost` was flawed because it did not account for this. It would proceed to calculate a spill cost even for constants.\n6.  When `getInsertPointForSpills` is called for a constant that is used by a PHI node, it can return an insertion point. However, the fundamental issue is trying to get a parent block for a value that doesn't have one. The code path that leads to the crash involves passing a `nullptr` `BasicBlock` to `getSpillCost`, which then calls `getTerminator()` on this null pointer.\n\nThe core of the problem is the incorrect assumption that every scalar value being considered for vectorization is an `Instruction` with a parent `BasicBlock`.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to ensure that we only attempt to calculate a spill cost for values that are `Instruction`s. Constants do not have a parent block and thus have no associated spill cost in this context. By checking if the scalar value is an `Instruction` before proceeding, we can avoid the null pointer dereference.\n\nThe edit is in `BoUpSLP::getTreeCost` to wrap the cost calculation logic in a check for `isa<Instruction>`.\n\n### 5. Conclusion\n\nThe proposed patch corrects the faulty assumption in the `slp-vectorizer`'s cost model. By ensuring that spill costs are calculated only for `Instruction`s, it prevents the null pointer dereference that occurs when the vectorizer encounters `Constant` values in its candidate list. This makes the vectorizer more robust and fixes the crash.",
+  "test_traj": []
+}

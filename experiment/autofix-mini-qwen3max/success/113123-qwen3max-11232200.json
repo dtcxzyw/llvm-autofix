@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "113123",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/113123-qwen3max-11232200.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\nindex d72013ba223d..d2f0dbb8523e 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\n@@ -1531,8 +1531,12 @@ Value *InstCombinerImpl::foldLogicOfFCmps(FCmpInst *LHS, FCmpInst *RHS,\n     }\n     if (IsLessThanOrLessEqual(IsAnd ? PredL : PredR)) {\n       BuilderTy::FastMathFlagGuard Guard(Builder);\n-      Builder.setFastMathFlags(LHS->getFastMathFlags() |\n-                               RHS->getFastMathFlags());\n+      FastMathFlags FMF = IsLogicalSelect\n+                              ? (LHS->getFastMathFlags() &\n+                                 RHS->getFastMathFlags())\n+                              : (LHS->getFastMathFlags() |\n+                                 RHS->getFastMathFlags());\n+      Builder.setFastMathFlags(FMF);\n \n       Value *FAbs = Builder.CreateUnaryIntrinsic(Intrinsic::fabs, LHS0);\n       return Builder.CreateFCmp(PredL, FAbs,\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 307514,
+  "output_tokens": 2186,
+  "cached_tokens": 111360,
+  "total_tokens": 309700,
+  "chat_rounds": 23,
+  "total_time_sec": 625.8907654285431,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp",
+    "llvm::InstCombinerImpl::foldBooleanAndOr",
+    3537
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp",
+      1534,
+      1535
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The problem occurs when InstCombine transforms a select instruction that represents a logical AND of two floating-point comparisons into a fabs-based comparison. The original code has `%cmp1 = fcmp ninf olt float %x, small_positive` and `%cmp2 = fcmp ogt float %x, small_negative`, with the select implementing `cmp2 ? cmp1 : false`. This is equivalent to checking if x is in the range (small_negative, small_positive). The transformation converts this to `fabs(x) < small_positive`, but incorrectly handles FastMathFlags (FMF).\n\nThe issue manifests with input x = -infinity. In the source: cmp1 is poison (because -inf < small_positive with ninf flag produces poison), cmp2 is false (-inf > small_negative is false), so the select returns false. In the target: fabs(-inf) with ninf flag produces poison, so the comparison returns poison. This makes the target more poisonous than the source.\n\n2. Analyzing `opt`'s Log: The log shows that the transformation happens in foldBooleanAndOr -> foldLogicOfFCmps. The key observation is that LHS (%cmp1) has ninf FMF while RHS (%cmp2) doesn't have any FMF. The transformation at lines 1534-1535 unions the FMF (`LHS->getFastMathFlags() | RHS->getFastMathFlags()`), but this is incorrect for logical selects.\n\n3. Root Cause Analysis: In foldLogicOfFCmps, when handling the range check idiom (lines 1505-1541), the code unions the FastMathFlags from both comparisons when creating the fabs instruction. However, for logical operations (IsLogical=true), we cannot safely union FMF because it may introduce additional poison. The comment at line 1449 in the same function notes \"TODO: We can union the fast math flags unless this is a logical select\", but this TODO wasn't addressed in the range check transformation.\n\nThe specific issue is that the lhs comparison has ninf FMF, which means it's poison for infinity inputs. The rhs comparison has no FMF, so it's well-defined for all inputs. When we create fabs with unioned FMF (including ninf), the fabs becomes poison for infinity inputs, making the entire expression more poisonous than the original.\n\n4. Proposed Edit Point(s): The fix is to intersect FMF instead of unioning them when IsLogicalSelect is true, similar to how it's handled in the earlier part of foldLogicOfFCmps (lines 1451-1452). For non-logical cases, unioning is safe, but for logical selects, we must be conservative and intersect.\n\n5. Conclusion: By changing the FMF handling in the range check transformation to intersect flags when dealing with logical selects, we ensure that the transformed code doesn't introduce additional poison. This maintains the poison semantics equivalence between source and target while still allowing the beneficial optimization for non-logical cases.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\nindex d72013ba223d..d2f0dbb8523e 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\n@@ -1531,8 +1531,12 @@ Value *InstCombinerImpl::foldLogicOfFCmps(FCmpInst *LHS, FCmpInst *RHS,\n     }\n     if (IsLessThanOrLessEqual(IsAnd ? PredL : PredR)) {\n       BuilderTy::FastMathFlagGuard Guard(Builder);\n-      Builder.setFastMathFlags(LHS->getFastMathFlags() |\n-                               RHS->getFastMathFlags());\n+      FastMathFlags FMF = IsLogicalSelect\n+                              ? (LHS->getFastMathFlags() &\n+                                 RHS->getFastMathFlags())\n+                              : (LHS->getFastMathFlags() |\n+                                 RHS->getFastMathFlags());\n+      Builder.setFastMathFlags(FMF);\n \n       Value *FAbs = Builder.CreateUnaryIntrinsic(Intrinsic::fabs, LHS0);\n       return Builder.CreateFCmp(PredL, FAbs,\n"
+  ]
+}

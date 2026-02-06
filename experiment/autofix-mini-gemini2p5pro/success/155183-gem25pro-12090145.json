@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "155183",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/155183-gem25pro-12090145.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex dad0d1e9ef55..39aa977429bf 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -11256,6 +11256,14 @@ BoUpSLP::ScalarsVectorizationLegality BoUpSLP::getScalarsVectorizationLegality(\n void BoUpSLP::buildTreeRec(ArrayRef<Value *> VLRef, unsigned Depth,\n                            const EdgeInfo &UserTreeIdx,\n                            unsigned InterleaveFactor) {\n+  // We can't vectorize terminator instructions.\n+  if (any_of(VLRef, [](Value *V) {\n+        if (auto *I = dyn_cast<Instruction>(V))\n+          return I->isTerminator();\n+        return false;\n+      }))\n+    return;\n+\n   assert((allConstant(VLRef) || allSameType(VLRef)) && \"Invalid types!\");\n \n   SmallVector<int> ReuseShuffleIndices;\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 499345,
+  "output_tokens": 14978,
+  "cached_tokens": 365134,
+  "total_tokens": 540982,
+  "chat_rounds": 31,
+  "total_time_sec": 437.5437364578247,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::BlockScheduling::extendSchedulingRegion",
+    21071
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      11685,
+      11688
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe `slp-vectorizer` is crashing with an assertion failure: `ScheduleEnd && \"tried to vectorize a terminator?\"`. This assertion is located in the `extendSchedulingRegion` function within the `BlockScheduling` class. The function's purpose is to define a contiguous region of instructions within a basic block that can be scheduled together for vectorization. The assertion fails because `ScheduleEnd`, a pointer marking the end of this region, is `nullptr`. This indicates that the scheduling region has not been properly initialized, which happens when the vectorizer attempts to process an instruction it cannot handle, such as a terminator.\n\n### 2. Analyzing `opt`'s Log\n\nThe debug log clearly shows the sequence of events leading to the crash:\n\n1.  The vectorizer identifies a potential vectorization opportunity with a group of four `phi` nodes in basic block `bb4`.\n2.  It then proceeds to analyze the incoming values for these PHI nodes from the predecessor block `bb2`. These values are `%add`, `%add1`, `%add3`, and a constant `0`.\n3.  The vectorizer recursively attempts to vectorize the operands of this new group. A key operand is `%add3`, which is defined as `add i32 %invoke, 0`. This brings the `%invoke` instruction into consideration.\n4.  A new bundle of candidate instructions is formed, which includes `%add`, `%add1`, and crucially, the `%invoke` instruction.\n5.  The log shows `SLP: Checking bundle: %add = add i32 0, 0.` followed by `SLP: initialize schedule region to %add = add i32 0, 0`. This indicates that the block scheduler is being initialized for the basic block containing `%add` (which is `bb`).\n6.  The process continues to `extendSchedulingRegion` for the other instructions in the bundle. When it reaches the `%invoke` instruction, the logic breaks down. The `invoke` instruction is a terminator, and the scheduler is not designed to handle such instructions. This leads to the `ScheduleEnd` pointer remaining `nullptr` and the subsequent assertion failure.\n\n### 3. Root Cause Analysis\n\nThe fundamental problem is that the `buildTreeRec` function, which is responsible for recursively gathering vectorization candidates, incorrectly includes a terminator instruction (`invoke`) in a list of potential instructions to vectorize. The SLP vectorizer's scheduling mechanism is designed to work on non-terminator instructions that can be reordered and bundled. Terminator instructions dictate control flow and cannot be part of such a bundle.\n\nThe logic in `buildTreeRec` gathers operands from a set of instructions to form a new candidate group. While doing so, it fails to filter out terminator instructions. When this group containing the `invoke` instruction is passed to the `tryScheduleBundle` function, the scheduler is set up for the block of the first instruction in the group. When it later encounters the `invoke` instruction, which is a terminator, the scheduling logic fails, leading to the crash.\n\n### 4. Proposed Edit Point(s)\n\nThe correct fix is to prevent terminator instructions from ever being considered as part of a vectorization candidate bundle. This can be achieved by adding a check in the operand-gathering loop within the `buildTreeRec` function.\n\n**File**: `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp`\n\n**Edit Point**: Insert the following code at line 11685, just before an operand is added to the `Operands` list.\n\n```cpp\n      if (auto *OpI = dyn_cast<Instruction>(Op)) {\n        if (OpI->isTerminator())\n          continue;\n      }\n```\n\nThis change inspects each potential operand `Op`. If it is an instruction and also a terminator, the `continue` statement skips it, preventing it from being added to the `Operands` list for further vectorization attempts. This ensures that the scheduler will not encounter terminator instructions.\n\n### 5. Conclusion\n\nThe crash is a direct result of the SLP vectorizer improperly attempting to include a terminator instruction in a vectorization bundle. The scheduler is not designed for this and fails. The proposed fix addresses the root cause by filtering out terminator instructions during the candidate gathering phase in `buildTreeRec`. This is a precise and safe correction that prevents the illegal transformation and allows the vectorizer to function correctly.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex dad0d1e9ef55..39aa977429bf 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -11256,6 +11256,14 @@ BoUpSLP::ScalarsVectorizationLegality BoUpSLP::getScalarsVectorizationLegality(\n void BoUpSLP::buildTreeRec(ArrayRef<Value *> VLRef, unsigned Depth,\n                            const EdgeInfo &UserTreeIdx,\n                            unsigned InterleaveFactor) {\n+  // We can't vectorize terminator instructions.\n+  if (any_of(VLRef, [](Value *V) {\n+        if (auto *I = dyn_cast<Instruction>(V))\n+          return I->isTerminator();\n+        return false;\n+      }))\n+    return;\n+\n   assert((allConstant(VLRef) || allSameType(VLRef)) && \"Invalid types!\");\n \n   SmallVector<int> ReuseShuffleIndices;\n"
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "command": {
+    "issue": "131488",
+    "model": "gpt-4o",
+    "driver": "openai-generic",
+    "stats": "/tmp/131488-gpt4o-12090258.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..20a9233249d3 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2543,13 +2543,17 @@ static bool OptimizeNonTrivialIFuncs(\n \n     // Discover the callee versions.\n     SmallVector<Function *> Callees;\n-    if (any_of(*Resolver, [&TTI, &Callees](BasicBlock &BB) {\n+    bool CollectionFailed = any_of(*Resolver, [&TTI, &Callees](BasicBlock &BB) {\n           if (auto *Ret = dyn_cast_or_null<ReturnInst>(BB.getTerminator()))\n             if (!collectVersions(TTI, Ret->getReturnValue(), Callees))\n               return true;\n           return false;\n-        }))\n+        });\n+\n+    if (CollectionFailed || Callees.empty()) {\n+      LLVM_DEBUG(dbgs() << \"Skipping GlobalIFunc due to empty Callees or collection failure\\n\");\n       continue;\n+    }\n \n     assert(!Callees.empty() && \"Expecting successful collection of versions\");\n \n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 306232,
+  "output_tokens": 2807,
+  "cached_tokens": 274560,
+  "total_tokens": 309039,
+  "chat_rounds": 41,
+  "total_time_sec": 168.07381653785706,
+  "trans_point": [
+    "llvm/lib/Transforms/IPO/GlobalOpt.cpp",
+    "OptimizeNonTrivialIFuncs(llvm::Module &, llvm::function_ref<llvm::TargetTransformInfo&(llvm::Function&)>)",
+    2554
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/GlobalOpt.cpp",
+      2545,
+      2553
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The issue arises because the `OptimizeNonTrivialIFuncs` function assumes that the `collectVersions` function will successfully populate the `Callees` vector with at least one version of the resolver function. However, in the provided reproducer, the resolver function `f1` contains only an `unreachable` instruction, which causes `collectVersions` to fail and leave the `Callees` vector empty. This leads to an assertion failure at line 2554.\n\n2. **Analyzing `opt`'s Log**: The log indicates that the assertion `!Callees.empty()` failed. This suggests that the `collectVersions` function did not find any valid versions for the resolver function. Debugging confirms that the resolver function `f1` is not interposable, is not a declaration, and contains a single basic block with a single `unreachable` instruction. This explains why `collectVersions` fails.\n\n3. **Root Cause Analysis**: The root cause is that the `OptimizeNonTrivialIFuncs` function does not handle the case where the resolver function contains no valid return instructions (e.g., only `unreachable`). This leads to an empty `Callees` vector and the subsequent assertion failure.\n\n4. **Proposed Edit Point(s)**: The edit point is at lines 2545-2553 in `llvm/lib/Transforms/IPO/GlobalOpt.cpp`. The code should be modified to explicitly check whether `collectVersions` succeeds and handle the case where it fails (e.g., by skipping the current `GlobalIFunc` or emitting a diagnostic message).\n\n5. **Conclusion**: The proposed fix ensures that the `OptimizeNonTrivialIFuncs` function gracefully handles resolver functions with no valid return instructions, preventing the assertion failure and allowing the optimization pass to continue processing other `GlobalIFunc` objects.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..091153b522fd 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2551,7 +2551,10 @@ static bool OptimizeNonTrivialIFuncs(\n         }))\n       continue;\n \n-    assert(!Callees.empty() && \"Expecting successful collection of versions\");\n+    if (Callees.empty()) {\n+  LLVM_DEBUG(dbgs() << \"Skipping GlobalIFunc due to empty Callees\\n\");\n+  continue;\n+}\n \n     LLVM_DEBUG(dbgs() << \"Statically resolving calls to function \"\n                       << Resolver->getName() << \"\\n\");\n",
+    "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..2a69cca9a353 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2551,7 +2551,10 @@ static bool OptimizeNonTrivialIFuncs(\n         }))\n       continue;\n \n-    assert(!Callees.empty() && \"Expecting successful collection of versions\");\n+    if (Callees.empty()) {\n+  LLVM_DEBUG(dbgs() << \"Skipping GlobalIFunc due to empty Callees\\n\");\n+  assert(!Callees.empty() && \"Expecting successful collection of versions\");\n+}\n \n     LLVM_DEBUG(dbgs() << \"Statically resolving calls to function \"\n                       << Resolver->getName() << \"\\n\");\n",
+    "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..091153b522fd 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2551,7 +2551,10 @@ static bool OptimizeNonTrivialIFuncs(\n         }))\n       continue;\n \n-    assert(!Callees.empty() && \"Expecting successful collection of versions\");\n+    if (Callees.empty()) {\n+  LLVM_DEBUG(dbgs() << \"Skipping GlobalIFunc due to empty Callees\\n\");\n+  continue;\n+}\n \n     LLVM_DEBUG(dbgs() << \"Statically resolving calls to function \"\n                       << Resolver->getName() << \"\\n\");\n",
+    "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..20a9233249d3 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2543,13 +2543,17 @@ static bool OptimizeNonTrivialIFuncs(\n \n     // Discover the callee versions.\n     SmallVector<Function *> Callees;\n-    if (any_of(*Resolver, [&TTI, &Callees](BasicBlock &BB) {\n+    bool CollectionFailed = any_of(*Resolver, [&TTI, &Callees](BasicBlock &BB) {\n           if (auto *Ret = dyn_cast_or_null<ReturnInst>(BB.getTerminator()))\n             if (!collectVersions(TTI, Ret->getReturnValue(), Callees))\n               return true;\n           return false;\n-        }))\n+        });\n+\n+    if (CollectionFailed || Callees.empty()) {\n+      LLVM_DEBUG(dbgs() << \"Skipping GlobalIFunc due to empty Callees or collection failure\\n\");\n       continue;\n+    }\n \n     assert(!Callees.empty() && \"Expecting successful collection of versions\");\n \n"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "113997",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/113997-gem25pro-12121928.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 401592,
+  "output_tokens": 14192,
+  "cached_tokens": 350075,
+  "total_tokens": 428843,
+  "chat_rounds": 29,
+  "total_time_sec": 785.5228450298309,
+  "trans_point": [
+    "llvm/lib/Transforms/Scalar/GVN.cpp",
+    "patchAndReplaceAllUsesWith",
+    2194
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/GVN.cpp",
+      2742,
+      2742
+    ]
+  ],
+  "reason_thou": "The issue is an incorrect transformation in GVN where an instruction is replaced by a congruent one with incompatible `!range` metadata. This leads to `poison` values being introduced incorrectly.\n\n**1. Understanding the Issue:**\nGVN replaces `%ctpop2` with `%ctpop1` because they are congruent `llvm.ctpop.i32(%x)` calls. However, `%ctpop1` has `range(1, 32)` and `%ctpop2` has `range(0, 33)`. When `%x` is 0, `%ctpop` is 0. The original code is correct because 0 is in `[0, 33)`. The transformed code is incorrect because 0 is not in `[1, 32)`, making the value `poison`.\n\n**2. Analyzing `opt`'s Log:**\nThe log `GVN removed: %ctpop2 = ...` confirms that GVN performs the problematic replacement.\n\n**3. Root Cause Analysis:**\nThe root cause is that GVN's instruction comparison logic for CSE does not account for `!range` metadata. When replacing an instruction `I` with a value `V`, it doesn't check if the metadata is compatible. The replacement is only safe if the range of `V` contains the range of `I`. If `V` has a narrower range, it can invalidate uses of `I` that relied on the wider range.\n\n**4. Proposed Edit Point(s):**\nThe fix is to add a check in `GVN::processInstruction` before replacing an instruction. This check will compare the `!range` metadata of the instruction to be replaced (`I`) and the replacement value (`V`). The replacement will be aborted if both have `!range` metadata and the range of `V` does not contain the range of `I`.\n\n```cpp\n          // Check for range metadata.\n          if (I->hasMetadata(LLVMContext::MD_range) &&\n              V->hasMetadata(LLVMContext::MD_range)) {\n            ConstantRange RangeI = I->getMetadata(LLVMContext::MD_range)\n                                       ->getOperand(0)\n                                       .get()\n                                       ->getConstantRange();\n            ConstantRange RangeV = V->getMetadata(LLVMContext::MD_range)\n                                       ->getOperand(0)\n                                       .get()\n                                       ->getConstantRange();\n            if (!RangeV.contains(RangeI))\n              continue;\n          }\n```\nThis code should be inserted at line 2742 in `llvm/lib/Transforms/Scalar/GVN.cpp`, just before the call to `patchAndReplaceAllUsesWith`.\n\n**5. Conclusion:**\nThis patch will make GVN aware of `!range` metadata, preventing it from making replacements that would incorrectly narrow the promised range of a value. This will fix the reported miscompilation and make GVN safer in the presence of range metadata.",
+  "test_traj": []
+}

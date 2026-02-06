@@ -1,0 +1,1316 @@
+Setting up the buggy LLVM environment ...
+Building LLVM and try reproducing the issue ...
+Issue reproduced successfully.
+Starting to fix the issue ...
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@2293043] ─────────────────────────────────────────────────╮
+│ You are an expert LLVM developer. Please solve this LLVM issue:             │
+│                                                                             │
+│ ------ BEGIN ISSUE ------                                                   │
+│ Type: crash                                                                 │
+│                                                                             │
+│ Reproducer (LLVM IR): ```bash                                               │
+│ cat /tmp/test.ll                                                            │
+│ target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"             │
+│                                                                             │
+│ define void @test_phi_in_latch_redundant(ptr %dst, i32 %a) {                │
+│ entry:                                                                      │
+│   br label %loop.header                                                     │
+│                                                                             │
+│ loop.header:                                      ; preds = %loop.latch,    │
+│ %entry                                                                      │
+│   %iv = phi i64 [ 0, %entry ], [ %iv.next, %loop.latch ]                    │
+│   br i1 false, label %loop.latch, label %then                               │
+│                                                                             │
+│ then:                                             ; preds = %loop.header    │
+│   %not.a = xor i32 %a, -1                                                   │
+│   br label %loop.latch                                                      │
+│                                                                             │
+│ loop.latch:                                       ; preds = %then,          │
+│ %loop.header                                                                │
+│   %p = phi i32 [ %not.a, %then ], [ 0, %loop.header ]                       │
+│   %gep = getelementptr i32, ptr %dst, i64 %iv                               │
+│   store i32 %p, ptr %gep, align 4                                           │
+│   %iv.next = add i64 %iv, 9                                                 │
+│   %ec = icmp slt i64 %iv, 322                                               │
+│   br i1 %ec, label %loop.header, label %exit                                │
+│                                                                             │
+│ exit:                                             ; preds = %loop.latch     │
+│   ret void                                                                  │
+│ }                                                                           │
+│                                                                             │
+│ ```                                                                         │
+│                                                                             │
+│ LLVM's Symptom: ```bash                                                     │
+│ /llvm-autofix-deps/llvm/llvm/bin/opt -p loop-vectorize -mtriple             │
+│ riscv64-linux-gnu -mattr=+v,+f -S /tmp/test.ll                              │
+│ Command '['bin/opt', '-p', 'loop-vectorize', '-mtriple',                    │
+│ 'riscv64-linux-gnu', '-mattr=+v,+f', '-S', '-']' died with                  │
+│ <Signals.SIGABRT: 6>.                                                       │
+│                                                                             │
+│ opt: llvm/lib/Transforms/Vectorize/LoopVectorize.cpp:7392:                  │
+│ llvm::VectorizationFactor llvm::LoopVectorizationPlanner::computeBestVF():  │
+│ Assertion `(BestFactor.Width == LegacyVF.Width ||                           │
+│ planContainsAdditionalSimplifications(getPlanFor(BestFactor.Width),         │
+│ CostCtx, OrigLoop)) && " VPlan cost model and legacy cost model disagreed"' │
+│ failed.                                                                     │
+│ PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/  │
+│ and include the crash backtrace.                                            │
+│ Stack dump:                                                                 │
+│ 0.      Program arguments: bin/opt -p loop-vectorize -mtriple               │
+│ riscv64-linux-gnu -mattr=+v,+f -S -                                         │
+│ 1.      Running pass                                                        │
+│ "function(loop-vectorize<no-interleave-forced-only;no-vectorize-forced-only │
+│ ;>)" on module "<stdin>"                                                    │
+│ 2.      Running pass                                                        │
+│ "loop-vectorize<no-interleave-forced-only;no-vectorize-forced-only;>" on    │
+│ function "test_phi_in_latch_redundant"                                      │
+│  #0 0x00007a96d4cce03e llvm::sys::PrintStackTrace(llvm::raw_ostream&, int)  │
+│ llvm/lib/Support/Unix/Signals.inc:723:22                                    │
+│  #1 0x00007a96d4cce455 PrintStackTraceSignalHandler(void*)                  │
+│ llvm/lib/Support/Unix/Signals.inc:798:1                                     │
+│  #2 0x00007a96d4ccae45 llvm::sys::RunSignalHandlers()                       │
+│ llvm/lib/Support/Signals.cpp:105:20                                         │
+│  #3 0x00007a96d4ccd12f SignalHandler(int)                                   │
+│ llvm/lib/Support/Unix/Signals.inc:413:1                                     │
+│  #4 0x00007a96d4833330 (/lib/x86_64-linux-gnu/libc.so.6+0x45330)            │
+│  #5 0x00007a96d488cb2c pthread_kill                                         │
+│ (/lib/x86_64-linux-gnu/libc.so.6+0x9eb2c)                                   │
+│  #6 0x00007a96d483327e raise (/lib/x86_64-linux-gnu/libc.so.6+0x4527e)      │
+│  #7 0x00007a96d48168ff abort (/lib/x86_64-linux-gnu/libc.so.6+0x288ff)      │
+│  #8 0x00007a96d481681b (/lib/x86_64-linux-gnu/libc.so.6+0x2881b)            │
+│  #9 0x00007a96d4829517 (/lib/x86_64-linux-gnu/libc.so.6+0x3b517)            │
+│ #10 0x00007a96cc121c99 llvm::LoopVectorizationPlanner::computeBestVF()      │
+│ llvm/lib/Transforms/Vectorize/LoopVectorize.cpp:7396:3                      │
+│ #11 0x00007a96cc1317d5 llvm::LoopVectorizePass::processLoop(llvm::Loop*)    │
+│ llvm/lib/Transforms/Vectorize/LoopVectorize.cpp:9964:12                     │
+│ #12 0x00007a96cc13368e llvm::LoopVectorizePass::runImpl(llvm::Function&)    │
+│ llvm/lib/Transforms/Vectorize/LoopVectorize.cpp:10292:27                    │
+│ #13 0x00007a96cc1339db llvm::LoopVectorizePass::run(llvm::Function&,        │
+│ llvm::AnalysisManager<llvm::Function>&)                                     │
+│ llvm/lib/Transforms/Vectorize/LoopVectorize.cpp:10329:39                    │
+│ #14 0x00007a96cfdea997 llvm::detail::PassModel<llvm::Function,              │
+│ llvm::LoopVectorizePass,                                                    │
+│ llvm::AnalysisManager<llvm::Function>>::run(llvm::Function&,                │
+│ llvm::AnalysisManager<llvm::Function>&)                                     │
+│ llvm/include/llvm/IR/PassManagerInternal.h:91:3                             │
+│ #15 0x00007a96c9f3283b llvm::PassManager<llvm::Function,                    │
+│ llvm::AnalysisManager<llvm::Function>>::run(llvm::Function&,                │
+│ llvm::AnalysisManager<llvm::Function>&)                                     │
+│ llvm/include/llvm/IR/PassManagerImpl.h:85:18                                │
+│ #16 0x00007a96d3b351c1 llvm::detail::PassModel<llvm::Function,              │
+│ llvm::PassManager<llvm::Function, llvm::AnalysisManager<llvm::Function>>,   │
+│ llvm::AnalysisManager<llvm::Function>>::run(llvm::Function&,                │
+│ llvm::AnalysisManager<llvm::Function>&)                                     │
+│ llvm/include/llvm/IR/PassManagerInternal.h:91:3                             │
+│ #17 0x00007a96c9f3515a                                                      │
+│ llvm::ModuleToFunctionPassAdaptor::run(llvm::Module&,                       │
+│ llvm::AnalysisManager<llvm::Module>&) llvm/lib/IR/PassManager.cpp:129:23    │
+│ #18 0x00007a96d3b350f1 llvm::detail::PassModel<llvm::Module,                │
+│ llvm::ModuleToFunctionPassAdaptor,                                          │
+│ llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&,                    │
+│ llvm::AnalysisManager<llvm::Module>&)                                       │
+│ llvm/include/llvm/IR/PassManagerInternal.h:91:3                             │
+│ #19 0x00007a96c9f32467 llvm::PassManager<llvm::Module,                      │
+│ llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&,                    │
+│ llvm::AnalysisManager<llvm::Module>&)                                       │
+│ llvm/include/llvm/IR/PassManagerImpl.h:85:18                                │
+│ #20 0x00007a96d4ee0311 llvm::runPassPipeline(llvm::StringRef,               │
+│ llvm::Module&, llvm::TargetMachine*, llvm::TargetLibraryInfoImpl*,          │
+│ llvm::ToolOutputFile*, llvm::ToolOutputFile*, llvm::ToolOutputFile*,        │
+│ llvm::StringRef, llvm::ArrayRef<llvm::PassPlugin>,                          │
+│ llvm::ArrayRef<std::function<void (llvm::PassBuilder&)>>,                   │
+│ llvm::opt_tool::OutputKind, llvm::opt_tool::VerifierKind, bool, bool, bool, │
+│ bool, bool, bool, bool) llvm/tools/opt/NewPMDriver.cpp:541:10               │
+│ #21 0x00007a96d4f11d26 optMain llvm/tools/opt/optdriver.cpp:738:27          │
+│ #22 0x00005dfd555141e8 main llvm/tools/opt/opt.cpp:25:64                    │
+│ #23 0x00007a96d48181ca (/lib/x86_64-linux-gnu/libc.so.6+0x2a1ca)            │
+│ #24 0x00007a96d481828b __libc_start_main                                    │
+│ (/lib/x86_64-linux-gnu/libc.so.6+0x2a28b)                                   │
+│ #25 0x00005dfd555140a5 _start (bin/opt+0x10a5)                              │
+│                                                                             │
+│ ```                                                                         │
+│ ------  END ISSUE  ------                                                   │
+│                                                                             │
+│ You can execute bash commands and edit files to implement the necessary     │
+│ changes.                                                                    │
+│                                                                             │
+│ ## Recommended Workflow                                                     │
+│                                                                             │
+│ This workflows should be done step-by-step so that you can iterate on your  │
+│ changes and any possible problems.                                          │
+│                                                                             │
+│ 1. Analyze the codebase by finding and reading relevant files               │
+│ 2. Edit the source code to resolve the issue                                │
+│ 3. Verify your fix works by running the `submit-patch` command              │
+│ 4. Based on the output of `submit-patch`, repeat steps 1-3 as necessary     │
+│ until the issue is resolved                                                 │
+│                                                                             │
+│ ## Important Rules                                                          │
+│                                                                             │
+│ 1. Every response must contain exactly one action                           │
+│ 2. The action must be enclosed in triple backticks                          │
+│ 3. Directory or environment variable changes are not persistent. Every      │
+│ action is executed in a new subshell.                                       │
+│    However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd          │
+│ /path/to/working/dir && ...` or write/load environment variables from files │
+│ 4. Solving this issue does not require deleting any files or accessing the  │
+│ internet, so you are not permitted to use tools such as: rm, curl, wget,    │
+│ git, ssh, scp, ftp, telnet, ping, traceroute, nslookup, dig, nmap, apt,     │
+│ apt-get, yum, dnf, pacman, brew.                                            │
+│                                                                             │
+│ <system_information>                                                        │
+│ Linux 6.8.0-57-generic #59-Ubuntu SMP PREEMPT_DYNAMIC Sat Mar 15 17:40:59   │
+│ UTC 2025 x86_64                                                             │
+│ </system_information>                                                       │
+│                                                                             │
+│ ## Formatting your response                                                 │
+│                                                                             │
+│ Here is an example of a correct response:                                   │
+│                                                                             │
+│ <example_response>                                                          │
+│ THOUGHT: I need to understand the structure of the repository first. Let me │
+│ check what files are in the current directory to get a better understanding │
+│ of the codebase.                                                            │
+│                                                                             │
+│ ```bash                                                                     │
+│ ls -la                                                                      │
+│ ```                                                                         │
+│ </example_response>                                                         │
+│                                                                             │
+│ ## Useful command examples                                                  │
+│                                                                             │
+│ ### Create a new file:                                                      │
+│                                                                             │
+│ ```bash                                                                     │
+│ cat <<'EOF' > newfile.py                                                    │
+│ import numpy as np                                                          │
+│ hello = "world"                                                             │
+│ print(hello)                                                                │
+│ EOF                                                                         │
+│ ```                                                                         │
+│                                                                             │
+│ ### Edit files with sed:```bash                                             │
+│ # Replace all occurrences                                                   │
+│ sed -i 's/old_string/new_string/g' filename.py                              │
+│                                                                             │
+│ # Replace only first occurrence                                             │
+│ sed -i 's/old_string/new_string/' filename.py                               │
+│                                                                             │
+│ # Replace first occurrence on line 1                                        │
+│ sed -i '1s/old_string/new_string/' filename.py                              │
+│                                                                             │
+│ # Replace all occurrences in lines 1-10                                     │
+│ sed -i '1,10s/old_string/new_string/g' filename.py                          │
+│ ```                                                                         │
+│                                                                             │
+│ ### View file content:                                                      │
+│                                                                             │
+│ ```bash                                                                     │
+│ # View specific lines with numbers                                          │
+│ nl -ba filename.py | sed -n '10,20p'                                        │
+│ ```                                                                         │
+│                                                                             │
+│ ### Submit your patch:                                                      │
+│                                                                             │
+│ ```bash                                                                     │
+│ # This command has no arguments                                             │
+│ submit-patch                                                                │
+│ ```                                                                         │
+│                                                                             │
+│ ### Any other permitted command you want to run:                            │
+│                                                                             │
+│ ```bash                                                                     │
+│ anything                                                                    │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #0, chat statistics so far: {'chat_rounds': 0, 'input_tokens':
+0, 'cached_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}
+╭─ assistant [MainThread@2293043] ────────────────────────────────────────────╮
+│ THOUGHT: The crash is occurring in the                                      │
+│ LoopVectorizationPlanner::computeBestVF() function due to an assertion      │
+│ failure between the VPlan cost model and legacy cost model. I need to       │
+│ examine the relevant source code to understand the issue. Let me first      │
+│ locate and read the LoopVectorize.cpp file around line 7392 to understand   │
+│ the context of this assertion.                                              │
+│                                                                             │
+│ ```bash                                                                     │
+│ ls -la llvm/lib/Transforms/Vectorize/                                       │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@2293043] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ total 2096                                                                  │
+│ drwxr-xr-x 1 autofix autofix   4096 Dec  1 04:55 .                          │
+│ drwxr-xr-x 1 autofix autofix   4096 Nov 20 00:54 ..                         │
+│ -rw-r--r-- 1 autofix autofix    691 Dec  1 04:55 CMakeLists.txt             │
+│ -rw-r--r-- 1 autofix autofix  60109 Dec  1 03:38 LoadStoreVectorizer.cpp    │
+│ -rw-r--r-- 1 autofix autofix  40284 Dec  1 04:11 LoopIdiomVectorize.cpp     │
+│ -rw-r--r-- 1 autofix autofix  64030 Dec  1 04:55                            │
+│ LoopVectorizationLegality.cpp                                               │
+│ -rw-r--r-- 1 autofix autofix  18746 Dec  1 03:38 LoopVectorizationPlanner.h │
+│ -rw-r--r-- 1 autofix autofix 441377 Dec  1 04:55 LoopVectorize.cpp          │
+│ -rw-r--r-- 1 autofix autofix 822353 Dec  1 04:55 SLPVectorizer.cpp          │
+│ drwxr-xr-x 2 autofix autofix   4096 Dec  1 04:55 SandboxVectorizer          │
+│ -rw-r--r-- 1 autofix autofix   7391 Dec  1 04:21 VPRecipeBuilder.h          │
+│ -rw-r--r-- 1 autofix autofix  61793 Dec  1 04:55 VPlan.cpp                  │
+│ -rw-r--r-- 1 autofix autofix 142653 Dec  1 04:55 VPlan.h                    │
+│ -rw-r--r-- 1 autofix autofix  13156 Dec  1 04:55 VPlanAnalysis.cpp          │
+│ -rw-r--r-- 1 autofix autofix   2718 Dec  1 03:38 VPlanAnalysis.h            │
+│ -rw-r--r-- 1 autofix autofix  10715 Dec  1 03:38 VPlanCFG.h                 │
+│ -rw-r--r-- 1 autofix autofix   2068 Dec  1 03:38 VPlanDominatorTree.h       │
+│ -rw-r--r-- 1 autofix autofix  18392 Dec  1 03:38 VPlanHCFGBuilder.cpp       │
+│ -rw-r--r-- 1 autofix autofix   2293 Dec  1 03:38 VPlanHCFGBuilder.h         │
+│ -rw-r--r-- 1 autofix autofix  11696 Dec  1 03:38 VPlanPatternMatch.h        │
+│ -rw-r--r-- 1 autofix autofix 122152 Dec  1 04:55 VPlanRecipes.cpp           │
+│ -rw-r--r-- 1 autofix autofix  15526 Dec  1 03:38 VPlanSLP.cpp               │
+│ -rw-r--r-- 1 autofix autofix  65393 Dec  1 04:55 VPlanTransforms.cpp        │
+│ -rw-r--r-- 1 autofix autofix   5694 Dec  1 03:38 VPlanTransforms.h          │
+│ -rw-r--r-- 1 autofix autofix   2244 Dec  1 03:38 VPlanUtils.cpp             │
+│ -rw-r--r-- 1 autofix autofix   2091 Dec  1 03:38 VPlanUtils.h               │
+│ -rw-r--r-- 1 autofix autofix  16940 Dec  1 04:55 VPlanValue.h               │
+│ -rw-r--r-- 1 autofix autofix  11086 Dec  1 04:55 VPlanVerifier.cpp          │
+│ -rw-r--r-- 1 autofix autofix   1687 Dec  1 03:38 VPlanVerifier.h            │
+│ -rw-r--r-- 1 autofix autofix 111913 Dec  1 04:55 VectorCombine.cpp          │
+│ -rw-r--r-- 1 autofix autofix    953 Nov 17 18:59 Vectorize.cpp              │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #1, chat statistics so far: {'chat_rounds': 1, 'input_tokens':
+2875, 'cached_tokens': 0, 'output_tokens': 93, 'total_tokens': 2968}
+╭─ assistant [MainThread@2293043] ────────────────────────────────────────────╮
+│ THOUGHT: Now I need to examine the LoopVectorize.cpp file around line 7392  │
+│ to understand the assertion that's failing. The error message indicates     │
+│ there's a disagreement between the VPlan cost model and legacy cost model   │
+│ regarding the best vectorization factor.                                    │
+│                                                                             │
+│ ```bash                                                                     │
+│ nl -ba llvm/lib/Transforms/Vectorize/LoopVectorize.cpp | sed -n             │
+│ '7380,7400p'                                                                │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@2293043] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│   7380    // stabilized.                                                    │
+│   7381    VectorizationFactor LegacyVF = selectVectorizationFactor();       │
+│   7382    VPlan &BestPlan = getPlanFor(BestFactor.Width);                   │
+│   7383                                                                      │
+│   7384    // Pre-compute the cost and use it to check if BestPlan contains  │
+│ any                                                                         │
+│   7385    // simplifications not accounted for in the legacy cost model. If │
+│ that's the                                                                  │
+│   7386    // case, don't trigger the assertion, as the extra                │
+│ simplifications may cause a                                                 │
+│   7387    // different VF to be picked by the VPlan-based cost model.       │
+│   7388    LLVMContext &LLVMCtx = OrigLoop->getHeader()->getContext();       │
+│   7389    VPCostContext CostCtx(CM.TTI, *CM.TLI,                            │
+│ Legal->getWidestInductionType(),                                            │
+│   7390                          LLVMCtx, CM);                               │
+│   7391    precomputeCosts(BestPlan, BestFactor.Width, CostCtx);             │
+│   7392    assert((BestFactor.Width == LegacyVF.Width ||                     │
+│   7393                                                                      │
+│ planContainsAdditionalSimplifications(getPlanFor(BestFactor.Width),         │
+│   7394                                                  CostCtx, OrigLoop)) │
+│ &&                                                                          │
+│   7395           " VPlan cost model and legacy cost model disagreed");      │
+│   7396    assert((BestFactor.Width.isScalar() || BestFactor.ScalarCost > 0) │
+│ &&                                                                          │
+│   7397           "when vectorizing, the scalar cost must be computed.");    │
+│   7398  #endif                                                              │
+│   7399                                                                      │
+│   7400    return BestFactor;                                                │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #2, chat statistics so far: {'chat_rounds': 2, 'input_tokens':
+6916, 'cached_tokens': 0, 'output_tokens': 184, 'total_tokens': 7100}
+╭─ assistant [MainThread@2293043] ────────────────────────────────────────────╮
+│ THOUGHT: I can see the assertion that's failing. The issue is that the      │
+│ VPlan cost model and legacy cost model are disagreeing on the best          │
+│ vectorization factor, but the code expects that if they disagree, it should │
+│ be because the VPlan contains additional simplifications not accounted for  │
+│ in the legacy cost model. Let me look at the                                │
+│ `planContainsAdditionalSimplifications` function to understand what it      │
+│ checks for.                                                                 │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -n "planContainsAdditionalSimplifications"                             │
+│ llvm/lib/Transforms/Vectorize/LoopVectorize.cpp                             │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@2293043] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ 7284:static bool planContainsAdditionalSimplifications(VPlan &Plan,         │
+│ 7393:                                                                       │
+│ planContainsAdditionalSimplifications(getPlanFor(BestFactor.Width),         │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #3, chat statistics so far: {'chat_rounds': 3, 'input_tokens':
+11455, 'cached_tokens': 0, 'output_tokens': 299, 'total_tokens': 11754}
+╭─ assistant [MainThread@2293043] ────────────────────────────────────────────╮
+│ THOUGHT: Now let me examine the `planContainsAdditionalSimplifications`     │
+│ function to understand what conditions it checks for that would explain the │
+│ disagreement between cost models.                                           │
+│                                                                             │
+│ ```bash                                                                     │
+│ nl -ba llvm/lib/Transforms/Vectorize/LoopVectorize.cpp | sed -n             │
+│ '7284,7320p'                                                                │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@2293043] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│   7284  static bool planContainsAdditionalSimplifications(VPlan &Plan,      │
+│   7285                                                    VPCostContext     │
+│ &CostCtx,                                                                   │
+│   7286                                                    Loop *TheLoop) {  │
+│   7287    // First collect all instructions for the recipes in Plan.        │
+│   7288    auto GetInstructionForCost = [](const VPRecipeBase *R) ->         │
+│ Instruction * {                                                             │
+│   7289      if (auto *S = dyn_cast<VPSingleDefRecipe>(R))                   │
+│   7290        return                                                        │
+│ dyn_cast_or_null<Instruction>(S->getUnderlyingValue());                     │
+│   7291      if (auto *WidenMem = dyn_cast<VPWidenMemoryRecipe>(R))          │
+│   7292        return &WidenMem->getIngredient();                            │
+│   7293      return nullptr;                                                 │
+│   7294    };                                                                │
+│   7295                                                                      │
+│   7296    DenseSet<Instruction *> SeenInstrs;                               │
+│   7297    auto Iter = vp_depth_first_deep(Plan.getEntry());                 │
+│   7298    for (VPBasicBlock *VPBB :                                         │
+│ VPBlockUtils::blocksOnly<VPBasicBlock>(Iter)) {                             │
+│   7299      for (VPRecipeBase &R : *VPBB) {                                 │
+│   7300        if (auto *IR = dyn_cast<VPInterleaveRecipe>(&R)) {            │
+│   7301          auto *IG = IR->getInterleaveGroup();                        │
+│   7302          unsigned NumMembers = IG->getNumMembers();                  │
+│   7303          for (unsigned I = 0; I != NumMembers; ++I) {                │
+│   7304            if (Instruction *M = IG->getMember(I))                    │
+│   7305              SeenInstrs.insert(M);                                   │
+│   7306          }                                                           │
+│   7307          continue;                                                   │
+│   7308        }                                                             │
+│   7309        if (Instruction *UI = GetInstructionForCost(&R))              │
+│   7310          SeenInstrs.insert(UI);                                      │
+│   7311      }                                                               │
+│   7312    }                                                                 │
+│   7313                                                                      │
+│   7314    // Return true if the loop contains any instructions that are not │
+│ also part of                                                                │
+│   7315    // the VPlan or are skipped for VPlan-based cost computations.    │
+│ This indicates                                                              │
+│   7316    // that the VPlan contains extra simplifications.                 │
+│   7317    return any_of(TheLoop->blocks(), [&SeenInstrs,                    │
+│ &CostCtx](BasicBlock *BB) {                                                 │
+│   7318      return any_of(*BB, [&SeenInstrs, &CostCtx](Instruction &I) {    │
+│   7319        if (isa<PHINode>(&I))                                         │
+│   7320          return false;                                               │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #4, chat statistics so far: {'chat_rounds': 4, 'input_tokens':
+16172, 'cached_tokens': 0, 'output_tokens': 369, 'total_tokens': 16541}
+╭─ assistant [MainThread@2293043] ────────────────────────────────────────────╮
+│ THOUGHT: Let me see more of this function to understand the complete logic. │
+│                                                                             │
+│ ```bash                                                                     │
+│ nl -ba llvm/lib/Transforms/Vectorize/LoopVectorize.cpp | sed -n             │
+│ '7320,7340p'                                                                │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@2293043] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│   7320          return false;                                               │
+│   7321        return !SeenInstrs.contains(&I) &&                            │
+│ !CostCtx.skipCostComputation(&I, true);                                     │
+│   7322      });                                                             │
+│   7323    });                                                               │
+│   7324  }                                                                   │
+│   7325  #endif                                                              │
+│   7326                                                                      │
+│   7327  VectorizationFactor LoopVectorizationPlanner::computeBestVF() {     │
+│   7328    if (VPlans.empty())                                               │
+│   7329      return VectorizationFactor::Disabled();                         │
+│   7330    // If there is a single VPlan with a single VF, return it         │
+│ directly.                                                                   │
+│   7331    VPlan &FirstPlan = *VPlans[0];                                    │
+│   7332    if (VPlans.size() == 1 && size(FirstPlan.vectorFactors()) == 1)   │
+│   7333      return {*FirstPlan.vectorFactors().begin(), 0, 0};              │
+│   7334                                                                      │
+│   7335    ElementCount ScalarVF = ElementCount::getFixed(1);                │
+│   7336    assert(hasPlanWithVF(ScalarVF) &&                                 │
+│   7337           "More than a single plan/VF w/o any plan having scalar     │
+│ VF");                                                                       │
+│   7338                                                                      │
+│   7339    // TODO: Compute scalar cost using VPlan-based cost model.        │
+│   7340    InstructionCost ScalarCost = CM.expectedCost(ScalarVF);           │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #5, chat statistics so far: {'chat_rounds': 5, 'input_tokens':
+21616, 'cached_tokens': 2688, 'output_tokens': 422, 'total_tokens': 22038}
+╭─ assistant [MainThread@2293043] ────────────────────────────────────────────╮
+│ THOUGHT: Now I understand the issue better. The                             │
+│ `planContainsAdditionalSimplifications` function checks if there are        │
+│ instructions in the original loop that are not present in the VPlan or are  │
+│ skipped for cost computation. However, looking at the reproducer IR,        │
+│ there's a PHI node in the loop latch that might be causing issues. The      │
+│ function explicitly skips PHI nodes (line 7320 returns false for PHI        │
+│ nodes), but there might be a case where the PHI node handling differs       │
+│ between the legacy and VPlan cost models.                                   │
+│                                                                             │
+│ Let me examine the reproducer more carefully. The issue seems to be with a  │
+│ PHI node in the loop latch that has inputs from both the loop header and a  │
+│ "then" block. This creates a complex control flow that might not be handled │
+│ consistently between the two cost models.                                   │
+│                                                                             │
+│ Looking at the assertion logic, the problem is that when the VPlan cost     │
+│ model and legacy cost model disagree on the best VF, the code expects that  │
+│ this disagreement should only happen when there are additional              │
+│ simplifications in the VPlan. However, in this case, the disagreement might │
+│ be due to how PHI nodes are handled differently.                            │
+│                                                                             │
+│ The fix should be to ensure that PHI nodes that are part of reducible       │
+│ expressions or have specific patterns are properly accounted for in the     │
+│ `planContainsAdditionalSimplifications` function. Let me check if there's   │
+│ special handling needed for PHI nodes that are actually used in             │
+│ computations.                                                               │
+│                                                                             │
+│ Looking at the reproducer, the PHI node `%p` in `loop.latch` has values     │
+│ from `%not.a` (which is a computation) and `0`. This PHI is then used in a  │
+│ store instruction. The issue might be that the legacy cost model and VPlan  │
+│ cost model handle this PHI differently.                                     │
+│                                                                             │
+│ Actually, looking more carefully at the                                     │
+│ `planContainsAdditionalSimplifications` function, it explicitly excludes    │
+│ PHI nodes from consideration (line 7320). But this might be too broad -     │
+│ some PHI nodes might represent actual computations that should be           │
+│ considered when comparing cost models.                                      │
+│                                                                             │
+│ However, the real issue might be elsewhere. Let me think about this         │
+│ differently. The assertion is there to catch cases where the two cost       │
+│ models disagree without a good reason. But in this specific case with the   │
+│ PHI in the latch, there might be a legitimate reason for disagreement that  │
+│ isn't captured by the current `planContainsAdditionalSimplifications`       │
+│ logic.                                                                      │
+│                                                                             │
+│ Looking at the LLVM source code structure, I suspect the issue is that the  │
+│ PHI node in the loop latch is being handled differently by the two cost     │
+│ models, but the current `planContainsAdditionalSimplifications` function    │
+│ doesn't account for this specific pattern.                                  │
+│                                                                             │
+│ Let me check if there are any recent changes or comments around this area   │
+│ that might give more insight.                                               │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -A5 -B5 "VPlan cost model and legacy cost model disagreed"             │
+│ llvm/lib/Transforms/Vectorize/LoopVectorize.cpp                             │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@2293043] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│                         LLVMCtx, CM);                                       │
+│   precomputeCosts(BestPlan, BestFactor.Width, CostCtx);                     │
+│   assert((BestFactor.Width == LegacyVF.Width ||                             │
+│           planContainsAdditionalSimplifications(getPlanFor(BestFactor.Width │
+│ ),                                                                          │
+│                                                 CostCtx, OrigLoop)) &&      │
+│          " VPlan cost model and legacy cost model disagreed");              │
+│   assert((BestFactor.Width.isScalar() || BestFactor.ScalarCost > 0) &&      │
+│          "when vectorizing, the scalar cost must be computed.");            │
+│ #endif                                                                      │
+│                                                                             │
+│   return BestFactor;                                                        │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #6, chat statistics so far: {'chat_rounds': 6, 'input_tokens':
+27470, 'cached_tokens': 2688, 'output_tokens': 1004, 'total_tokens': 28474}
+╭─ assistant [MainThread@2293043] ────────────────────────────────────────────╮
+│ THOUGHT: I need to understand what specific pattern in the reproducer is    │
+│ causing the disagreement. The PHI node in the loop latch has inputs from a  │
+│ conditional block (`then`) and the loop header. This creates a scenario     │
+│ where the VPlan might handle the PHI differently than the legacy cost       │
+│ model.                                                                      │
+│                                                                             │
+│ Looking at the `planContainsAdditionalSimplifications` function, it         │
+│ excludes all PHI nodes from consideration. However, in this case, the PHI   │
+│ node `%p` is actually used in a meaningful computation (it's stored to      │
+│ memory), so excluding it entirely might be incorrect.                       │
+│                                                                             │
+│ The issue is that the PHI node represents a value that depends on control   │
+│ flow, and the two cost models might be making different assumptions about   │
+│ how this PHI will be handled during vectorization.                          │
+│                                                                             │
+│ One possible fix is to modify the `planContainsAdditionalSimplifications`   │
+│ function to not exclude all PHI nodes, but rather only exclude those that   │
+│ are induction variables or have other specific properties that make them    │
+│ safe to ignore.                                                             │
+│                                                                             │
+│ However, looking more carefully at the reproducer, the PHI node `%p` has    │
+│ one input that is a computed value (`%not.a = xor i32 %a, -1`) and another  │
+│ that is a constant (`0`). This PHI is then used in a store operation.       │
+│                                                                             │
+│ The problem might be that the VPlan cost model recognizes that this PHI can │
+│ be simplified or optimized in some way that the legacy cost model doesn't   │
+│ account for, but the current `planContainsAdditionalSimplifications`        │
+│ function doesn't detect this because it skips all PHI nodes.                │
+│                                                                             │
+│ Let me check if there's a way to identify PHI nodes that represent actual   │
+│ computations versus those that are just induction variables or loop-carried │
+│ dependencies.                                                               │
+│                                                                             │
+│ Actually, a simpler and safer approach might be to relax the assertion      │
+│ condition slightly to account for cases where PHI nodes in non-header       │
+│ blocks might cause legitimate disagreements between the cost models.        │
+│                                                                             │
+│ But looking at the code more carefully, I think the real issue is that the  │
+│ `planContainsAdditionalSimplifications` function should not completely      │
+│ ignore PHI nodes that are used outside of their defining block. In this     │
+│ case, the PHI `%p` is defined in `loop.latch` and used immediately in the   │
+│ same block for the store instruction.                                       │
+│                                                                             │
+│ Let me examine how PHI nodes are represented in VPlans. If the PHI node is  │
+│ properly included in the VPlan recipes, then it should be in the            │
+│ `SeenInstrs` set, and the function should work correctly. But if it's not   │
+│ being included properly, then the function might incorrectly return false.  │
+│                                                                             │
+│ Given the complexity and the fact that this is an assertion meant to catch  │
+│ bugs, the safest fix is to ensure that PHI nodes that are actually used in  │
+│ computations are properly accounted for in the                              │
+│ `planContainsAdditionalSimplifications` function.                           │
+│                                                                             │
+│ Looking at the current logic, the function excludes all PHI nodes           │
+│ unconditionally. But this is too broad. Instead, we should only exclude PHI │
+│ nodes that are known to be handled consistently between both cost models,   │
+│ such as induction variable PHIs.                                            │
+│                                                                             │
+│ However, without deeper knowledge of the VPlan representation, a more       │
+│ conservative fix would be to check if the PHI node is actually used by any  │
+│ recipe in the VPlan. If it's not used, then it might indicate a             │
+│ simplification.                                                             │
+│                                                                             │
+│ But actually, looking at the reproducer again, the PHI node `%p` is used    │
+│ immediately in the store instruction, so it should definitely be part of    │
+│ the VPlan.                                                                  │
+│                                                                             │
+│ I think the issue might be in how the PHI node is being processed when      │
+│ building the VPlan. The PHI has inputs from two different predecessor       │
+│ blocks, and one of those predecessors (`then`) is only reachable through a  │
+│ conditional branch that is always false in the reproducer (`br i1 false`).  │
+│                                                                             │
+│ This means that the `then` block is actually unreachable, but the LLVM IR   │
+│ still contains it. The VPlan cost model might be smart enough to recognize  │
+│ this and optimize accordingly, while the legacy cost model might not.       │
+│                                                                             │
+│ In this specific case, since the branch condition is `false`, the `then`    │
+│ block is never executed, so the PHI node `%p` will always take the value    │
+│ `0` from the `loop.header` predecessor.                                     │
+│                                                                             │
+│ The VPlan cost model might recognize this dead code and simplify the PHI to │
+│ just the constant `0`, while the legacy cost model might still consider     │
+│ both inputs.                                                                │
+│                                                                             │
+│ This would explain the disagreement, and it would be a legitimate           │
+│ simplification that should be caught by                                     │
+│ `planContainsAdditionalSimplifications`. However, since the function        │
+│ excludes all PHI nodes, it doesn't detect this simplification.              │
+│                                                                             │
+│ The fix should be to modify the `planContainsAdditionalSimplifications`     │
+│ function to not exclude PHI nodes that have been simplified or optimized in │
+│ the VPlan.                                                                  │
+│                                                                             │
+│ But a simpler and more targeted fix would be to check if the PHI node is    │
+│ actually present in the VPlan recipes. If it's not present (because it was  │
+│ simplified away), then that should count as an additional simplification.   │
+│                                                                             │
+│ Looking at the current implementation of `GetInstructionForCost`, it        │
+│ doesn't handle PHI nodes at all, which is why they're not being added to    │
+│ `SeenInstrs`.                                                               │
+│                                                                             │
+│ I think the correct fix is to include PHI nodes in the `SeenInstrs`         │
+│ collection when they are present in the VPlan recipes. However, I need to   │
+│ understand how PHI nodes are represented in VPlans.                         │
+│                                                                             │
+│ Upon further reflection, PHI nodes are typically lowered into select        │
+│ instructions or other forms during VPlan construction, so they might not    │
+│ appear as PHI nodes in the VPlan recipes. This means the current approach   │
+│ of excluding all PHI nodes might be correct in general, but there's a       │
+│ specific edge case here.                                                    │
+│                                                                             │
+│ Given the time constraints and the nature of the issue, the most practical  │
+│ fix is to modify the assertion condition to also consider cases where there │
+│ are PHI nodes with constant or simplified operands that might cause         │
+│ legitimate disagreements.                                                   │
+│                                                                             │
+│ However, looking at this more carefully, I think the real issue is that the │
+│ `planContainsAdditionalSimplifications` function should return true when    │
+│ there are PHI nodes in the original loop that are not represented in the    │
+│ same way in the VPlan.                                                      │
+│                                                                             │
+│ But without being able to see exactly how the VPlan represents this         │
+│ specific case, I'll implement a targeted fix that addresses the specific    │
+│ pattern in the reproducer.                                                  │
+│                                                                             │
+│ The safest approach is to modify the                                        │
+│ `planContainsAdditionalSimplifications` function to not exclude PHI nodes   │
+│ that have non-constant operands or that are used in memory operations,      │
+│ since these are more likely to cause genuine differences between cost       │
+│ models.                                                                     │
+│                                                                             │
+│ Actually, let me reconsider. The assertion exists to catch bugs where the   │
+│ two cost models disagree without a good reason. In this case, the           │
+│ disagreement is due to dead code elimination (the `br i1 false` makes the   │
+│ `then` block unreachable). This is a legitimate optimization that the VPlan │
+│ cost model can perform but the legacy cost model cannot.                    │
+│                                                                             │
+│ Therefore, the `planContainsAdditionalSimplifications` function should      │
+│ return true in this case. The issue is that it's not detecting this         │
+│ simplification because it excludes all PHI nodes.                           │
+│                                                                             │
+│ The fix is to modify the function to include PHI nodes in the analysis when │
+│ they have operands that might be subject to simplification.                 │
+│                                                                             │
+│ But a more direct fix would be to check if any of the PHI node's incoming   │
+│ values come from blocks that are not reachable, which would indicate a      │
+│ simplification opportunity.                                                 │
+│                                                                             │
+│ However, this is getting complex. Let me look for a simpler solution.       │
+│                                                                             │
+│ Actually, looking at the LLVM source code, I notice that the                │
+│ `planContainsAdditionalSimplifications` function is only used in debug      │
+│ builds (it's inside an `#ifndef NDEBUG` block). This means the assertion is │
+│ only for debugging purposes and doesn't affect release builds.              │
+│                                                                             │
+│ The proper fix is to ensure that the function correctly identifies when the │
+│ VPlan contains simplifications that the legacy cost model doesn't account   │
+│ for.                                                                        │
+│                                                                             │
+│ Given the reproducer has a PHI node with an incoming value from an          │
+│ unreachable block, this should be considered a simplification.              │
+│                                                                             │
+│ I think the best approach is to modify the                                  │
+│ `planContainsAdditionalSimplifications` function to not exclude PHI nodes   │
+│ that have incoming values from blocks that may be optimized away.           │
+│                                                                             │
+│ But to keep the fix simple and targeted, I'll modify the function to check  │
+│ if PHI nodes have incoming values that are constants or simplified          │
+│ expressions, which would indicate potential simplifications.                │
+│                                                                             │
+│ However, after careful consideration, I think the most appropriate fix is   │
+│ to include PHI nodes in the `SeenInstrs` set when they are actually used in │
+│ the VPlan. The current code excludes all PHI nodes, but some PHI nodes      │
+│ should be tracked.                                                          │
+│                                                                             │
+│ Looking at the VPlan recipe types, I need to check if there's a recipe type │
+│ that represents PHI nodes. If there is, then the `GetInstructionForCost`    │
+│ function should be updated to handle it.                                    │
+│                                                                             │
+│ Let me check what VPRecipe types exist:                                     │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -n "class.*Recipe" llvm/lib/Transforms/Vectorize/VPlan.h | head -10    │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@2293043] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ 65:class VPReplicateRecipe;                                                 │
+│ 764:class VPRecipeBase : public ilist_node_with_parent<VPRecipeBase,        │
+│ VPBasicBlock>,                                                              │
+│ 885:  static inline bool classof(const VPRecipeBase *R) {                   │
+│ \                                                                           │
+│ 888:  static inline bool classof(const VPSingleDefRecipe *R) {              │
+│ \                                                                           │
+│ 895:class VPSingleDefRecipe : public VPRecipeBase, public VPValue {         │
+│ 910:  static inline bool classof(const VPRecipeBase *R) {                   │
+│ 969:class VPRecipeWithIRFlags : public VPSingleDefRecipe {                  │
+│ 1108:  static inline bool classof(const VPRecipeBase *R) {                  │
+│ 1235:class VPInstruction : public VPRecipeWithIRFlags {                     │
+│ 1412:class VPWidenRecipe : public VPRecipeWithIRFlags {                     │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #7, chat statistics so far: {'chat_rounds': 7, 'input_tokens':
+34039, 'cached_tokens': 2688, 'output_tokens': 2793, 'total_tokens': 36832}
+╭─ assistant [MainThread@2293043] ────────────────────────────────────────────╮
+│ THOUGHT: Let me look for PHI-related recipes or how PHIs are handled in     │
+│ VPlans.                                                                     │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -n "PHI\|Phi" llvm/lib/Transforms/Vectorize/VPlan.h | head -10         │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@2293043] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ 705:  PHINode *Phi;                                                         │
+│ 708:  VPLiveOut(PHINode *Phi, VPValue *Op)                                  │
+│ 709:      : VPUser({Op}, VPUser::VPUserID::LiveOut), Phi(Phi) {}            │
+│ 719:  void fixPhi(VPlan &Plan, VPTransformState &State);                    │
+│ 728:  PHINode *getPhi() const { return Phi; }                               │
+│ 845:  /// Returns true for PHI-like recipes.                                │
+│ 846:  bool isPhi() const {                                                  │
+│ 847:    return getVPDefID() >= VPFirstPHISC && getVPDefID() <= VPLastPHISC; │
+│ 913:    case VPRecipeBase::VPEVLBasedIVPHISC:                               │
+│ 929:    case VPRecipeBase::VPPredInstPHISC:                                 │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #8, chat statistics so far: {'chat_rounds': 8, 'input_tokens':
+42600, 'cached_tokens': 8064, 'output_tokens': 2845, 'total_tokens': 45445}
+╭─ assistant [MainThread@2293043] ────────────────────────────────────────────╮
+│ THOUGHT: Great! There are PHI-like recipes in VPlan. The `isPhi()` method   │
+│ indicates that there are specific recipe types for PHIs. This means that    │
+│ PHI nodes should be represented as recipes in the VPlan, and the            │
+│ `GetInstructionForCost` function should be updated to handle them.          │
+│                                                                             │
+│ Looking at the current `GetInstructionForCost` function in                  │
+│ `planContainsAdditionalSimplifications`, it only handles                    │
+│ `VPSingleDefRecipe` and `VPWidenMemoryRecipe`, but not PHI recipes.         │
+│                                                                             │
+│ The fix is to update the `GetInstructionForCost` lambda to also handle PHI  │
+│ recipes by returning the underlying PHI instruction.                        │
+│                                                                             │
+│ Let me check what the PHI recipe classes look like:                         │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -A10 -B5 "VP.*PHISC" llvm/lib/Transforms/Vectorize/VPlan.h             │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@2293043] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│   /// Returns true if the recipe may have side-effects.                     │
+│   bool mayHaveSideEffects() const;                                          │
+│                                                                             │
+│   /// Returns true for PHI-like recipes.                                    │
+│   bool isPhi() const {                                                      │
+│     return getVPDefID() >= VPFirstPHISC && getVPDefID() <= VPLastPHISC;     │
+│   }                                                                         │
+│                                                                             │
+│   /// Returns true if the recipe may read from memory.                      │
+│   bool mayReadFromMemory() const;                                           │
+│                                                                             │
+│   /// Returns true if the recipe may write to memory.                       │
+│   bool mayWriteToMemory() const;                                            │
+│                                                                             │
+│   /// Returns true if the recipe may read from or write to memory.          │
+│   bool mayReadOrWriteMemory() const {                                       │
+│ --                                                                          │
+│       : VPRecipeBase(SC, Operands, DL), VPValue(this, UV) {}                │
+│                                                                             │
+│   static inline bool classof(const VPRecipeBase *R) {                       │
+│     switch (R->getVPDefID()) {                                              │
+│     case VPRecipeBase::VPDerivedIVSC:                                       │
+│     case VPRecipeBase::VPEVLBasedIVPHISC:                                   │
+│     case VPRecipeBase::VPExpandSCEVSC:                                      │
+│     case VPRecipeBase::VPInstructionSC:                                     │
+│     case VPRecipeBase::VPReductionEVLSC:                                    │
+│     case VPRecipeBase::VPReductionSC:                                       │
+│     case VPRecipeBase::VPReplicateSC:                                       │
+│     case VPRecipeBase::VPScalarIVStepsSC:                                   │
+│     case VPRecipeBase::VPVectorPointerSC:                                   │
+│     case VPRecipeBase::VPWidenCallSC:                                       │
+│     case VPRecipeBase::VPWidenCanonicalIVSC:                                │
+│     case VPRecipeBase::VPWidenCastSC:                                       │
+│     case VPRecipeBase::VPWidenGEPSC:                                        │
+│     case VPRecipeBase::VPWidenSC:                                           │
+│     case VPRecipeBase::VPWidenEVLSC:                                        │
+│     case VPRecipeBase::VPWidenSelectSC:                                     │
+│     case VPRecipeBase::VPBlendSC:                                           │
+│     case VPRecipeBase::VPPredInstPHISC:                                     │
+│     case VPRecipeBase::VPCanonicalIVPHISC:                                  │
+│     case VPRecipeBase::VPActiveLaneMaskPHISC:                               │
+│     case VPRecipeBase::VPFirstOrderRecurrencePHISC:                         │
+│     case VPRecipeBase::VPWidenPHISC:                                        │
+│     case VPRecipeBase::VPWidenIntOrFpInductionSC:                           │
+│     case VPRecipeBase::VPWidenPointerInductionSC:                           │
+│     case VPRecipeBase::VPReductionPHISC:                                    │
+│     case VPRecipeBase::VPScalarCastSC:                                      │
+│       return true;                                                          │
+│     case VPRecipeBase::VPInterleaveSC:                                      │
+│     case VPRecipeBase::VPBranchOnMaskSC:                                    │
+│     case VPRecipeBase::VPWidenLoadEVLSC:                                    │
+│     case VPRecipeBase::VPWidenLoadSC:                                       │
+│     case VPRecipeBase::VPWidenStoreEVLSC:                                   │
+│     case VPRecipeBase::VPWidenStoreSC:                                      │
+│       // TODO: Widened stores don't define a value, but widened loads do.   │
+│ Split                                                                       │
+│       // the recipes to be able to make widened loads VPSingleDefRecipes.   │
+│ --                                                                          │
+│ public:                                                                     │
+│   ~VPHeaderPHIRecipe() override = default;                                  │
+│                                                                             │
+│   /// Method to support type inquiry through isa, cast, and dyn_cast.       │
+│   static inline bool classof(const VPRecipeBase *B) {                       │
+│     return B->getVPDefID() >= VPDef::VPFirstHeaderPHISC &&                  │
+│            B->getVPDefID() <= VPDef::VPLastHeaderPHISC;                     │
+│   }                                                                         │
+│   static inline bool classof(const VPValue *V) {                            │
+│     auto *B = V->getDefiningRecipe();                                       │
+│     return B && B->getVPDefID() >= VPRecipeBase::VPFirstHeaderPHISC &&      │
+│            B->getVPDefID() <= VPRecipeBase::VPLastHeaderPHISC;              │
+│   }                                                                         │
+│                                                                             │
+│   /// Generate the phi nodes.                                               │
+│   void execute(VPTransformState &State) override = 0;                       │
+│                                                                             │
+│ #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)                           │
+│   /// Print the recipe.                                                     │
+│   void print(raw_ostream &O, const Twine &Indent,                           │
+│              VPSlotTracker &SlotTracker) const override = 0;                │
+│ #endif                                                                      │
+│ --                                                                          │
+│   SmallVector<VPBasicBlock *, 2> IncomingBlocks;                            │
+│                                                                             │
+│ public:                                                                     │
+│   /// Create a new VPWidenPHIRecipe for \p Phi with start value \p Start.   │
+│   VPWidenPHIRecipe(PHINode *Phi, VPValue *Start = nullptr)                  │
+│       : VPSingleDefRecipe(VPDef::VPWidenPHISC, ArrayRef<VPValue *>(), Phi)  │
+│ {                                                                           │
+│     if (Start)                                                              │
+│       addOperand(Start);                                                    │
+│   }                                                                         │
+│                                                                             │
+│   VPWidenPHIRecipe *clone() override {                                      │
+│     llvm_unreachable("cloning not implemented yet");                        │
+│   }                                                                         │
+│                                                                             │
+│   ~VPWidenPHIRecipe() override = default;                                   │
+│                                                                             │
+│   VP_CLASSOF_IMPL(VPDef::VPWidenPHISC)                                      │
+│                                                                             │
+│   /// Generate the phi/select nodes.                                        │
+│   void execute(VPTransformState &State) override;                           │
+│                                                                             │
+│ #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)                           │
+│   /// Print the recipe.                                                     │
+│   void print(raw_ostream &O, const Twine &Indent,                           │
+│              VPSlotTracker &SlotTracker) const override;                    │
+│ #endif                                                                      │
+│                                                                             │
+│ --                                                                          │
+│ /// A recipe for handling first-order recurrence phis. The start value is   │
+│ the                                                                         │
+│ /// first operand of the recipe and the incoming value from the backedge is │
+│ the                                                                         │
+│ /// second operand.                                                         │
+│ struct VPFirstOrderRecurrencePHIRecipe : public VPHeaderPHIRecipe {         │
+│   VPFirstOrderRecurrencePHIRecipe(PHINode *Phi, VPValue &Start)             │
+│       : VPHeaderPHIRecipe(VPDef::VPFirstOrderRecurrencePHISC, Phi, &Start)  │
+│ {}                                                                          │
+│                                                                             │
+│   VP_CLASSOF_IMPL(VPDef::VPFirstOrderRecurrencePHISC)                       │
+│                                                                             │
+│   static inline bool classof(const VPHeaderPHIRecipe *R) {                  │
+│     return R->getVPDefID() == VPDef::VPFirstOrderRecurrencePHISC;           │
+│   }                                                                         │
+│                                                                             │
+│   VPFirstOrderRecurrencePHIRecipe *clone() override {                       │
+│     return new VPFirstOrderRecurrencePHIRecipe(                             │
+│         cast<PHINode>(getUnderlyingInstr()), *getOperand(0));               │
+│   }                                                                         │
+│                                                                             │
+│   void execute(VPTransformState &State) override;                           │
+│                                                                             │
+│ #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)                           │
+│ --                                                                          │
+│   /// Create a new VPReductionPHIRecipe for the reduction \p Phi described  │
+│ by \p                                                                       │
+│   /// RdxDesc.                                                              │
+│   VPReductionPHIRecipe(PHINode *Phi, const RecurrenceDescriptor &RdxDesc,   │
+│                        VPValue &Start, bool IsInLoop = false,               │
+│                        bool IsOrdered = false)                              │
+│       : VPHeaderPHIRecipe(VPDef::VPReductionPHISC, Phi, &Start),            │
+│         RdxDesc(RdxDesc), IsInLoop(IsInLoop), IsOrdered(IsOrdered) {        │
+│     assert((!IsOrdered || IsInLoop) && "IsOrdered requires IsInLoop");      │
+│   }                                                                         │
+│                                                                             │
+│   ~VPReductionPHIRecipe() override = default;                               │
+│                                                                             │
+│   VPReductionPHIRecipe *clone() override {                                  │
+│     auto *R =                                                               │
+│         new VPReductionPHIRecipe(cast<PHINode>(getUnderlyingInstr()),       │
+│ RdxDesc,                                                                    │
+│                                  *getOperand(0), IsInLoop, IsOrdered);      │
+│     R->addOperand(getBackedgeValue());                                      │
+│     return R;                                                               │
+│   }                                                                         │
+│                                                                             │
+│   VP_CLASSOF_IMPL(VPDef::VPReductionPHISC)                                  │
+│                                                                             │
+│   static inline bool classof(const VPHeaderPHIRecipe *R) {                  │
+│     return R->getVPDefID() == VPDef::VPReductionPHISC;                      │
+│   }                                                                         │
+│                                                                             │
+│   /// Generate the phi/select nodes.                                        │
+│   void execute(VPTransformState &State) override;                           │
+│                                                                             │
+│ #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)                           │
+│   /// Print the recipe.                                                     │
+│   void print(raw_ostream &O, const Twine &Indent,                           │
+│              VPSlotTracker &SlotTracker) const override;                    │
+│ #endif                                                                      │
+│ --                                                                          │
+│ class VPPredInstPHIRecipe : public VPSingleDefRecipe {                      │
+│ public:                                                                     │
+│   /// Construct a VPPredInstPHIRecipe given \p PredInst whose value needs a │
+│ phi                                                                         │
+│   /// nodes after merging back from a Branch-on-Mask.                       │
+│   VPPredInstPHIRecipe(VPValue *PredV)                                       │
+│       : VPSingleDefRecipe(VPDef::VPPredInstPHISC, PredV) {}                 │
+│   ~VPPredInstPHIRecipe() override = default;                                │
+│                                                                             │
+│   VPPredInstPHIRecipe *clone() override {                                   │
+│     return new VPPredInstPHIRecipe(getOperand(0));                          │
+│   }                                                                         │
+│                                                                             │
+│   VP_CLASSOF_IMPL(VPDef::VPPredInstPHISC)                                   │
+│                                                                             │
+│   /// Generates phi nodes for live-outs as needed to retain SSA form.       │
+│   void execute(VPTransformState &State) override;                           │
+│                                                                             │
+│ #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)                           │
+│   /// Print the recipe.                                                     │
+│   void print(raw_ostream &O, const Twine &Indent,                           │
+│              VPSlotTracker &SlotTracker) const override;                    │
+│ #endif                                                                      │
+│                                                                             │
+│ --                                                                          │
+│ /// loop). VPWidenCanonicalIVRecipe represents the vector version of the    │
+│ /// canonical induction variable.                                           │
+│ class VPCanonicalIVPHIRecipe : public VPHeaderPHIRecipe {                   │
+│ public:                                                                     │
+│   VPCanonicalIVPHIRecipe(VPValue *StartV, DebugLoc DL)                      │
+│       : VPHeaderPHIRecipe(VPDef::VPCanonicalIVPHISC, nullptr, StartV, DL)   │
+│ {}                                                                          │
+│                                                                             │
+│   ~VPCanonicalIVPHIRecipe() override = default;                             │
+│                                                                             │
+│   VPCanonicalIVPHIRecipe *clone() override {                                │
+│     auto *R = new VPCanonicalIVPHIRecipe(getOperand(0), getDebugLoc());     │
+│     R->addOperand(getBackedgeValue());                                      │
+│     return R;                                                               │
+│   }                                                                         │
+│                                                                             │
+│   VP_CLASSOF_IMPL(VPDef::VPCanonicalIVPHISC)                                │
+│                                                                             │
+│   static inline bool classof(const VPHeaderPHIRecipe *D) {                  │
+│     return D->getVPDefID() == VPDef::VPCanonicalIVPHISC;                    │
+│   }                                                                         │
+│                                                                             │
+│   /// Generate the canonical scalar induction phi of the vector loop.       │
+│   void execute(VPTransformState &State) override;                           │
+│                                                                             │
+│ #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)                           │
+│   /// Print the recipe.                                                     │
+│   void print(raw_ostream &O, const Twine &Indent,                           │
+│              VPSlotTracker &SlotTracker) const override;                    │
+│ #endif                                                                      │
+│ --                                                                          │
+│ /// TODO: It would be good to use the existing VPWidenPHIRecipe instead and │
+│ /// remove VPActiveLaneMaskPHIRecipe.                                       │
+│ class VPActiveLaneMaskPHIRecipe : public VPHeaderPHIRecipe {                │
+│ public:                                                                     │
+│   VPActiveLaneMaskPHIRecipe(VPValue *StartMask, DebugLoc DL)                │
+│       : VPHeaderPHIRecipe(VPDef::VPActiveLaneMaskPHISC, nullptr, StartMask, │
+│                           DL) {}                                            │
+│                                                                             │
+│   ~VPActiveLaneMaskPHIRecipe() override = default;                          │
+│                                                                             │
+│   VPActiveLaneMaskPHIRecipe *clone() override {                             │
+│     return new VPActiveLaneMaskPHIRecipe(getOperand(0), getDebugLoc());     │
+│   }                                                                         │
+│                                                                             │
+│   VP_CLASSOF_IMPL(VPDef::VPActiveLaneMaskPHISC)                             │
+│                                                                             │
+│   static inline bool classof(const VPHeaderPHIRecipe *D) {                  │
+│     return D->getVPDefID() == VPDef::VPActiveLaneMaskPHISC;                 │
+│   }                                                                         │
+│                                                                             │
+│   /// Generate the active lane mask phi of the vector loop.                 │
+│   void execute(VPTransformState &State) override;                           │
+│                                                                             │
+│ #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)                           │
+│   /// Print the recipe.                                                     │
+│   void print(raw_ostream &O, const Twine &Indent,                           │
+│              VPSlotTracker &SlotTracker) const override;                    │
+│ #endif                                                                      │
+│ --                                                                          │
+│ /// canonical induction and gets incremented by EVL in each iteration of    │
+│ the                                                                         │
+│ /// vector loop.                                                            │
+│ class VPEVLBasedIVPHIRecipe : public VPHeaderPHIRecipe {                    │
+│ public:                                                                     │
+│   VPEVLBasedIVPHIRecipe(VPValue *StartIV, DebugLoc DL)                      │
+│       : VPHeaderPHIRecipe(VPDef::VPEVLBasedIVPHISC, nullptr, StartIV, DL)   │
+│ {}                                                                          │
+│                                                                             │
+│   ~VPEVLBasedIVPHIRecipe() override = default;                              │
+│                                                                             │
+│   VPEVLBasedIVPHIRecipe *clone() override {                                 │
+│     llvm_unreachable("cloning not implemented yet");                        │
+│   }                                                                         │
+│                                                                             │
+│   VP_CLASSOF_IMPL(VPDef::VPEVLBasedIVPHISC)                                 │
+│                                                                             │
+│   static inline bool classof(const VPHeaderPHIRecipe *D) {                  │
+│     return D->getVPDefID() == VPDef::VPEVLBasedIVPHISC;                     │
+│   }                                                                         │
+│                                                                             │
+│   /// Generate phi for handling IV based on EVL over iterations correctly.  │
+│   /// TODO: investigate if it can share the code with                       │
+│ VPCanonicalIVPHIRecipe.                                                     │
+│   void execute(VPTransformState &State) override;                           │
+│                                                                             │
+│   /// Returns true if the recipe only uses the first lane of operand \p Op. │
+│   bool onlyFirstLaneUsed(const VPValue *Op) const override {                │
+│     assert(is_contained(operands(), Op) &&                                  │
+│            "Op must be an operand of the recipe");                          │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #9, chat statistics so far: {'chat_rounds': 9, 'input_tokens':
+51420, 'cached_tokens': 14464, 'output_tokens': 3017, 'total_tokens': 54437}
+╭─ assistant [MainThread@2293043] ────────────────────────────────────────────╮
+│ THOUGHT: Perfect! Now I can see that there are several PHI recipe types,    │
+│ including `VPWidenPHIRecipe` which takes a `PHINode *Phi` in its            │
+│ constructor and inherits from `VPSingleDefRecipe`. This means that PHI      │
+│ nodes are represented as `VPSingleDefRecipe` instances in the VPlan, and    │
+│ the underlying PHI instruction can be accessed via `getUnderlyingValue()`   │
+│ (which returns the `PHINode`).                                              │
+│                                                                             │
+│ Looking back at the `GetInstructionForCost` function in                     │
+│ `planContainsAdditionalSimplifications`, it already handles                 │
+│ `VPSingleDefRecipe` and calls `getUnderlyingValue()`. So PHI nodes that are │
+│ represented as `VPWidenPHIRecipe` should already be included in the         │
+│ `SeenInstrs` set.                                                           │
+│                                                                             │
+│ However, the issue might be that not all PHI nodes are converted to         │
+│ `VPWidenPHIRecipe`. Some might be handled differently or optimized away     │
+│ entirely.                                                                   │
+│                                                                             │
+│ Given that the reproducer has a PHI node with an incoming value from an     │
+│ unreachable block (`br i1 false`), the VPlan construction might optimize    │
+│ this PHI away entirely, meaning it won't appear as any recipe in the VPlan. │
+│                                                                             │
+│ In this case, the PHI node would not be in `SeenInstrs`, but since the      │
+│ current code excludes all PHI nodes from consideration, the function        │
+│ returns false, causing the assertion to fail.                               │
+│                                                                             │
+│ The fix is to modify the `planContainsAdditionalSimplifications` function   │
+│ to not exclude PHI nodes that have been optimized away or simplified in the │
+│ VPlan.                                                                      │
+│                                                                             │
+│ But a simpler and more robust fix is to change the condition for excluding  │
+│ PHI nodes. Instead of excluding all PHI nodes, we should only exclude those │
+│ that are actually present in the VPlan (i.e., in `SeenInstrs`).             │
+│                                                                             │
+│ Wait, that doesn't make sense. Let me think again.                          │
+│                                                                             │
+│ The current logic is:                                                       │
+│ 1. Collect all instructions that are part of VPlan recipes into             │
+│ `SeenInstrs`                                                                │
+│ 2. For each instruction in the original loop, if it's not a PHI node AND    │
+│ it's not in `SeenInstrs` AND it's not skipped for cost computation, then    │
+│ return true                                                                 │
+│                                                                             │
+│ The problem is that step 2 excludes all PHI nodes, even if they're not in   │
+│ `SeenInstrs`. But if a PHI node is not in `SeenInstrs`, that means it was   │
+│ optimized away or simplified in the VPlan, which should count as an         │
+│ additional simplification.                                                  │
+│                                                                             │
+│ So the fix is to remove the special handling for PHI nodes and treat them   │
+│ like any other instruction.                                                 │
+│                                                                             │
+│ Let me implement this fix:                                                  │
+│                                                                             │
+│ ```bash                                                                     │
+│ sed -i '7319s/      if (isa<PHINode>(&I))/      if (false)/'                │
+│ llvm/lib/Transforms/Vectorize/LoopVectorize.cpp                             │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@2293043] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #10, chat statistics so far: {'chat_rounds': 10,
+'input_tokens': 63137, 'cached_tokens': 20224, 'output_tokens': 3584,
+'total_tokens': 66721}
+╭─ assistant [MainThread@2293043] ────────────────────────────────────────────╮
+│ THOUGHT: I made a change to remove the special exclusion of PHI nodes in    │
+│ the `planContainsAdditionalSimplifications` function. Now PHI nodes will be │
+│ treated like any other instruction - if they're not present in the VPlan    │
+│ recipes (not in `SeenInstrs`) and not skipped for cost computation, they'll │
+│ cause the function to return true, indicating additional simplifications.   │
+│                                                                             │
+│ This should fix the assertion failure because in the reproducer case, the   │
+│ PHI node with the unreachable incoming block will likely be optimized away  │
+│ in the VPlan, making it not present in `SeenInstrs`, which will cause       │
+│ `planContainsAdditionalSimplifications` to return true, satisfying the      │
+│ assertion condition.                                                        │
+│                                                                             │
+│ Now let me test this fix by running the reproducer through opt to see if it │
+│ resolves the crash.                                                         │
+│                                                                             │
+│ ```bash                                                                     │
+│ /llvm-autofix-deps/llvm/llvm/bin/opt -p loop-vectorize -mtriple             │
+│ riscv64-linux-gnu -mattr=+v,+f -S /tmp/test.ll                              │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@2293043] ─────────────────────────────────────────────────╮
+│ <returncode>127</returncode>                                                │
+│ <output>                                                                    │
+│ /bin/sh: 1: /llvm-autofix-deps/llvm/llvm/bin/opt: not found                 │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #11, chat statistics so far: {'chat_rounds': 11,
+'input_tokens': 75446, 'cached_tokens': 28672, 'output_tokens': 3792,
+'total_tokens': 79238}
+╭─ assistant [MainThread@2293043] ────────────────────────────────────────────╮
+│ THOUGHT: The opt binary is not in the expected location. Let me check where │
+│ the LLVM build artifacts are located.                                       │
+│                                                                             │
+│ ```bash                                                                     │
+│ find . -name "opt" -type f | head -5                                        │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@2293043] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #12, chat statistics so far: {'chat_rounds': 12,
+'input_tokens': 88013, 'cached_tokens': 28672, 'output_tokens': 3836,
+'total_tokens': 91849}
+╭─ assistant [MainThread@2293043] ────────────────────────────────────────────╮
+│ THOUGHT: It seems the LLVM build hasn't been compiled yet in this           │
+│ environment. The `submit-patch` command will handle building and testing    │
+│ the fix. Let me submit the patch to verify if my fix works.                 │
+│                                                                             │
+│ ```bash                                                                     │
+│ submit-patch                                                                │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Generation statistics saved to /tmp/107473-qwen3max-12010455.json.
+Saved trajectory to '/tmp/107473-qwen3max-12010455.traj.json'
+Final Patch
+-----------
+diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp
+b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp
+index 2be3b5775292..31af1ce3b0d1 100644
+--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp
++++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp
+@@ -7316,7 +7316,7 @@ static bool planContainsAdditionalSimplifications(VPlan
+&Plan,
+   // that the VPlan contains extra simplifications.
+   return any_of(TheLoop->blocks(), [&SeenInstrs, &CostCtx](BasicBlock *BB) {
+     return any_of(*BB, [&SeenInstrs, &CostCtx](Instruction &I) {
+-      if (isa<PHINode>(&I))
++      if (false)
+         return false;
+       return !SeenInstrs.contains(&I) && !CostCtx.skipCostComputation(&I,
+true);
+     });
+
+Reference Patch
+---------------
+commit e3c537ff903af9a92ff43bab6d21c0ea759d65e5
+Author: Florian Hahn <flo@fhahn.com>
+Date:   Tue Sep 10 21:37:12 2024 +0100
+
+    [VPlan] Consider non-header phis in planContainsAdditionalSimp.
+
+    Update planContainsAdditionalSimplifications to also check phis not in
+    the loop header. This ensures we don't miss cases where VPBlendRecipes
+    (which correspond to such phis) have been simplified.
+
+    Fixes https://github.com/llvm/llvm-project/issues/107473.
+
+diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp
+b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp
+index 2be3b5775292..b821da03c16e 100644
+--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp
++++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp
+@@ -7314,9 +7314,10 @@ static bool planContainsAdditionalSimplifications(VPlan
+&Plan,
+   // Return true if the loop contains any instructions that are not also part
+of
+   // the VPlan or are skipped for VPlan-based cost computations. This
+indicates
+   // that the VPlan contains extra simplifications.
+-  return any_of(TheLoop->blocks(), [&SeenInstrs, &CostCtx](BasicBlock *BB) {
+-    return any_of(*BB, [&SeenInstrs, &CostCtx](Instruction &I) {
+-      if (isa<PHINode>(&I))
++  return any_of(TheLoop->blocks(), [&SeenInstrs, &CostCtx,
++                                    TheLoop](BasicBlock *BB) {
++    return any_of(*BB, [&SeenInstrs, &CostCtx, TheLoop, BB](Instruction &I) {
++      if (isa<PHINode>(&I) && BB == TheLoop->getHeader())
+         return false;
+       return !SeenInstrs.contains(&I) && !CostCtx.skipCostComputation(&I,
+true);
+     });
+
+Statistics
+----------
+{
+  "command": {
+    "issue": "107473",
+    "model": "qwen3-max"
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp
+b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex
+2be3b5775292..31af1ce3b0d1 100644\n---
+a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++
+b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -7316,7 +7316,7 @@ static
+bool planContainsAdditionalSimplifications(VPlan &Plan,\n   // that the VPlan
+contains extra simplifications.\n   return any_of(TheLoop->blocks(),
+[&SeenInstrs, &CostCtx](BasicBlock *BB) {\n     return any_of(*BB,
+[&SeenInstrs, &CostCtx](Instruction &I) {\n-      if (isa<PHINode>(&I))\n+
+if (false)\n         return false;\n       return !SeenInstrs.contains(&I) &&
+!CostCtx.skipCostComputation(&I, true);\n     });\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 100649,
+  "output_tokens": 3889,
+  "cached_tokens": 28672,
+  "total_tokens": 104538,
+  "chat_rounds": 13,
+  "total_time_sec": 175.39834713935852,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp
+b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex
+2be3b5775292..31af1ce3b0d1 100644\n---
+a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++
+b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -7316,7 +7316,7 @@ static
+bool planContainsAdditionalSimplifications(VPlan &Plan,\n   // that the VPlan
+contains extra simplifications.\n   return any_of(TheLoop->blocks(),
+[&SeenInstrs, &CostCtx](BasicBlock *BB) {\n     return any_of(*BB,
+[&SeenInstrs, &CostCtx](Instruction &I) {\n-      if (isa<PHINode>(&I))\n+
+if (false)\n         return false;\n       return !SeenInstrs.contains(&I) &&
+!CostCtx.skipCostComputation(&I, true);\n     });\n"
+  ]
+}

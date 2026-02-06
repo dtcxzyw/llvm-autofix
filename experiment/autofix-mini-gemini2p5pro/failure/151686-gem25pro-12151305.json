@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "151686",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/151686-gem25pro-12151305.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 4979227,
+  "output_tokens": 23949,
+  "cached_tokens": 4557129,
+  "total_tokens": 5025475,
+  "chat_rounds": 271,
+  "total_time_sec": 819.1866385936737,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+    "preparePlanForEpilogueVectorLoop",
+    9798
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+      9761,
+      9762
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe `loop-vectorize` pass is aborting due to a failed assertion: `EPResumeVal && \"must have a resume value for the canonical IV\"`. This happens during the preparation of the VPlan for the epilogue loop. The assertion indicates that the vectorizer expected to find a pre-calculated \"resume value\" for the loop's canonical induction variable (`%iv` in the reproducer) but did not. This resume value is the starting value of the induction variable for the scalar epilogue loop, which handles the remaining iterations after the main vectorized loop.\n\n### 2. Analyzing `opt`'s Log\n\nThe Scalar Evolution (SCEV) analysis correctly identifies two induction variables:\n- `%iv`: The canonical induction variable, `{0,+,1}`.\n- `%iv.2`: A second induction variable, `{0,+,-16777216}`.\n\nA crucial observation from the IR is that the canonical IV, `%iv`, is only used to control the loop's execution (`icmp ugt i32 %iv, 1050`) and is not used after the loop terminates. In contrast, the value derived from the second IV, `%iv.2`, is used in the exit block and returned from the function. This means `%iv` is not \"live-out\" of the loop.\n\n### 3. Root Cause Analysis\n\nThe crash occurs in `preparePlanForEpilogueVectorLoop`, but the root cause lies in the preceding function `createEpilogueSCEV`. This function is responsible for calculating the resume values for all induction variables. Inside this function, there is an optimization to avoid unnecessary computation:\n\n```cpp\n// In LoopVectorizePass::createEpilogueSCEV\nfor (auto *Ind : Inductions) {\n  // No need to compute the resume value for induction variables that are not\n  // used outside the loop.\n  if (!isUsedOutsideOfLoop(Ind->getInduction(), L))\n    continue;\n  // ... (calculation logic)\n}\n```\n\nThis code skips the calculation for any induction variable that is not used outside the loop. Because the canonical IV `%iv` is not live-out, `isUsedOutsideOfLoop` returns `false` for it, and its resume value is never computed and stored in the `SCEV2Value` map.\n\nHowever, the function `preparePlanForEpilogueVectorLoop` unconditionally requires the resume value for the *canonical* induction variable to correctly structure the epilogue loop (e.g., to set its starting iteration count). The optimization in `createEpilogueSCEV` is flawed because it fails to recognize that the canonical IV's resume value is always necessary for epilogue creation, regardless of its liveness outside the loop.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to adjust the conditional check in `createEpilogueSCEV` to ensure that the resume value for the canonical induction variable is always computed.\n\n**File**: `llvm/lib/Transforms/Vectorize/LoopVectorize.cpp`\n\n**Original Code (Lines 9761-9762):**\n```cpp\n  if (!isUsedOutsideOfLoop(Ind->getInduction(), L))\n    continue;\n```\n\n**Proposed Change:**\n```cpp\n  // No need to compute the resume value for induction variables that are not\n  // used outside the loop, unless it is the canonical IV.\n  if (Ind->getInduction() != L->getCanonicalInductionVariable() &&\n      !isUsedOutsideOfLoop(Ind->getInduction(), L))\n    continue;\n```\nThis change modifies the condition to bypass the `isUsedOutsideOfLoop` check specifically for the canonical induction variable, ensuring its resume value is always calculated. For all other induction variables, the original optimization remains in place.\n\n### 5. Conclusion\n\nThe root cause of the assertion failure was an overly aggressive optimization that incorrectly skipped the calculation of the epilogue resume value for a non-live-out canonical induction variable. This value is, however, indispensable for constructing the epilogue loop. The proposed patch corrects this logic by creating a special case for the canonical IV, resolving the crash and enabling correct vectorization of loops with this structure.",
+  "test_traj": []
+}

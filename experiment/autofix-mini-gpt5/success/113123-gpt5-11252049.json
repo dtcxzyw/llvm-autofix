@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "113123",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/113123-gpt5-11252049.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\nindex d72013ba223d..7829b88d3f04 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\n@@ -1531,8 +1531,13 @@ Value *InstCombinerImpl::foldLogicOfFCmps(FCmpInst *LHS, FCmpInst *RHS,\n     }\n     if (IsLessThanOrLessEqual(IsAnd ? PredL : PredR)) {\n       BuilderTy::FastMathFlagGuard Guard(Builder);\n-      Builder.setFastMathFlags(LHS->getFastMathFlags() |\n-                               RHS->getFastMathFlags());\n+      // For logic formed from a select, intersect FMF to avoid introducing\n+      // new assumptions (e.g. ninf) that could create observable poison.\n+      // Otherwise, we can safely union the flags.\n+      FastMathFlags FMFL = LHS->getFastMathFlags();\n+      FastMathFlags FMFR = RHS->getFastMathFlags();\n+      FastMathFlags NewFMF = IsLogicalSelect ? (FMFL & FMFR) : (FMFL | FMFR);\n+      Builder.setFastMathFlags(NewFMF);\n \n       Value *FAbs = Builder.CreateUnaryIntrinsic(Intrinsic::fabs, LHS0);\n       return Builder.CreateFCmp(PredL, FAbs,\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 83053,
+  "output_tokens": 4290,
+  "cached_tokens": 52224,
+  "total_tokens": 87343,
+  "chat_rounds": 10,
+  "total_time_sec": 514.4971981048584,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp",
+    "llvm::InstCombinerImpl::foldBooleanAndOr",
+    3537
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp",
+      1534,
+      1535
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe miscompile arises when transforming a logical-select form of a floating-point range check expressed as: select %cmp2, %cmp1, false, where %cmp2 is (fcmp ogt x, -C) and %cmp1 is (fcmp ninf olt x, C). InstCombine recognizes the pattern (X < C) && (X > -C) and rewrites it to fabs(X) < C. However, in the original IR, the 'ninf' fast-math flag applies only to %cmp1. Because %cmp1 produces poison when X = -inf, that poison is never observed if %cmp2 is false. The select is poison-safe in this case because the poisoned value is in the unchosen arm. After transformation, the fabs and the single fcmp inherit the union of fast-math flags (including 'ninf'), so the transformed code asserts that X is not infinite unconditionally. For X = -inf, this causes fabs(x) to become poison and the fcmp result to be poison, making the target more poisonous than the source. Alive2 shows exactly this with x = -inf.\n\n2. Analyzing opt's Log:\nThe log shows InstCombine folding the select into an fcmp after inserting a fabs intrinsic with the 'ninf' flag: %1 = call ninf float @llvm.fabs.f32(float %x); %cond = fcmp ninf olt float %1, C. The first transformation point is foldBooleanAndOr -> foldLogicOfFCmps. The range-check canonicalization at lines 1505-1541 in InstCombineAndOrXor.cpp is applied. Unlike earlier combining logic (lines ~1438-1455) which intersects FMF for logical selects, this range-check transform unconditionally unions fast-math flags (lines 1534-1535). That is inconsistent with the requirement stated at lines 3522-3524: logical and/or (from select) must be poison-safe.\n\n3. Root Cause Analysis:\nIn foldLogicOfFCmps, the range-check canonicalization block (lines 1505-1541) sets Builder fast-math flags to LHS->FMF | RHS->FMF regardless of IsLogicalSelect. When only one side has a restrictive flag (e.g., ninf), union propagates that assumption to the new fused operation, strengthening preconditions and enabling new poison that could not occur along the actually selected path of the original select. For logical selects, we must not introduce new assumptions that can create poison that was previously masked. The correct behavior is to intersect FMF for poison safety (only assumptions common to both operands) or otherwise bail out. Other parts of the function already use intersection when IsLogicalSelect is true (e.g., identical operand fold). The lack of an IsLogicalSelect check here is the bug.\n\n4. Proposed Edit Points(s):\nEdit lines 1534-1535 in llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp.\nChange from unconditional union of fast-math flags to conditional: use intersection if IsLogicalSelect, otherwise keep union. This preserves existing optimization for non-logical cases while ensuring poison safety for logical-select-derived AND/OR.\nPatch concept:\nReplace:\n  Builder.setFastMathFlags(LHS->getFastMathFlags() | RHS->getFastMathFlags());\nWith:\n  FastMathFlags FMFL = LHS->getFastMathFlags();\n  FastMathFlags FMFR = RHS->getFastMathFlags();\n  FastMathFlags FMF = IsLogicalSelect ? (FMFL & FMFR) : (FMFL | FMFR);\n  Builder.setFastMathFlags(FMF);\nThis uses existing FastMathFlags operators (& and |) consistent with prior code usage.\n\n5. Conclusion:\nThe transformation incorrectly unions fast-math flags in a context that must be poison-safe (logical select lowering). Intersecting the flags avoids introducing new assumptions (like ninf) that broaden poison conditions. The fix adjusts fast-math flag propagation for the range-check -> fabs fold when IsLogicalSelect is true. This restores correctness and eliminates the miscompile demonstrated by Alive2.\n",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\nindex d72013ba223d..7829b88d3f04 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp\n@@ -1531,8 +1531,13 @@ Value *InstCombinerImpl::foldLogicOfFCmps(FCmpInst *LHS, FCmpInst *RHS,\n     }\n     if (IsLessThanOrLessEqual(IsAnd ? PredL : PredR)) {\n       BuilderTy::FastMathFlagGuard Guard(Builder);\n-      Builder.setFastMathFlags(LHS->getFastMathFlags() |\n-                               RHS->getFastMathFlags());\n+      // For logic formed from a select, intersect FMF to avoid introducing\n+      // new assumptions (e.g. ninf) that could create observable poison.\n+      // Otherwise, we can safely union the flags.\n+      FastMathFlags FMFL = LHS->getFastMathFlags();\n+      FastMathFlags FMFR = RHS->getFastMathFlags();\n+      FastMathFlags NewFMF = IsLogicalSelect ? (FMFL & FMFR) : (FMFL | FMFR);\n+      Builder.setFastMathFlags(NewFMF);\n \n       Value *FAbs = Builder.CreateUnaryIntrinsic(Intrinsic::fabs, LHS0);\n       return Builder.CreateFCmp(PredL, FAbs,\n"
+  ]
+}

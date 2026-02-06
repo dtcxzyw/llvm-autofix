@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "155287",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/155287-qwen3max-11260254.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Analysis/ScalarEvolution.cpp b/llvm/lib/Analysis/ScalarEvolution.cpp\nindex f60a1e9f2270..7913bc7af953 100644\n--- a/llvm/lib/Analysis/ScalarEvolution.cpp\n+++ b/llvm/lib/Analysis/ScalarEvolution.cpp\n@@ -4656,6 +4656,10 @@ const SCEV *ScalarEvolution::removePointerBase(const SCEV *P) {\n const SCEV *ScalarEvolution::getMinusSCEV(const SCEV *LHS, const SCEV *RHS,\n                                           SCEV::NoWrapFlags Flags,\n                                           unsigned Depth) {\n+  // Handle SCEVCouldNotCompute inputs.\n+  if (isa<SCEVCouldNotCompute>(LHS) || isa<SCEVCouldNotCompute>(RHS))\n+    return getCouldNotCompute();\n+\n   // Fast path: X - X --> 0.\n   if (LHS == RHS)\n     return getZero(LHS->getType());\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 1410486,
+  "output_tokens": 4804,
+  "cached_tokens": 733440,
+  "total_tokens": 1415290,
+  "chat_rounds": 56,
+  "total_time_sec": 567.2678189277649,
+  "trans_point": [
+    "llvm/lib/Analysis/ScalarEvolution.cpp",
+    "llvm::SCEV::getType",
+    412
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp",
+      1249,
+      1249
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\n\nThe crash occurs when the SCEVExpander tries to compute the difference between two SCEV expressions in `tryToReuseLCSSAPhi`, specifically calling `SE.getMinusSCEV(S, ExitSCEV)`. The `ExitSCEV` is a `SCEVCouldNotCompute` object, which cannot be used in any SCEV operations. When `getMinusSCEV` attempts to access the type of this object via `getType()`, it hits the unreachable assertion in `SCEV::getType()` for `scCouldNotCompute` objects.\n\n2. Analyzing `opt`'s Log:\n\nThe log shows that LoopIdiomRecognize is processing a countable loop and crashes when trying to expand code for a strided store. The debugger reveals that in `tryToReuseLCSSAPhi`, the `ExitSCEV` obtained from `SE.getSCEV(&PN)` for the PHI node `%phi` returns a `SCEVCouldNotCompute` object. This happens because the PHI node has a pointer type with address space 1, and SCEV cannot properly analyze it.\n\n3. Root Cause Analysis:\n\nIn `ScalarEvolutionExpander.cpp:1249`, the code calls `SE.getMinusSCEV(S, ExitSCEV)` without checking if `ExitSCEV` is a valid computable SCEV. When `SE.getSCEV(&PN)` returns a `SCEVCouldNotCompute` object (which can happen for complex pointer types, especially with non-zero address spaces), the subsequent `getMinusSCEV` call tries to operate on this invalid object, leading to the crash when `getType()` is called on it.\n\nThe issue is that the code assumes `ExitSCEV` will always be a valid computable SCEV, but this is not guaranteed, especially for PHI nodes with pointer types in non-default address spaces.\n\n4. Proposed Edit Point(s):\n\nThe fix is to add a check in `tryToReuseLCSSAPhi` to ensure that `ExitSCEV` is not a `SCEVCouldNotCompute` object before attempting to use it in `getMinusSCEV`. This should be done right after obtaining `ExitSCEV` from `SE.getSCEV(&PN)` and before the type conversion logic.\n\nSpecifically, at line 1249 in `llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp`, we need to add a guard condition to skip processing when `ExitSCEV` is `SCEVCouldNotCompute`.\n\n5. Conclusion:\n\nBy adding a check for `SCEVCouldNotCompute` before calling `getMinusSCEV`, we prevent the crash and allow the expander to fall back to other expansion strategies when SCEV analysis fails for complex pointer types. This is a defensive programming fix that maintains the existing behavior for valid cases while preventing the assertion failure for invalid cases.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\nindex 060ca92e559a..eb0c24dea184 100644\n--- a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n+++ b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n@@ -1236,6 +1236,8 @@ Value *SCEVExpander::tryToReuseLCSSAPhi(const SCEVAddRecExpr *S) {\n     if (!SE.isSCEVable(PN.getType()))\n       continue;\n     auto *ExitSCEV = SE.getSCEV(&PN);\n+    if (isa<SCEVCouldNotCompute>(ExitSCEV))\n+      continue;\n     if (!isa<SCEVAddRecExpr>(ExitSCEV))\n       continue;\n     Type *PhiTy = PN.getType();\n",
+    "diff --git a/llvm/lib/Analysis/ScalarEvolution.cpp b/llvm/lib/Analysis/ScalarEvolution.cpp\nindex f60a1e9f2270..7913bc7af953 100644\n--- a/llvm/lib/Analysis/ScalarEvolution.cpp\n+++ b/llvm/lib/Analysis/ScalarEvolution.cpp\n@@ -4656,6 +4656,10 @@ const SCEV *ScalarEvolution::removePointerBase(const SCEV *P) {\n const SCEV *ScalarEvolution::getMinusSCEV(const SCEV *LHS, const SCEV *RHS,\n                                           SCEV::NoWrapFlags Flags,\n                                           unsigned Depth) {\n+  // Handle SCEVCouldNotCompute inputs.\n+  if (isa<SCEVCouldNotCompute>(LHS) || isa<SCEVCouldNotCompute>(RHS))\n+    return getCouldNotCompute();\n+\n   // Fast path: X - X --> 0.\n   if (LHS == RHS)\n     return getZero(LHS->getType());\n"
+  ]
+}

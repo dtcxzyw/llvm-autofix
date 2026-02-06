@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "153676",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/153676-qwen3max-11260225.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex a1123063d878..ba8c6ae3adca 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -5404,7 +5404,7 @@ private:\n \n         // Decrement the unscheduled counter and insert to ready list if ready.\n         auto DecrUnsched = [&](auto *Data, bool IsControl = false) {\n-          if ((IsControl || Data->hasValidDependencies()) &&\n+          if (Data->hasValidDependencies() &&\n               Data->incrementUnscheduledDeps(-1) == 0) {\n             // There are no more unscheduled dependencies after\n             // decrementing, so we can put the dependent instruction\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 1157126,
+  "output_tokens": 2353,
+  "cached_tokens": 515072,
+  "total_tokens": 1159479,
+  "chat_rounds": 41,
+  "total_time_sec": 341.615674495697,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::ScheduleData::incrementUnscheduledDeps",
+    4777
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      5407,
+      5408
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\n\nThe issue is an assertion failure in `ScheduleData::incrementUnscheduledDeps()` which states that `hasValidDependencies()` must be true when incrementing unscheduled dependencies. However, during scheduling of control dependencies, we're calling `incrementUnscheduledDeps(-1)` on a ScheduleData that doesn't have valid dependencies (Dependencies == InvalidDeps == -1).\n\n2. Analyzing `opt`'s Log:\n\nFrom the debug log, we can see that the crash occurs when trying to schedule a bundle containing the call instruction `%call12`. The log shows:\n\n```\nSLP:   check for readiness (mem):   %call12 = tail call i32 @fn1(i32 %add)\nSLP:   check for readiness (ctrl):   %call12 = tail call i32 @fn1(i32 %add)\n```\n\nThis indicates that the scheduler is processing control dependencies for the call instruction. The debugger confirms that we're trying to decrement unscheduled dependencies for a ScheduleData representing the `call12` instruction, but this ScheduleData has `Dependencies = -1` (InvalidDeps) and `hasValidDependencies() = false`.\n\n3. Root Cause Analysis:\n\nThe problem is in the `DecrUnsched` lambda in the `schedule` function. When processing control dependencies (line 5568), it calls `DecrUnsched(Dep, /*IsControl=*/true)`. The `DecrUnsched` function has this condition on line 5407:\n\n```cpp\nif ((IsControl || Data->hasValidDependencies()) &&\n    Data->incrementUnscheduledDeps(-1) == 0) {\n```\n\nThe logic assumes that if `IsControl` is true, we can safely call `incrementUnscheduledDeps()` even when `hasValidDependencies()` is false. However, this is incorrect because `incrementUnscheduledDeps()` has an assertion that requires `hasValidDependencies()` to be true.\n\nThe issue is that control dependencies can point to instructions that haven't had their dependencies calculated yet (hence `hasValidDependencies()` returns false), but the code tries to modify their unscheduled dependency count anyway.\n\n4. Proposed Edit Point(s):\n\nThe fix is to ensure that we only call `incrementUnscheduledDeps()` when the ScheduleData actually has valid dependencies, even for control dependencies. The condition should be modified to require `Data->hasValidDependencies()` regardless of whether it's a control dependency or not.\n\n5. Conclusion:\n\nBy changing the condition to require `Data->hasValidDependencies()` unconditionally, we prevent the assertion failure. This is safe because if dependencies haven't been calculated yet, there's no meaningful unscheduled dependency count to modify, and the instruction will be properly handled when its dependencies are eventually calculated.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex a1123063d878..ba8c6ae3adca 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -5404,7 +5404,7 @@ private:\n \n         // Decrement the unscheduled counter and insert to ready list if ready.\n         auto DecrUnsched = [&](auto *Data, bool IsControl = false) {\n-          if ((IsControl || Data->hasValidDependencies()) &&\n+          if (Data->hasValidDependencies() &&\n               Data->incrementUnscheduledDeps(-1) == 0) {\n             // There are no more unscheduled dependencies after\n             // decrementing, so we can put the dependent instruction\n"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "113423",
+    "model": "deepseek-chat"
+  },
+  "patch": null,
+  "error": "NoAvailablePatchFound",
+  "errmsg": "All efforts tried yet no available patches found.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/mswe.py\", line 348, in main\n    raise NoAvailablePatchFound(\"All efforts tried yet no available patches found.\")\nautofix.main.NoAvailablePatchFound: All efforts tried yet no available patches found.\n",
+  "input_tokens": 3259837,
+  "output_tokens": 19064,
+  "cached_tokens": 3215488,
+  "total_tokens": 3278901,
+  "chat_rounds": 95,
+  "total_time_sec": 802.3894255161285,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex c5f39a4c381e..f813d6b7003b 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -555,6 +555,10 @@ Instruction *InstCombinerImpl::foldSelectIntoOp(SelectInst &SI, Value *TrueVal,\n     if (isa<FPMathOperator>(&SI) &&\n         !computeKnownFPClass(FalseVal, FMF, fcNan, &SI).isKnownNeverNaN())\n       return nullptr;\n+    // Avoid the folding if the false value might be infinity when no-infs flag is set.\n+    if (isa<FPMathOperator>(&SI) && TVI->hasNoInfs() &&\n+        !computeKnownFPClass(FalseVal, FMF, fcInf, &SI).isKnownNeverInfinity())\n+      return nullptr;\n \n     Value *NewSel = Builder.CreateSelect(SI.getCondition(), Swapped ? C : OOp,\n                                          Swapped ? OOp : C, \"\", &SI);\n",
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex c5f39a4c381e..dc3c10b53564 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -546,16 +546,24 @@ Instruction *InstCombinerImpl::foldSelectIntoOp(SelectInst &SI, Value *TrueVal,\n         (!OOpIsAPInt || !isSelect01(C->getUniqueInteger(), *OOpC)))\n       return nullptr;\n \n+    // If the false value is a NaN then we have that the floating point math\n+    // operation in the transformed code may not preserve the exact NaN\n+    // bit-pattern -- e.g. `fadd sNaN, 0.0 -> qNaN`.\n+    // This makes the transformation incorrect since the original program would\n+    // have preserved the exact NaN bit-pattern.\n     // If the false value is a NaN then we have that the floating point math\n     // operation in the transformed code may not preserve the exact NaN\n     // bit-pattern -- e.g. `fadd sNaN, 0.0 -> qNaN`.\n     // This makes the transformation incorrect since the original program would\n     // have preserved the exact NaN bit-pattern.\n     // Avoid the folding if the false value might be a NaN.\n-    if (isa<FPMathOperator>(&SI) &&\n-        !computeKnownFPClass(FalseVal, FMF, fcNan, &SI).isKnownNeverNaN())\n+    if (isa<FPMathOperator>(TVI) &&\n+        !computeKnownFPClass(FalseVal, TVI->getFastMathFlags(), fcNan, TVI).isKnownNeverNaN())\n+      return nullptr;\n+    // Avoid the folding if the false value might be infinity when no-infs flag is set.\n+    if (isa<FPMathOperator>(TVI) && TVI->hasNoInfs() &&\n+        !computeKnownFPClass(FalseVal, TVI->getFastMathFlags(), fcInf, TVI).isKnownNeverInfinity())\n       return nullptr;\n-\n     Value *NewSel = Builder.CreateSelect(SI.getCondition(), Swapped ? C : OOp,\n                                          Swapped ? OOp : C, \"\", &SI);\n     if (isa<FPMathOperator>(&SI))\n",
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex c5f39a4c381e..d305d6ba4b98 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -546,21 +546,29 @@ Instruction *InstCombinerImpl::foldSelectIntoOp(SelectInst &SI, Value *TrueVal,\n         (!OOpIsAPInt || !isSelect01(C->getUniqueInteger(), *OOpC)))\n       return nullptr;\n \n+    // If the false value is a NaN then we have that the floating point math\n+    // operation in the transformed code may not preserve the exact NaN\n+    // bit-pattern -- e.g. `fadd sNaN, 0.0 -> qNaN`.\n+    // This makes the transformation incorrect since the original program would\n+    // have preserved the exact NaN bit-pattern.\n     // If the false value is a NaN then we have that the floating point math\n     // operation in the transformed code may not preserve the exact NaN\n     // bit-pattern -- e.g. `fadd sNaN, 0.0 -> qNaN`.\n     // This makes the transformation incorrect since the original program would\n     // have preserved the exact NaN bit-pattern.\n     // Avoid the folding if the false value might be a NaN.\n-    if (isa<FPMathOperator>(&SI) &&\n-        !computeKnownFPClass(FalseVal, FMF, fcNan, &SI).isKnownNeverNaN())\n+    if (isa<FPMathOperator>(TVI) && TVI->hasNoNaNs() &&\n+        !computeKnownFPClass(FalseVal, FastMathFlags{}, fcNan, TVI).isKnownNeverNaN())\n+      return nullptr;\n+    // Avoid the folding if the false value might be infinity when no-infs flag is set.\n+    if (isa<FPMathOperator>(TVI) && TVI->hasNoInfs() &&\n+        !computeKnownFPClass(FalseVal, FastMathFlags{}, fcInf, TVI).isKnownNeverInfinity())\n+      return nullptr;\n+    // Avoid the folding if the false value might be infinity when no-infs flag is set.\n+    if (isa<FPMathOperator>(TVI) && TVI->hasNoInfs() &&\n+        !computeKnownFPClass(FalseVal, TVI->getFastMathFlags(), fcInf, TVI).isKnownNeverInfinity())\n       return nullptr;\n-\n     Value *NewSel = Builder.CreateSelect(SI.getCondition(), Swapped ? C : OOp,\n-                                         Swapped ? OOp : C, \"\", &SI);\n-    if (isa<FPMathOperator>(&SI))\n-      cast<Instruction>(NewSel)->setFastMathFlags(FMF);\n-    NewSel->takeName(TVI);\n     BinaryOperator *BO =\n         BinaryOperator::Create(TVI->getOpcode(), FalseVal, NewSel);\n     BO->copyIRFlags(TVI);\n"
+  ]
+}

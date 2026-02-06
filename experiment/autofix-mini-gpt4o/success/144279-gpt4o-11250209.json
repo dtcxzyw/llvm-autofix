@@ -1,0 +1,39 @@
+{
+  "command": {
+    "issue": "144279",
+    "model": "gpt-4o",
+    "driver": "openai-generic",
+    "stats": "/tmp/144279-gpt4o-11250209.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Analysis/ConstantFolding.cpp b/llvm/lib/Analysis/ConstantFolding.cpp\nindex 2b7a438a9ef0..867914c941e9 100644\n--- a/llvm/lib/Analysis/ConstantFolding.cpp\n+++ b/llvm/lib/Analysis/ConstantFolding.cpp\n@@ -443,13 +443,17 @@ bool ReadDataFromGlobal(Constant *C, uint64_t ByteOffset, unsigned char *CurPtr,\n     const APInt &Val = CI->getValue();\n     unsigned IntBytes = unsigned(CI->getBitWidth()/8);\n \n-    for (unsigned i = 0; i != BytesLeft && ByteOffset != IntBytes; ++i) {\n-      unsigned n = ByteOffset;\n-      if (!DL.isLittleEndian())\n-        n = IntBytes - n - 1;\n-      CurPtr[i] = Val.extractBits(8, n * 8).getZExtValue();\n-      ++ByteOffset;\n-    }\n+    for (unsigned i = 0; i != BytesLeft; ++i) {\n+  if (ByteOffset < IntBytes) {\n+    unsigned n = ByteOffset;\n+    if (!DL.isLittleEndian())\n+      n = IntBytes - n - 1;\n+    CurPtr[i] = Val.extractBits(8, n * 8).getZExtValue();\n+  } else {\n+    CurPtr[i] = 0; // Padding byte\n+  }\n+  ++ByteOffset;\n+}\n     return true;\n   }\n \n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 383416,
+  "output_tokens": 4404,
+  "cached_tokens": 346112,
+  "total_tokens": 387820,
+  "chat_rounds": 38,
+  "total_time_sec": 237.212961435318,
+  "trans_point": [
+    "llvm/lib/Analysis/ConstantFolding.cpp",
+    "(anonymous namespace)::ReadDataFromGlobal",
+    450
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Analysis/ConstantFolding.cpp",
+      446,
+      446
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The issue arises in the `ReadDataFromGlobal` function when attempting to extract bits from an `APInt` value using the `extractBits` method. The parameters passed to `extractBits` are derived from `ByteOffset` and `IntBytes`. In this case, `ByteOffset` (6) exceeds the size of the `APInt` value (5 bytes), leading to an out-of-bounds access and triggering an assertion failure.\n\n2. **Analyzing `opt`'s Log**: The log indicates that the assertion failure occurs in `APInt::extractBits`. This confirms that the issue is related to the parameters passed to `extractBits`. The `ReadDataFromGlobal` function does not validate whether `ByteOffset` is within the bounds of the `APInt` value before calling `extractBits`.\n\n3. **Root Cause Analysis**: The root cause is the lack of a validation check for `ByteOffset` in `ReadDataFromGlobal`. This allows `ByteOffset` to exceed the size of the `APInt` value, resulting in an invalid call to `extractBits`.\n\n4. **Proposed Edit Point(s)**: Add a validation check at line 446 in `llvm/lib/Analysis/ConstantFolding.cpp` to ensure that `ByteOffset` does not exceed the size of the `APInt` value before calling `extractBits`. The check should look like this:\n\n```cpp\nif (ByteOffset >= IntBytes) {\n  return false; // Out-of-bounds access\n}\n```\n\n5. **Conclusion**: Adding this validation check will prevent out-of-bounds access and resolve the assertion failure. This fix ensures that `ReadDataFromGlobal` handles cases where `ByteOffset` exceeds the size of the `APInt` value correctly.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Analysis/ConstantFolding.cpp b/llvm/lib/Analysis/ConstantFolding.cpp\nindex 2b7a438a9ef0..28996c26de8f 100644\n--- a/llvm/lib/Analysis/ConstantFolding.cpp\n+++ b/llvm/lib/Analysis/ConstantFolding.cpp\n@@ -443,7 +443,11 @@ bool ReadDataFromGlobal(Constant *C, uint64_t ByteOffset, unsigned char *CurPtr,\n     const APInt &Val = CI->getValue();\n     unsigned IntBytes = unsigned(CI->getBitWidth()/8);\n \n-    for (unsigned i = 0; i != BytesLeft && ByteOffset != IntBytes; ++i) {\n+    if (ByteOffset >= IntBytes) {\n+  return false; // Out-of-bounds access\n+}\n+\n+for (unsigned i = 0; i != BytesLeft && ByteOffset != IntBytes; ++i) {\n       unsigned n = ByteOffset;\n       if (!DL.isLittleEndian())\n         n = IntBytes - n - 1;\n",
+    "diff --git a/llvm/lib/Analysis/ConstantFolding.cpp b/llvm/lib/Analysis/ConstantFolding.cpp\nindex 2b7a438a9ef0..d22033901e1d 100644\n--- a/llvm/lib/Analysis/ConstantFolding.cpp\n+++ b/llvm/lib/Analysis/ConstantFolding.cpp\n@@ -444,6 +444,15 @@ bool ReadDataFromGlobal(Constant *C, uint64_t ByteOffset, unsigned char *CurPtr,\n     unsigned IntBytes = unsigned(CI->getBitWidth()/8);\n \n     for (unsigned i = 0; i != BytesLeft && ByteOffset != IntBytes; ++i) {\n+  unsigned n = ByteOffset;\n+  if (!DL.isLittleEndian())\n+    n = IntBytes - n - 1;\n+  if (ByteOffset < IntBytes) {\n+    CurPtr[i] = Val.extractBits(8, n * 8).getZExtValue();\n+  } else {\n+    CurPtr[i] = 0; // Padding byte\n+  }\n+  ++ByteOffset;\n       unsigned n = ByteOffset;\n       if (!DL.isLittleEndian())\n         n = IntBytes - n - 1;\n",
+    "diff --git a/llvm/lib/Analysis/ConstantFolding.cpp b/llvm/lib/Analysis/ConstantFolding.cpp\nindex 2b7a438a9ef0..6768fd0f3b23 100644\n--- a/llvm/lib/Analysis/ConstantFolding.cpp\n+++ b/llvm/lib/Analysis/ConstantFolding.cpp\n@@ -444,7 +444,16 @@ bool ReadDataFromGlobal(Constant *C, uint64_t ByteOffset, unsigned char *CurPtr,\n     unsigned IntBytes = unsigned(CI->getBitWidth()/8);\n \n     for (unsigned i = 0; i != BytesLeft && ByteOffset != IntBytes; ++i) {\n-      unsigned n = ByteOffset;\n+  \n+  if (!DL.isLittleEndian())\n+    n = IntBytes - n - 1;\n+  if (ByteOffset < IntBytes) {\n+    CurPtr[i] = Val.extractBits(8, n * 8).getZExtValue();\n+  } else {\n+    CurPtr[i] = 0; // Padding byte\n+  }\n+  ++ByteOffset;\n+      \n       if (!DL.isLittleEndian())\n         n = IntBytes - n - 1;\n       CurPtr[i] = Val.extractBits(8, n * 8).getZExtValue();\n",
+    "diff --git a/llvm/lib/Analysis/ConstantFolding.cpp b/llvm/lib/Analysis/ConstantFolding.cpp\nindex 2b7a438a9ef0..5f939768a440 100644\n--- a/llvm/lib/Analysis/ConstantFolding.cpp\n+++ b/llvm/lib/Analysis/ConstantFolding.cpp\n@@ -444,7 +444,17 @@ bool ReadDataFromGlobal(Constant *C, uint64_t ByteOffset, unsigned char *CurPtr,\n     unsigned IntBytes = unsigned(CI->getBitWidth()/8);\n \n     for (unsigned i = 0; i != BytesLeft && ByteOffset != IntBytes; ++i) {\n-      unsigned n = ByteOffset;\n+  unsigned n = ByteOffset; // Declare `n` here\n+  \n+  if (!DL.isLittleEndian())\n+    n = IntBytes - n - 1;\n+  if (ByteOffset < IntBytes) {\n+    CurPtr[i] = Val.extractBits(8, n * 8).getZExtValue();\n+  } else {\n+    CurPtr[i] = 0; // Padding byte\n+  }\n+  ++ByteOffset;\n+      \n       if (!DL.isLittleEndian())\n         n = IntBytes - n - 1;\n       CurPtr[i] = Val.extractBits(8, n * 8).getZExtValue();\n",
+    "diff --git a/llvm/lib/Analysis/ConstantFolding.cpp b/llvm/lib/Analysis/ConstantFolding.cpp\nindex 2b7a438a9ef0..867914c941e9 100644\n--- a/llvm/lib/Analysis/ConstantFolding.cpp\n+++ b/llvm/lib/Analysis/ConstantFolding.cpp\n@@ -443,13 +443,17 @@ bool ReadDataFromGlobal(Constant *C, uint64_t ByteOffset, unsigned char *CurPtr,\n     const APInt &Val = CI->getValue();\n     unsigned IntBytes = unsigned(CI->getBitWidth()/8);\n \n-    for (unsigned i = 0; i != BytesLeft && ByteOffset != IntBytes; ++i) {\n-      unsigned n = ByteOffset;\n-      if (!DL.isLittleEndian())\n-        n = IntBytes - n - 1;\n-      CurPtr[i] = Val.extractBits(8, n * 8).getZExtValue();\n-      ++ByteOffset;\n-    }\n+    for (unsigned i = 0; i != BytesLeft; ++i) {\n+  if (ByteOffset < IntBytes) {\n+    unsigned n = ByteOffset;\n+    if (!DL.isLittleEndian())\n+      n = IntBytes - n - 1;\n+    CurPtr[i] = Val.extractBits(8, n * 8).getZExtValue();\n+  } else {\n+    CurPtr[i] = 0; // Padding byte\n+  }\n+  ++ByteOffset;\n+}\n     return true;\n   }\n \n"
+  ]
+}

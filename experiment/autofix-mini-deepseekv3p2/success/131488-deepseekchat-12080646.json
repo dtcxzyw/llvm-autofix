@@ -1,0 +1,37 @@
+{
+  "command": {
+    "issue": "131488",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/131488-deepseekchat-12080646.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..760dbd928ef0 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2543,14 +2543,20 @@ static bool OptimizeNonTrivialIFuncs(\n \n     // Discover the callee versions.\n     SmallVector<Function *> Callees;\n-    if (any_of(*Resolver, [&TTI, &Callees](BasicBlock &BB) {\n-          if (auto *Ret = dyn_cast_or_null<ReturnInst>(BB.getTerminator()))\n+    bool HasReturn = false;\n+    if (any_of(*Resolver, [&TTI, &Callees, &HasReturn](BasicBlock &BB) {\n+          if (auto *Ret = dyn_cast_or_null<ReturnInst>(BB.getTerminator())) {\n+            HasReturn = true;\n             if (!collectVersions(TTI, Ret->getReturnValue(), Callees))\n               return true;\n+          }\n           return false;\n         }))\n       continue;\n \n+    if (!HasReturn)\n+      continue;\n+\n     assert(!Callees.empty() && \"Expecting successful collection of versions\");\n \n     LLVM_DEBUG(dbgs() << \"Statically resolving calls to function \"\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 4269606,
+  "output_tokens": 18293,
+  "cached_tokens": 4205248,
+  "total_tokens": 4287899,
+  "chat_rounds": 295,
+  "total_time_sec": 1582.1813433170319,
+  "trans_point": [
+    "llvm/lib/Transforms/IPO/GlobalOpt.cpp",
+    "OptimizeNonTrivialIFuncs(llvm::Module &, llvm::function_ref<llvm::TargetTransformInfo&(llvm::Function&)>)",
+    2554
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/GlobalOpt.cpp",
+      2554,
+      2554
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The crash occurs in `OptimizeNonTrivialIFuncs` when processing an ifunc whose resolver function (`f1`) contains only an `unreachable` instruction (no return). The code assumes that after scanning all basic blocks, at least one callee version will have been collected via `collectVersions`. However, when the resolver has no return instructions (like `unreachable`), `Callees` remains empty, triggering the assertion `!Callees.empty()`.\n\n2. **Analyzing `opt`'s Log**: The debug output shows the assertion failure at line 2554. The resolver `f1` has a single basic block terminated by `unreachable`, not a `ReturnInst`. The `any_of` loop returns false (no block caused `collectVersions` to fail), but `Callees` is empty because `collectVersions` was never called.\n\n3. **Root Cause Analysis**: The logic incorrectly assumes that if `any_of` returns false (no failures), then at least one callee version must have been collected. This is false when the resolver contains no return instructions at all. Such resolvers cannot provide callee versions for ifunc resolution and should be skipped, not asserted.\n\n4. **Proposed Edit Point(s)**: Replace the assertion at line 2554 with a check that skips the ifunc when `Callees` is empty. The assertion should remain for cases where `collectVersions` was called but returned no versions due to some error, but we need to handle the \"no return instructions\" case gracefully.\n\n   Current code:\n   ```cpp\n   assert(!Callees.empty() && \"Expecting successful collection of versions\");\n   ```\n\n   Proposed fix:\n   ```cpp\n   if (Callees.empty())\n     continue;\n   ```\n\n   This allows the pass to skip ifuncs whose resolvers don't return any function pointers (e.g., `unreachable` resolvers), which is semantically correct\u2014such ifuncs cannot be statically resolved.\n\n5. **Conclusion**: The fix ensures that `OptimizeNonTrivialIFuncs` gracefully skips ifuncs with resolvers that provide no callee versions, rather than crashing. This matches the pass's intent: only optimize when callee versions can be determined. The change is minimal and preserves the assertion's original purpose (catching internal logic errors) while handling the valid edge case.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..f88d51f443bc 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2551,7 +2551,8 @@ static bool OptimizeNonTrivialIFuncs(\n         }))\n       continue;\n \n-    assert(!Callees.empty() && \"Expecting successful collection of versions\");\n+    if (Callees.empty())\n+      continue;\n \n     LLVM_DEBUG(dbgs() << \"Statically resolving calls to function \"\n                       << Resolver->getName() << \"\\n\");\n",
+    "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..b4f73ef10ef0 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2543,15 +2543,19 @@ static bool OptimizeNonTrivialIFuncs(\n \n     // Discover the callee versions.\n     SmallVector<Function *> Callees;\n-    if (any_of(*Resolver, [&TTI, &Callees](BasicBlock &BB) {\n-          if (auto *Ret = dyn_cast_or_null<ReturnInst>(BB.getTerminator()))\n+    bool HasReturn = false;\n+    if (any_of(*Resolver, [&TTI, &Callees, &HasReturn](BasicBlock &BB) {\n+          if (auto *Ret = dyn_cast_or_null<ReturnInst>(BB.getTerminator())) {\n+            HasReturn = true;\n             if (!collectVersions(TTI, Ret->getReturnValue(), Callees))\n               return true;\n+          }\n           return false;\n         }))\n       continue;\n \n-    assert(!Callees.empty() && \"Expecting successful collection of versions\");\n+    if (!HasReturn || Callees.empty())\n+      continue;\n \n     LLVM_DEBUG(dbgs() << \"Statically resolving calls to function \"\n                       << Resolver->getName() << \"\\n\");\n",
+    "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..760dbd928ef0 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2543,14 +2543,20 @@ static bool OptimizeNonTrivialIFuncs(\n \n     // Discover the callee versions.\n     SmallVector<Function *> Callees;\n-    if (any_of(*Resolver, [&TTI, &Callees](BasicBlock &BB) {\n-          if (auto *Ret = dyn_cast_or_null<ReturnInst>(BB.getTerminator()))\n+    bool HasReturn = false;\n+    if (any_of(*Resolver, [&TTI, &Callees, &HasReturn](BasicBlock &BB) {\n+          if (auto *Ret = dyn_cast_or_null<ReturnInst>(BB.getTerminator())) {\n+            HasReturn = true;\n             if (!collectVersions(TTI, Ret->getReturnValue(), Callees))\n               return true;\n+          }\n           return false;\n         }))\n       continue;\n \n+    if (!HasReturn)\n+      continue;\n+\n     assert(!Callees.empty() && \"Expecting successful collection of versions\");\n \n     LLVM_DEBUG(dbgs() << \"Statically resolving calls to function \"\n"
+  ]
+}

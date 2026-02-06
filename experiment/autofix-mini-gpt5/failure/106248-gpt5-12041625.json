@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "106248",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/106248-gpt5-12041625.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 804, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 822941,
+  "output_tokens": 13152,
+  "cached_tokens": 738944,
+  "total_tokens": 836093,
+  "chat_rounds": 40,
+  "total_time_sec": 367.7764673233032,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+    "llvm::LoopVectorizationPlanner::computeBestVF",
+    7360
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+      7288,
+      7289
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash is an assertion failure in LoopVectorizationPlanner::computeBestVF(), which compares the VPlan-based cost model's chosen VF against the legacy cost model's chosen VF. The assertion allows disagreement only if the VPlan contains additional simplifications not accounted for by the legacy model. In this reproducer, the assertion fires, meaning the VPlan-based and legacy cost models disagree and the code does not recognize any additional simplifications.\n\n2. Analyzing opt's Log:\nThe log shows the assertion at LoopVectorize.cpp:7360: \"VPlan cost model and legacy cost model disagreed\". The debug-only run doesn't print more, but the first transformation point is computeBestVF where it calculates cost using cost(VPlan, VF) and compares with selectVectorizationFactor (legacy). The path then calls planContainsAdditionalSimplifications to decide whether disagreement is acceptable.\n\n3. Root Cause Analysis:\nLooking at planContainsAdditionalSimplifications(VPlan &Plan, ElementCount VF, VPCostContext &CostCtx, Loop *TheLoop, LoopVectorizationCostModel &CM), the function tries to detect if VPlan has simplifications by checking instructions in the original loop not represented in the VPlan nor skipped by CostCtx.\nThe relevant code:\n  return any_of(TheLoop->blocks(), [...](Instruction &I) {\n    if (isa<PHINode>(&I)) return false;\n    return !SeenInstrs.contains(&I) &&\n           !CostCtx.skipCostComputation(&I, true) &&\n           !CM.canTruncateToMinimalBitwidth(&I, VF);\n  });\nNote skipCostComputation is called with a hardcoded 'true' instead of reflecting the actual VF's vector/scalar nature (VF.isVector()). This mismatched parameter can lead to incorrect classification of which instructions are skipped by the VPlan-based cost model. As a result, planContainsAdditionalSimplifications may return false even when there are extra simplifications, or vice versa, causing the assertion to fire unnecessarily when the two cost models disagree legitimately.\nGiven the function signature includes VF, it's clear the intent is to use VF to decide vector context. The hardcoded 'true' is a bug.\n\n4. Proposed Edit Point(s)\n- File: llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n- Lines: 7288-7289\n- Change:\n  From:\n    !CostCtx.skipCostComputation(&I, true) &&\n  To:\n    !CostCtx.skipCostComputation(&I, VF.isVector()) &&\n\nThis uses the actual ElementCount VF to determine whether the cost context is vector or scalar for skipping cost computation, aligning planContainsAdditionalSimplifications with the intended behavior.\n\n5. Conclusion:\nThe assertion failure arises because planContainsAdditionalSimplifications erroneously uses a constant 'true' for vector context, leading to incorrect detection of extra simplifications and thus not allowing valid disagreements between the VPlan and legacy cost models. Replacing 'true' with VF.isVector() ensures the check accurately reflects the vectorization factor under consideration. This should prevent the spurious assertion and allow the VPlan-based cost model to legitimately differ when extra simplifications are present.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 56f51e14a6eb..07a9be2be5c6 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -7285,7 +7285,7 @@ planContainsAdditionalSimplifications(VPlan &Plan, ElementCount VF,\n           if (isa<PHINode>(&I))\n             return false;\n           return !SeenInstrs.contains(&I) &&\n-                 !CostCtx.skipCostComputation(&I, true) &&\n+                 !CostCtx.skipCostComputation(&I, VF.isVector()) &&\n                  !CM.canTruncateToMinimalBitwidth(&I, VF);\n         });\n       });\n"
+  ]
+}

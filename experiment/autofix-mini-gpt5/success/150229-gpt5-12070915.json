@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "150229",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/150229-gpt5-12070915.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Scalar/GVN.cpp b/llvm/lib/Transforms/Scalar/GVN.cpp\nindex 7704e49c499d..68f09c04835a 100644\n--- a/llvm/lib/Transforms/Scalar/GVN.cpp\n+++ b/llvm/lib/Transforms/Scalar/GVN.cpp\n@@ -3306,10 +3306,13 @@ void GVNPass::addDeadBlock(BasicBlock *BB) {\n       if (!DeadBlocks.count(P))\n         continue;\n \n-      if (is_contained(successors(P), B) &&\n-          isCriticalEdge(P->getTerminator(), B)) {\n-        if (BasicBlock *S = splitCriticalEdges(P, B))\n-          DeadBlocks.insert(P = S);\n+      if (is_contained(successors(P), B)) {\n+        Instruction *TI = P->getTerminator();\n+        // Do not attempt to split edges from IndirectBrInst; unsupported.\n+        if (!isa<IndirectBrInst>(TI) && isCriticalEdge(TI, B)) {\n+          if (BasicBlock *S = splitCriticalEdges(P, B))\n+            DeadBlocks.insert(P = S);\n+        }\n       }\n     }\n \n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 45518,
+  "output_tokens": 2002,
+  "cached_tokens": 29184,
+  "total_tokens": 47520,
+  "chat_rounds": 7,
+  "total_time_sec": 79.78875088691711,
+  "trans_point": [
+    "llvm/lib/Transforms/Utils/BreakCriticalEdges.cpp",
+    "llvm::SplitKnownCriticalEdge",
+    114
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/GVN.cpp",
+      3304,
+      3314
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs when GVN tries to split a critical edge whose predecessor terminator is an IndirectBrInst. BreakCriticalEdges::SplitKnownCriticalEdge asserts that edges from IndirectBrInst cannot be split. In the provided reproducer, GVN marks a block as dead due to a foldable conditional branch and then attempts to split critical edges of its live successors, which includes an edge originating from an indirectbr. This leads to the assertion and abort.\n\n2. Analyzing opt's Log:\n- The log shows the first transformation in SplitKnownCriticalEdge during the GVN pass.\n- The backtrace points to GVNPass::splitCriticalEdges(BasicBlock*, BasicBlock*) from addDeadBlock, which then calls SplitCriticalEdge(Pred, Succ, ...). The assertion in SplitKnownCriticalEdge explicitly disallows splitting edges from IndirectBrInst.\n- The IR has an indirectbr in block 'ibr' with two edges to 'exit'. GVN determines 'ibr' is dead and processes 'exit' as part of the dominance frontier, attempting to split the critical edge from 'ibr' to 'exit'.\n\n3. Root Cause Analysis:\nGVN's addDeadBlock unconditionally tries to split critical edges from dead predecessors to live successors to simplify phi updates. It does not special-case IndirectBrInst, but BreakCriticalEdges does. Therefore, when a dead predecessor ends with IndirectBrInst, the call to SplitCriticalEdge(Pred, Succ, ...) hits the assertion. The correct behavior is to avoid attempting to split edges from IndirectBrInst and proceed with poisoning phi incoming values without splitting.\n\nSpecifically, in addDeadBlock:\n- It gathers Preds = predecessors(B).\n- For each P that is in DeadBlocks, if isCriticalEdge(P->getTerminator(), B) it calls splitCriticalEdges(P, B).\n- This lacks a guard for IndirectBrInst terminators.\n\n4. Proposed Edit Point(s):\n- File: llvm/lib/Transforms/Scalar/GVN.cpp\n- Location: In GVNPass::addDeadBlock, within the loop that attempts to split critical edges (lines ~3304-3314 in the provided snippet).\n- Change: Add a guard to skip splitting if the predecessor terminator is an IndirectBrInst. This preserves the existing behavior for other terminators while avoiding the invalid split.\n\nSuggested code edit for lines 3304-3314:\n\nReplace:\n  if (is_contained(successors(P), B) &&\n      isCriticalEdge(P->getTerminator(), B)) {\n    if (BasicBlock *S = splitCriticalEdges(P, B))\n      DeadBlocks.insert(P = S);\n  }\n\nWith:\n  if (is_contained(successors(P), B)) {\n    Instruction *TI = P->getTerminator();\n    // Do not attempt to split edges from IndirectBrInst; this is unsupported.\n    if (!isa<IndirectBrInst>(TI) && isCriticalEdge(TI, B)) {\n      if (BasicBlock *S = splitCriticalEdges(P, B))\n        DeadBlocks.insert(P = S);\n    }\n  }\n\nThis ensures GVN never calls SplitCriticalEdge for edges originating from IndirectBrInst, aligning with BreakCriticalEdges' constraints.\n\n5. Conclusion:\nThe crash is caused by GVN attempting to split an edge from an IndirectBrInst, which is explicitly unsupported by BreakCriticalEdges. Adding a guard in addDeadBlock to skip splitting such edges resolves the assertion failure. The fix prevents invalid splits while keeping the intended phi poisoning and dead-code processing intact. Expected effect: opt -passes=gvn no longer aborts on functions containing indirectbr and dead blocks; GVN will poison phi operands for live successors without splitting the indirectbr critical edges.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Scalar/GVN.cpp b/llvm/lib/Transforms/Scalar/GVN.cpp\nindex 7704e49c499d..68f09c04835a 100644\n--- a/llvm/lib/Transforms/Scalar/GVN.cpp\n+++ b/llvm/lib/Transforms/Scalar/GVN.cpp\n@@ -3306,10 +3306,13 @@ void GVNPass::addDeadBlock(BasicBlock *BB) {\n       if (!DeadBlocks.count(P))\n         continue;\n \n-      if (is_contained(successors(P), B) &&\n-          isCriticalEdge(P->getTerminator(), B)) {\n-        if (BasicBlock *S = splitCriticalEdges(P, B))\n-          DeadBlocks.insert(P = S);\n+      if (is_contained(successors(P), B)) {\n+        Instruction *TI = P->getTerminator();\n+        // Do not attempt to split edges from IndirectBrInst; unsupported.\n+        if (!isa<IndirectBrInst>(TI) && isCriticalEdge(TI, B)) {\n+          if (BasicBlock *S = splitCriticalEdges(P, B))\n+            DeadBlocks.insert(P = S);\n+        }\n       }\n     }\n \n"
+  ]
+}

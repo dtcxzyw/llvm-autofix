@@ -1,0 +1,37 @@
+{
+  "command": {
+    "issue": "132563",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/132563-qwen3max-12051712.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex bd225bcc0635..bbdb6b0757b3 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -1446,6 +1446,11 @@ static ScalarizationResult canScalarizeAccess(VectorType *VecTy, Value *Idx,\n   }\n \n   unsigned IntWidth = Idx->getType()->getScalarSizeInBits();\n+  // If NumElements cannot be represented in the index type's bit width,\n+  // we cannot safely create the APInt for MaxElts, so conservatively\n+  // return unsafe to avoid the crash.\n+  if (!llvm::isUIntN(IntWidth, NumElements))\n+    return ScalarizationResult::unsafe();\n   APInt Zero(IntWidth, 0);\n   APInt MaxElts(IntWidth, NumElements);\n   ConstantRange ValidIndices(Zero, MaxElts);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 153329,
+  "output_tokens": 14096,
+  "cached_tokens": 49408,
+  "total_tokens": 167425,
+  "chat_rounds": 13,
+  "total_time_sec": 515.9828140735626,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+    "canScalarizeAccess",
+    1450
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+      1449,
+      1449
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The crash occurs in the `canScalarizeAccess` function when trying to create an `APInt` with bit width equal to the index type's size, but the value `NumElements` (the number of vector elements) cannot fit in that bit width. Specifically, for `<16 x i8>` with `i1` index, we try to create `APInt(1, 16)` which fails because 16 cannot be represented in 1 bit. Similarly, for `<256 x i8>` with `i8` index, we try to create `APInt(8, 256)` which fails because 256 cannot be represented in 8 bits (max is 255).\n\n2. **Analyzing `opt`'s Log**: The log shows that the pass crashes immediately when processing the `store` instruction in `src_1_idx`, specifically in the `canScalarizeAccess` function called from `foldSingleElementStore`. The debug output confirms that the pass visits the load, insertelement, and store instructions before crashing.\n\n3. **Root Cause Analysis**: The root cause is that the code assumes the index type can represent the value `NumElements` when creating the `MaxElts` APInt. However, when the index type is narrower than needed to represent `NumElements`, this assumption fails. The key insight is that if `NumElements` cannot be represented in the index type's bit width, then all representable index values (0 to 2^IntWidth - 1) are automatically valid because they are all less than `NumElements`.\n\n4. **Proposed Edit Point(s)**: Insert a check before creating the `MaxElts` APInt to handle the case where `NumElements` cannot fit in the index type's bit width. In this case, we can safely return `ScalarizationResult::safe()` because all possible index values are valid.\n\n5. **Conclusion**: The fix adds a guard condition that checks if `NumElements` can be represented in the index type's bit width using `llvm::isUIntN`. If not, it returns `safe()` immediately, avoiding the APInt construction that causes the assertion failure. This handles both test cases correctly: for `<16 x i8>` with `i1` index, all i1 values (0,1) are valid; for `<256 x i8>` with `i8` index, all i8 values (0-255) are valid.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex bd225bcc0635..67b884e36fc4 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -1446,6 +1446,10 @@ static ScalarizationResult canScalarizeAccess(VectorType *VecTy, Value *Idx,\n   }\n \n   unsigned IntWidth = Idx->getType()->getScalarSizeInBits();\n+  // If NumElements cannot be represented in the index type's bit width,\n+  // then all representable index values are valid (since they're all < NumElements).\n+  if (!llvm::isUIntN(IntWidth, NumElements))\n+    return ScalarizationResult::safe();\n   APInt Zero(IntWidth, 0);\n   APInt MaxElts(IntWidth, NumElements);\n   ConstantRange ValidIndices(Zero, MaxElts);\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex bd225bcc0635..67b884e36fc4 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -1446,6 +1446,10 @@ static ScalarizationResult canScalarizeAccess(VectorType *VecTy, Value *Idx,\n   }\n \n   unsigned IntWidth = Idx->getType()->getScalarSizeInBits();\n+  // If NumElements cannot be represented in the index type's bit width,\n+  // then all representable index values are valid (since they're all < NumElements).\n+  if (!llvm::isUIntN(IntWidth, NumElements))\n+    return ScalarizationResult::safe();\n   APInt Zero(IntWidth, 0);\n   APInt MaxElts(IntWidth, NumElements);\n   ConstantRange ValidIndices(Zero, MaxElts);\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex bd225bcc0635..bbdb6b0757b3 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -1446,6 +1446,11 @@ static ScalarizationResult canScalarizeAccess(VectorType *VecTy, Value *Idx,\n   }\n \n   unsigned IntWidth = Idx->getType()->getScalarSizeInBits();\n+  // If NumElements cannot be represented in the index type's bit width,\n+  // we cannot safely create the APInt for MaxElts, so conservatively\n+  // return unsafe to avoid the crash.\n+  if (!llvm::isUIntN(IntWidth, NumElements))\n+    return ScalarizationResult::unsafe();\n   APInt Zero(IntWidth, 0);\n   APInt MaxElts(IntWidth, NumElements);\n   ConstantRange ValidIndices(Zero, MaxElts);\n"
+  ]
+}

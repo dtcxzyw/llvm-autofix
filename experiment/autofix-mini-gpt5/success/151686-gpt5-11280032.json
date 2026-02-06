@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "151686",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/151686-gpt5-11280032.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 20528089c000..58398c17ca8f 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -9791,6 +9791,9 @@ preparePlanForEpilogueVectorLoop(VPlan &Plan, Loop *L,\n                 all_of(P.incoming_values(), [&EPI](Value *Inc) {\n                   return Inc == EPI.VectorTripCount ||\n                          match(Inc, m_SpecificInt(0));\n+                }) &&\n+                any_of(P.incoming_values(), [&EPI](Value *Inc) {\n+                  return Inc == EPI.VectorTripCount;\n                 }))\n               return &P;\n             return nullptr;\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 206367,
+  "output_tokens": 16193,
+  "cached_tokens": 173312,
+  "total_tokens": 222560,
+  "chat_rounds": 15,
+  "total_time_sec": 316.08696031570435,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+    "preparePlanForEpilogueVectorLoop",
+    9798
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+      9784,
+      9796
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs in preparePlanForEpilogueVectorLoop() due to the assertion that EPResumeVal must exist. EPResumeVal is found by scanning the scalar preheader's PHI nodes for a canonical IV resume value. The matcher used is too permissive, causing multiple PHIs to match, making find_singleton return nullptr and triggering the assertion.\n\n2. Analyzing opt's Log:\nSCEV indicates a canonical IV with trip count 1051 and a separate induction. The pass turns on epilogue vectorization. The repro shows two PHIs in the preheader:\n  - %vec.epilog.resume.val = phi i32 [ 1024, %middle.block ], [ 0, %iter.check ], [ 0, %vector.main.loop.iter.check ]\n  - %bc.resume.val = phi i32 [ 0, %middle.block ], [ 0, %iter.check ], [ 0, %vector.main.loop.iter.check ]\nEPI.VectorTripCount is the constant i32 1024. The current predicate matches both PHIs because it requires (a) incoming value from MainLoopIterationCountCheck is 0, and (b) all incoming values are either VectorTripCount or 0. Since bc.resume.val has all incoming values 0, it erroneously matches too. With two matches, find_singleton returns nullptr, hence the assert fires.\n\n3. Root Cause Analysis:\n- The predicate in preparePlanForEpilogueVectorLoop() at lines 9784\u20139796 does not require that there is an actual incoming equal to EPI.VectorTripCount; it only allows that incoming values are either VectorTripCount or 0. This admits PHIs that are all zeros, like bc.resume.val, leading to ambiguity. The earlier VPlan-level check that decides whether to create the canonical resume PHI is stricter (it checks for a PHI with operands [VectorTC, 0]). The IR-level check needs similar strictness.\n\n4. Proposed Edit Point(s):\n- File: llvm/lib/Transforms/Vectorize/LoopVectorize.cpp, lines 9784\u20139796 (inside preparePlanForEpilogueVectorLoop)\n  Change the find_singleton predicate to additionally require that the PHI has at least one incoming equal to EPI.VectorTripCount, not just that all are in the set {VectorTripCount, 0}. Concretely, compute a HasVectorTC flag via any_of(P.incoming_values(), Inc == EPI.VectorTripCount) and require HasVectorTC to be true, along with the existing checks. This disambiguates and ensures only %vec.epilog.resume.val matches and %bc.resume.val is rejected.\n\n  Rationale: This aligns the IR-level matching with the stricter VPlan-level pattern (created in preparePlanForMainVectorLoop) and fixes the ambiguity introduced by other resume PHIs that may be all zeros.\n\n5. Conclusion:\nBy strengthening the pattern to require the presence of EPI.VectorTripCount among incoming values, preparePlanForEpilogueVectorLoop() will reliably find the canonical IV resume PHI, avoiding multiple matches and the resulting assertion. This resolves the crash for the provided reproducer and improves robustness for similar cases with multiple preheader PHIs.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 20528089c000..58398c17ca8f 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -9791,6 +9791,9 @@ preparePlanForEpilogueVectorLoop(VPlan &Plan, Loop *L,\n                 all_of(P.incoming_values(), [&EPI](Value *Inc) {\n                   return Inc == EPI.VectorTripCount ||\n                          match(Inc, m_SpecificInt(0));\n+                }) &&\n+                any_of(P.incoming_values(), [&EPI](Value *Inc) {\n+                  return Inc == EPI.VectorTripCount;\n                 }))\n               return &P;\n             return nullptr;\n"
+  ]
+}

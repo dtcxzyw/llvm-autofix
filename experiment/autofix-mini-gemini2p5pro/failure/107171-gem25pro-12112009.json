@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "107171",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/107171-gem25pro-12112009.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 523395,
+  "output_tokens": 14660,
+  "cached_tokens": 432195,
+  "total_tokens": 561724,
+  "chat_rounds": 45,
+  "total_time_sec": 391.4440894126892,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+    "llvm::LoopVectorizationPlanner::computeBestVF",
+    7389
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+      3810,
+      3810
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**:\nThe vectorizer is aborting due to an assertion failure in `LoopVectorizationPlanner::computeBestVF`. The assertion `(BestFactor.Width == LegacyVF.Width || planContainsAdditionalSimplifications(...)) && \" VPlan cost model and legacy cost model disagreed\"` indicates a discrepancy between the vectorization factor (VF) chosen by the new VPlan-based cost model (`BestFactor`) and the old legacy cost model (`LegacyVF`). This assertion is a safeguard to ensure the new cost model is consistent with the old one during the transition period. In this specific case, the VPlan model decides not to vectorize (VF=1), while the legacy model chooses to vectorize (VF=8), and the VPlan does not contain any extra simplifications to justify this difference.\n\n2. **Analyzing `opt`'s Log**:\nThe `opt` command crashes with a SIGABRT signal, and the backtrace points directly to the assertion in `LoopVectorizationPlanner::computeBestVF`. The lack of debug output before the crash suggests the issue arises during the initial cost analysis and planning phase, before any IR transformation occurs. The core of the problem is the disagreement between the two cost models.\n\n3. **Root Cause Analysis**:\nThrough debugging, I determined that `BestFactor.Width` is 1 (scalar) and `LegacyVF.Width` is 8. The disagreement stems from how the two cost models evaluate the `zext i1 to i64` operation inside the loop.\n\nThe VPlan-based cost model, through `VPCostCalculator::getCost()`, correctly identifies that `zext i1 %c to i64` can be widened into a vector of `i1` and then widened to a vector of `i64`. It calculates a non-zero, but relatively low, cost for this.\n\nHowever, the legacy cost model, specifically within `LoopVectorizeCostModel::getScalarizationCost`, incorrectly calculates the cost for this `zext` instruction. The relevant code snippet is:\n```cpp\n// llvm/lib/Transforms/Vectorize/LoopVectorize.cpp:3808\nif (isa<ZExtInst>(I) && I->getOperand(0)->getType()->isIntegerTy(1)) {\n  // zext from i1 can be done using a vector select.\n  return TTI.getVectorInstrCost(Instruction::Select, VecTy, -1);\n}\n```\nThis logic assumes that a `zext i1 to iN` can be implemented as a `select i1 %cond, <N x iN> 1, <N x iN> 0`. While this is a valid transformation, the cost is calculated by querying `TTI.getVectorInstrCost(Instruction::Select, VecTy, -1)`. For the RISC-V target with the V extension, this returns a cost of 0. This zero cost is incorrect; while the operation is cheap, it is not free.\n\nThis erroneously low (zero) cost in the legacy model makes vectorization seem highly profitable, leading it to choose a VF of 8. In contrast, the VPlan model's more accurate, non-zero cost leads it to conclude that vectorization is not profitable, hence it chooses a VF of 1. This discrepancy triggers the assertion.\n\nThe fix is to adjust the legacy cost model to provide a more realistic cost for this operation. Instead of returning a fixed cost based on a `select`, it should return `TTI.getCastInstrCost(Instruction::ZExt, VecTy, I->getOperand(0)->getType())`, which will query the target for a more accurate cost of a vector `zext`.\n\n4. **Proposed Edit Point(s)**:\nThe issue lies in `LoopVectorizeCostModel::getScalarizationCost` where the cost of a `zext` from `i1` is underestimated.\n\n```cpp\n// llvm/lib/Transforms/Vectorize/LoopVectorize.cpp:3808\nif (isa<ZExtInst>(I) && I->getOperand(0)->getType()->isIntegerTy(1)) {\n  // zext from i1 can be done using a vector select.\n  return TTI.getVectorInstrCost(Instruction::Select, VecTy, -1);\n}\n```\nThis should be changed to:\n```cpp\n// llvm/lib/Transforms/Vectorize/LoopVectorize.cpp:3808\nif (isa<ZExtInst>(I) && I->getOperand(0)->getType()->isIntegerTy(1)) {\n  // zext from i1 can be done using a vector select.\n  return TTI.getCastInstrCost(Instruction::ZExt, VecTy,\n                              I->getOperand(0)->getType());\n}\n```\n\n5. **Conclusion**:\nBy changing `TTI.getVectorInstrCost(Instruction::Select, ...)` to `TTI.getCastInstrCost(Instruction::ZExt, ...)` for `zext i1` instructions in the legacy cost model, we align its cost estimation more closely with the VPlan cost model and with the actual target capabilities. This resolves the cost model disagreement, fixes the assertion failure, and allows the vectorizer to make a more informed decision. With this change, both models will likely agree that vectorization is not profitable for this specific loop, and the program will compile successfully.",
+  "test_traj": []
+}

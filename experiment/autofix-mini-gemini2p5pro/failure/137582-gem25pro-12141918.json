@@ -1,0 +1,38 @@
+{
+  "command": {
+    "issue": "137582",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/137582-gem25pro-12141918.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 334839,
+  "output_tokens": 11872,
+  "cached_tokens": 282230,
+  "total_tokens": 363907,
+  "chat_rounds": 37,
+  "total_time_sec": 842.1773998737335,
+  "trans_point": [
+    "llvm/lib/IR/Module.cpp",
+    "llvm::Module::removeDebugIntrinsicDeclarations",
+    129
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/CorrelatedValuePropagation.cpp",
+      289,
+      289
+    ],
+    [
+      "llvm/lib/Transforms/Scalar/CorrelatedValuePropagation.cpp",
+      300,
+      300
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The `correlated-propagation` pass incorrectly adds an `nsw` flag to a `trunc` instruction. This is based on a condition (`icmp eq i16 %x, 0`) that is true only on one path, but the instruction itself is in a block that can be reached via other paths where the condition is false. When `%x = 128`, the `trunc nsw` causes undefined behavior, leading to a miscompilation.\n\n2. **Analyzing `opt`'s Log**: The `opt` log and Alive2 output clearly show the incorrect transformation. The `trunc` instruction gets `nsw` and `nuw` flags. The Alive2 counterexample (`%x = 128`) demonstrates how this leads to poison because `trunc i16 129 to i8` is not a valid `nsw` operation.\n\n3. **Root Cause Analysis**: The function `CorrelatedValuePropagation::getCorrelatedOverflowFlags` is responsible for deducing these flags. It iterates through known branch conditions (`TrueBVCs`, `FalseBVCs`) and checks if they imply `nsw`/`nuw` for a given instruction. The crucial missing piece is a check to ensure that the instruction is only executed when the condition holds. The instruction is in the `entry` block, while the condition is used for a branch later in that same block. The instruction is not dominated by the successor blocks where the condition is known to be true or false. The fix is to add a dominator check: the block containing the condition must dominate the block containing the instruction. In this case, the condition's block (`entry`) does not dominate the instruction's block (`entry`) in the required way for its successors, so the flags should not be added.\n\n4. **Proposed Edit Point(s)**: The fix is to add a `DT.dominates(Cond.second, I->getParent())` check inside the loops in `getCorrelatedOverflowFlags` before concluding that an overflow flag can be applied. This ensures that the context providing the overflow information is always active when the instruction is executed.\n\n5. **Conclusion**: By adding the dominator check, we ensure that path-sensitive information is only applied when it is valid for all possible executions of the instruction, preventing this and similar miscompilations.",
+  "test_traj": []
+}

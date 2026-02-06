@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "114738",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/114738-gpt5-11260114.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 427b8bd0e75a..09bb7250af9f 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -19490,8 +19490,7 @@ public:\n         // To prevent poison from leaking across what used to be sequential,\n         // safe, scalar boolean logic operations, the reduction operand must be\n         // frozen.\n-        if ((isBoolLogicOp(RdxRootInst) ||\n-             (AnyBoolLogicOp && VL.size() != TrackedVals.size())) &&\n+        if ((isBoolLogicOp(RdxRootInst) || AnyBoolLogicOp) &&\n             !isGuaranteedNotToBePoison(VectorizedRoot))\n           VectorizedRoot = Builder.CreateFreeze(VectorizedRoot);\n \n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 250964,
+  "output_tokens": 33570,
+  "cached_tokens": 195072,
+  "total_tokens": 284534,
+  "chat_rounds": 17,
+  "total_time_sec": 1038.8688898086548,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "operator()",
+    13295
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      19493,
+      19497
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe SLP vectorizer turns a scalar boolean reduction formed by a mix of compares, selects (poison-safe logical patterns), and an or into a vector compare + llvm.vector.reduce.or.V4i1. Alive2 shows the transformed target is more poisonous than the source: the vector reduction propagates poison from an unused lane (due to scalar select gating) that the scalar code did not use, resulting in a poison result where the source was definitively true. The existing code intends to insert a freeze to prevent poison from leaking when vectorizing such boolean reductions, but in this case it did not insert the freeze.\n\n2. Analyzing `opt`'s Log:\n- The log shows a horizontal reduction is detected and vectorized: \"SLP: Vectorizing horizontal reduction at cost:-5. (HorRdx)\".\n- It emits insertelement chain, vector icmp, and a vector.reduce.or.\n- There is no indication of a freeze being emitted. The vector compare has a poison lane (coming from %c), and the reduction produces poison. In the scalar path, select instructions prevented the poison from being demanded (short-circuit-like, poison-safe form), so the scalar result is defined (true) for the given input.\n- The code has a mechanism to insert a freeze to prevent poison leakage from boolean logic: at lines 19493-19497, it conditionally freezes VectorizedRoot. However, the condition includes an extra gate `VL.size() != TrackedVals.size()` which restricts freezing in some cases even when safe boolean logic operations are present.\n\n3. Root Cause Analysis:\nThe transformation is unsound when the input to a horizontal boolean reduction may be poison in lanes that are not semantically demanded by the scalar select-based logic. The pass has a protective freeze, intended for \"sequential, safe, scalar boolean logic operations\", but it is not triggered in this case because of the additional predicate `(AnyBoolLogicOp && VL.size() != TrackedVals.size())`. In our reproducer, AnyBoolLogicOp is true (there are select-based logical ops), but `VL.size() == TrackedVals.size()` so the freeze is not applied. Consequently, the vector.reduce.or may produce poison, making the target more poisonous than the source.\n\nThe bug is that the freeze guard is too restrictive. When any poison-safe boolean logic operation participates in the reduction, we must prevent poison leaking from parallel vectorization. Relying on `VL.size() != TrackedVals.size()` to decide whether to freeze misses legal cases like this reproducer.\n\n4. Proposed Edit Point(s)\n- File: llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n- Location: Around lines 19493-19497\n- Change: Relax the freeze condition by removing the `VL.size() != TrackedVals.size()` gate. Freeze whenever there is any boolean logic op in the reduction (or the root is such an op) and the vectorized root may be poison.\n\nOld code:\n\n  // To prevent poison from leaking across what used to be sequential,\n  // safe, scalar boolean logic operations, the reduction operand must be frozen.\n  if ((isBoolLogicOp(RdxRootInst) ||\n       (AnyBoolLogicOp && VL.size() != TrackedVals.size())) &&\n      !isGuaranteedNotToBePoison(VectorizedRoot))\n    VectorizedRoot = Builder.CreateFreeze(VectorizedRoot);\n\nNew code:\n\n  // To prevent poison from leaking across what used to be sequential,\n  // safe, scalar boolean logic operations, the reduction operand must be frozen.\n  if ((isBoolLogicOp(RdxRootInst) || AnyBoolLogicOp) &&\n      !isGuaranteedNotToBePoison(VectorizedRoot))\n    VectorizedRoot = Builder.CreateFreeze(VectorizedRoot);\n\nRationale:\n- If there are any poison-safe boolean logic ops participating in the reduction (select-based logical and/or), scalar evaluation may avoid demanding poison values in some inputs. Vectorizing into a parallel vector reduction can expose poison from unused lanes. Freezing the vectorized root prevents this leak without changing semantics for programs where the scalar result may still be poison: we only insert freeze when the reduction involves boolean safe logic (the intended scope of this protection in the current design). The extra `VL.size() != TrackedVals.size()` predicate was an over-conservative heuristic that skipped necessary freezes, leading to the shown miscompile.\n\n5. Conclusion:\nBy removing the `VL.size() != TrackedVals.size()` clause and freezing whenever any boolean logic op is involved, we ensure that vectorized boolean reductions do not become more poisonous than the original scalar, preserving correctness for cases like the reproducer. This aligns with the intention described in the comment and avoids the Alive2-detected miscompile while keeping the fix localized and minimally invasive.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 427b8bd0e75a..09bb7250af9f 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -19490,8 +19490,7 @@ public:\n         // To prevent poison from leaking across what used to be sequential,\n         // safe, scalar boolean logic operations, the reduction operand must be\n         // frozen.\n-        if ((isBoolLogicOp(RdxRootInst) ||\n-             (AnyBoolLogicOp && VL.size() != TrackedVals.size())) &&\n+        if ((isBoolLogicOp(RdxRootInst) || AnyBoolLogicOp) &&\n             !isGuaranteedNotToBePoison(VectorizedRoot))\n           VectorizedRoot = Builder.CreateFreeze(VectorizedRoot);\n \n"
+  ]
+}

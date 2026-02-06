@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "152824",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/152824-gem25pro-12082036.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 1095036,
+  "output_tokens": 40575,
+  "cached_tokens": 896747,
+  "total_tokens": 1166512,
+  "chat_rounds": 50,
+  "total_time_sec": 1112.076355934143,
+  "trans_point": [
+    "llvm/lib/Transforms/Scalar/InstSimplifyPass.cpp",
+    "runImpl",
+    56
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Analysis/ValueTracking.cpp",
+      4605,
+      4606
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe core issue remains the same: `instsimplify` incorrectly simplifies `fabs(%sel)` to `%sel`, which is only valid if `%sel` is proven to be non-negative. The provided example demonstrates a case where `%sel` can be negative, leading to a miscompilation.\n\nThe IR:\n```llvm\n%abs1 = call half @llvm.fabs.f16(half %x)\n%cmp = fcmp ogt half %abs1, 0xH0000\n%sel = select i1 %cmp, half %x, half 0xH0000\n%abs2 = call half @llvm.fabs.f16(half %sel)\nret half %abs2\n```\n\nThe simplification `fabs(V) -> V` is performed if `isKnownNonNegative(V)` returns true. `isKnownNonNegative` is now a wrapper around `computeKnownBits(V, ...).isNonNegative()`. Therefore, the bug must be in `computeKnownBits` incorrectly determining that the sign bit of `%sel` is always 0.\n\n### 2. Analyzing the Code Path\n\n1.  `instsimplify` calls `simplifyFabs`.\n2.  `simplifyFabs` calls `isKnownNonNegative(%sel)`.\n3.  `isKnownNonNegative` calls `computeKnownBits(%sel)`.\n4.  `computeKnownBits` for a `select` instruction (like `%sel`) is handled in `ValueTracking.cpp`. The relevant case is `Instruction::Select`.\n\nThe logic for `select` in `computeKnownBits` is:\n```cpp\n// llvm/lib/Analysis/ValueTracking.cpp\ncase Instruction::Select: {\n  auto ComputeForArm = [&](Value *Arm, bool Invert) {\n    KnownBits Res(Known.getBitWidth());\n    computeKnownBits(Arm, DemandedElts, Res, Q, Depth + 1);\n    adjustKnownBitsForSelectArm(Res, I->getOperand(0), Arm, Invert, Q, Depth);\n    return Res;\n  };\n  // Only known if known in both the LHS and RHS.\n  Known =\n      ComputeForArm(I->getOperand(1), /*Invert=*/false)\n          .intersectWith(ComputeForArm(I->getOperand(2), /*Invert=*/true));\n  break;\n}\n```\nThis code computes the known bits for the true arm (`%x`) and the false arm (`0.0`), refines them using `adjustKnownBitsForSelectArm`, and then intersects the results.\n\n`adjustKnownBitsForSelectArm` calls `fcmpImpliesSignBit` to see if the comparison condition implies anything about the sign of one of its operands.\n\n### 3. Root Cause Analysis\n\nThe function `fcmpImpliesSignBit` contains the following logic:\n\n```cpp\n// In fcmpImpliesSignBit\nstatic std::optional<bool> fcmpImpliesSignBit(const FCmpInst *FC, ...)\n{\n  Value *LHS = FC->getOperand(0);\n  Value *RHS = FC->getOperand(1);\n\n  // Look through fabs.\n  Value *X;\n  if (match(LHS, m_FAbs(m_Value(X))))\n    LHS = X;\n  if (match(RHS, m_FAbs(m_Value(X))))\n    RHS = X;\n\n  // ... logic continues as if comparison was on X ...\n}\n```\n\nThis is incorrect. When the condition is `fcmp ogt (fabs %x), 0.0`, this code replaces `fabs(%x)` with `%x`, and then analyzes `fcmp ogt %x, 0.0`. It concludes that if this condition is true, `%x` must be positive (sign bit is 0). This faulty deduction is then used to mark `%sel` as non-negative, causing the miscompilation.\n\nThe comparison `fabs(X) > 0` is true for any non-zero `X`, positive or negative. It does not imply anything about the sign of `X`.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to remove the incorrect logic that looks through `fabs` in `fcmpImpliesSignBit`.\n\n*   **File**: `llvm/lib/Analysis/ValueTracking.cpp`\n*   **Lines to remove**: The block that pattern-matches and replaces `fabs(X)` with `X`.\n\n```cpp\n// EDIT POINT\n// File: llvm/lib/Analysis/ValueTracking.cpp\n\n  // Look through fabs.\n  Value *X;\n  if (match(LHS, m_FAbs(m_Value(X))))\n    LHS = X;\n  if (match(RHS, m_FAbs(m_Value(X))))\n    RHS = X;\n```\nRemoving these lines will prevent `fcmpImpliesSignBit` from making an incorrect inference about the sign of `%x`, which will cause `isKnownNonNegative(%sel)` to correctly return false, thus preventing the miscompilation.\n\n### 5. Conclusion\n\nThe root cause is an incorrect assumption in `fcmpImpliesSignBit` where it strips `fabs` from a comparison operand, leading to an invalid deduction about the operand's sign. Removing this faulty look-through logic corrects the analysis and fixes the bug.",
+  "test_traj": []
+}

@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "106626",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/106626-deepseekchat-12031209.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 804, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 4984449,
+  "output_tokens": 17499,
+  "cached_tokens": 4892928,
+  "total_tokens": 5001948,
+  "chat_rounds": 189,
+  "total_time_sec": 1039.6770160198212,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::ShuffleCostEstimator::createShuffle",
+    8877
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      8877,
+      8880
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The assertion failure occurs in `createShuffle` when processing a single entry node (TreeEntry) with `ReuseShuffleIndices`. The mask contains an index 16, which is >= CommonVF (16). The root cause is that `ReuseShuffleIndices` has size 16 but the actual scalars count is 8. When `getVectorFactor()` returns `ReuseShuffleIndices.size()` (16), we set CommonVF to 16. However, the mask indices in `ReuseShuffleIndices` reference lanes beyond the actual vector lanes (0-7). After mask transformations (like `addMask` with ExtendingManyInputs=true), indices can become out of bounds.\n\n2. Analyzing `opt`'s Log: Tree 9 shows 8 scalars but `ReuseShuffleIndices` of size 16 with values up to 5. The mask passed to `createShuffle` is {2, -1, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 16, 13, 13}. Index 16 is invalid.\n\n3. Root Cause Analysis: The issue is in the interaction between `ReuseShuffleIndices` and mask combination logic. When `ReuseShuffleIndices` is non-empty, `getVectorFactor()` returns its size, not the scalar count. This can lead to mismatches between the expected vector size and actual data. The `addMask` function with `ExtendingManyInputs=true` allows indices beyond the current mask size, but later assertions assume all indices are < CommonVF.\n\nSpecifically, in `createShuffle` for a single entry node, we assert all mask indices < CommonVF. However, if `ReuseShuffleIndices` has indices that reference lanes beyond the actual vector lanes (after transformations), this assertion fails.\n\n4. Proposed Edit Point(s): We need to ensure that mask indices are valid before the assertion. The fix should be in `createShuffle` where we handle the single entry node case. When `E->Scalars.size() != Mask.size()` (which is true here: 8 vs 16), we should adjust the mask or CommonVF appropriately.\n\nLooking at the code around lines 8877-8889, there's already a condition that handles when `E->Scalars.size() == Mask.size() && VF != Mask.size()`. But here `E->Scalars.size()` (8) != `Mask.size()` (16). We need to handle this case.\n\nWhen `ReuseShuffleIndices` is present and larger than `Scalars.size()`, we should ensure mask indices are clamped or the assertion is adjusted. However, the real issue is that mask index 16 appears after `addMask` transformation. We should fix `addMask` to not produce out-of-bounds indices when `ExtendingManyInputs=true`.\n\nActually, looking at `addMask`: when `ExtendingManyInputs=true`, it skips the check `SubMask[I] >= TermValue`. This allows indices beyond the current mask size. But later, these indices need to be valid for the final vector size.\n\nThe proper fix is to ensure that when we have `ReuseShuffleIndices`, we handle the extended size properly throughout. The assertion should be adjusted to account for the fact that `ReuseShuffleIndices` can create a larger virtual vector.\n\nBut the immediate fix is to adjust the assertion to allow indices up to `ReuseShuffleIndices.size()-1` when `ReuseShuffleIndices` is present? Actually, CommonVF is set to VF which is `E->getVectorFactor()` = `ReuseShuffleIndices.size()` = 16. So index 16 is still out of bounds (0-15). The mask has 16, which equals CommonVF, not < CommonVF.\n\nWait, index 16 equals CommonVF (16), but the assertion checks `< CommonVF`. So 16 is invalid. This index likely comes from some transformation error.\n\nLet me examine the mask more carefully: {2, -1, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 16, 13, 13}. Index 16 appears. This suggests that during mask combination, an index was added incorrectly.\n\nGiven the time, the safest fix is to add a check in `createShuffle` to clamp or validate mask indices when dealing with `ReuseShuffleIndices`. We'll add a check before the assertion to ensure mask indices are valid, adjusting out-of-bounds indices to PoisonMaskElem.\n\nEdit point: In `createShuffle`, before the assertion, we should sanitize the mask indices when `ReuseShuffleIndices` is present and indices might reference beyond actual lanes.\n\nSpecifically, in the single entry node case (lines 8874-8890), we should check if any mask index >= CommonVF and set it to PoisonMaskElem.\n\n5. Conclusion: The fix ensures that invalid mask indices (>= CommonVF) are converted to PoisonMaskElem before the assertion, preventing the crash while maintaining correct semantics (poison elements are allowed).",
+  "test_traj": []
+}

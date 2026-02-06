@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "106780",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/106780-gpt5-11250851.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex fa05b8dd2242..fd55bf222ddc 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -7292,7 +7292,9 @@ static bool planContainsAdditionalSimplifications(VPlan &Plan,\n     return any_of(*BB, [&SeenInstrs, &CostCtx](Instruction &I) {\n       if (isa<PHINode>(&I))\n         return false;\n-      return !SeenInstrs.contains(&I) && !CostCtx.skipCostComputation(&I, true);\n+      // Return true if the instruction is not represented in the VPlan OR\n+      // if it is skipped for VPlan-based cost computation.\n+      return !SeenInstrs.contains(&I) || CostCtx.skipCostComputation(&I, true);\n     });\n   });\n }\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 531268,
+  "output_tokens": 20144,
+  "cached_tokens": 445184,
+  "total_tokens": 551412,
+  "chat_rounds": 31,
+  "total_time_sec": 433.49065470695496,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+    "llvm::LoopVectorizationPlanner::computeBestVF",
+    7366
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+      7292,
+      7295
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash arises from an assertion in LoopVectorizationPlanner::computeBestVF():\n  assert((BestFactor.Width == LegacyVF.Width || planContainsAdditionalSimplifications(...)) && \" VPlan cost model and legacy cost model disagreed\");\nDuring the reproducer, the VPlan cost model chooses VF=8 while the legacy cost model chooses VF=4. The assertion only permits disagreement if the VPlan contains additional simplifications over the legacy model. The helper function planContainsAdditionalSimplifications is supposed to detect such simplifications. However, it returns false, triggering the assertion, even though simplifications exist (e.g., instructions skipped from the cost model).\n\n2. Analyzing opt's Log:\nThe reproducer is minimized and immediately aborts inside computeBestVF. The debug-only output is empty because the process aborts before normal debug logging continues. Using the debugger we inspected BestFactor (VF=8) and LegacyVF (VF=4). No other transformations occurred before the assertion. This confirms the first transformation point is the VPlan VF selection logic and the discrepancy between the two cost models is not masked by prior IR changes.\n\n3. Root Cause Analysis:\nThe comment in planContainsAdditionalSimplifications (lines 7288-7293) states: \"Return true if the loop contains any instructions that are not also part of the VPlan or are skipped for VPlan-based cost computations.\" Logical condition required: (!SeenInstrs.contains(I) OR skipCostComputation(I)).\nBut the implementation (line 7295) uses:\n  return !SeenInstrs.contains(&I) && !CostCtx.skipCostComputation(&I, true);\nThis is the opposite of the intended logic: it only returns true if an instruction is neither part of the VPlan nor skipped, excluding exactly the cases the comment says should qualify (instructions that were skipped). Consequently, if the VPlan omits or simplifies instructions but those instructions were also marked to be skipped for cost computation (as happens due to precomputeCosts marking induction/exit/reduction parts), the function incorrectly returns false. This suppresses the escape hatch for legitimate VF disagreements due to simplifications and triggers the assertion.\nThus, the bug is a logical operator error (&& instead of || plus missing negation alignment) between specification (comment) and code.\n\n4. Proposed Edit Point(s):\nFile: llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nLines: 7292-7295\nChange the predicate inside planContainsAdditionalSimplifications from:\n  return !SeenInstrs.contains(&I) && !CostCtx.skipCostComputation(&I, true);\nTo:\n  return !SeenInstrs.contains(&I) || CostCtx.skipCostComputation(&I, true);\nThis matches the documented intent: trigger 'additional simplifications' if an original loop instruction is either not represented in the VPlan or explicitly skipped from VPlan cost computations.\nNo other changes are required; assertion logic remains correct.\n\n5. Conclusion:\nThe assertion failure is due to a faulty condition in planContainsAdditionalSimplifications that misclassifies simplifications, preventing legitimate cost-model divergence. Fixing the logical operator restores correct detection of extra simplifications and allows the assertion to pass when VPlan-based cost chooses a different VF for valid reasons. Expected effect: opt no longer aborts on the reproducer; VF disagreement is tolerated when simplifications exist, eliminating the crash while preserving assertion semantics.\n",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex fa05b8dd2242..fd55bf222ddc 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -7292,7 +7292,9 @@ static bool planContainsAdditionalSimplifications(VPlan &Plan,\n     return any_of(*BB, [&SeenInstrs, &CostCtx](Instruction &I) {\n       if (isa<PHINode>(&I))\n         return false;\n-      return !SeenInstrs.contains(&I) && !CostCtx.skipCostComputation(&I, true);\n+      // Return true if the instruction is not represented in the VPlan OR\n+      // if it is skipped for VPlan-based cost computation.\n+      return !SeenInstrs.contains(&I) || CostCtx.skipCostComputation(&I, true);\n     });\n   });\n }\n"
+  ]
+}

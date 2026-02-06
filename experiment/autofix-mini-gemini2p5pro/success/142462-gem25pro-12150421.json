@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "142462",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/142462-gem25pro-12150421.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Scalar/EarlyCSE.cpp b/llvm/lib/Transforms/Scalar/EarlyCSE.cpp\nindex 09cb2f4cb010..24bfa940067f 100644\n--- a/llvm/lib/Transforms/Scalar/EarlyCSE.cpp\n+++ b/llvm/lib/Transforms/Scalar/EarlyCSE.cpp\n@@ -397,6 +397,8 @@ static bool isEqualImpl(SimpleValue LHS, SimpleValue RHS) {\n   auto *RII = dyn_cast<IntrinsicInst>(RHSI);\n   if (LII && RII && LII->getIntrinsicID() == RII->getIntrinsicID() &&\n       LII->isCommutative() && LII->arg_size() >= 2) {\n+    if (LII->isStrictFP() != RII->isStrictFP())\n+      return false;\n     return LII->getArgOperand(0) == RII->getArgOperand(1) &&\n            LII->getArgOperand(1) == RII->getArgOperand(0) &&\n            std::equal(LII->arg_begin() + 2, LII->arg_end(),\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 198812,
+  "output_tokens": 6837,
+  "cached_tokens": 124211,
+  "total_tokens": 215796,
+  "chat_rounds": 16,
+  "total_time_sec": 227.0200972557068,
+  "trans_point": [
+    "llvm/lib/Transforms/Scalar/EarlyCSE.cpp",
+    "combineIRFlags",
+    1311
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/EarlyCSE.cpp",
+      1010,
+      1010
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe `early-cse` pass is asserting in `combineIRFlags` when processing a function with two calls to the commutative intrinsic `@llvm.smin.i32`. The two calls have swapped arguments. One call site has the `strictfp` attribute, while the other does not. The pass correctly identifies the two calls as computationally equivalent due to the intrinsic's commutativity. However, it fails when attempting to merge the attributes of the two call sites because the `strictfp` attribute cannot be intersected successfully when it's present on one call but not the other.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` debug log clearly shows that `early-cse` is attempting to common subexpression eliminate (CSE) `%call2` with `%call`:\n\n```\nEarlyCSE CSE:   %call2 = call i32 @llvm.smin.i32(i32 %arg1, i32 %arg)  to:   %call = call i32 @llvm.smin.i32(i32 %arg, i32 %arg1) #1\n```\n\n`%call` has attribute `#1`, which is `{ strictfp }`, while `%call2` has no attributes. The assertion failure happens in `combineIRFlags`, which is called immediately before replacing `%call2` with `%call`. The assertion message `Failed to intersect attributes in callsites that passed identical check` confirms that the `tryIntersectAttributes` function returned `false`, indicating a failure to merge the attributes of the two call sites.\n\n### 3. Root Cause Analysis\n\nThe root cause is a discrepancy between the logic used to determine if two instructions are \"identical\" and the logic used to merge their attributes.\n\n1.  **Equality Check**: `early-cse` uses a helper class `SimpleValue` and its `isIdenticalTo` method to check if two instructions are candidates for CSE. For commutative instructions like `@llvm.smin.i32`, this function canonicalizes the operand order before comparison. This is why it correctly identifies `%call` and `%call2` as computationally equivalent. However, this equality check is incomplete as it *does not* take into account certain call site attributes, such as `strictfp`.\n\n2.  **Attribute Merging**: After `isIdenticalTo` returns `true`, the pass proceeds to replace one instruction with the other. As part of this process, it calls `combineIRFlags` to merge the attributes of the two call sites. This function calls `CallBase::tryIntersectAttributes`. The intersection logic for an `EnumAttribute` like `strictfp` requires that if the attribute is present on one call, it must be present on the other for the intersection to succeed. \n\n3.  **The Conflict**: Since `%call` has `strictfp` and `%call2` does not, `tryIntersectAttributes` fails. This failure triggers the assertion because the pass made an incorrect assumption: that any two instructions deemed \"identical\" by `isIdenticalTo` would have mergeable attributes. The fundamental problem is that the definition of \"identical\" was not strict enough.\n\n### 4. Proposed Edit Point(s)\n\nThe correct fix is to make the equality check in `early-cse` aware of call site attributes that cannot be safely merged if they differ. Specifically, `SimpleValue::isIdenticalTo` should be modified to check for incompatible `strictfp` attributes when comparing `CallBase` instructions.\n\n**File**: `llvm/lib/Transforms/Scalar/EarlyCSE.cpp`\n\n**Edit Point**: The following code should be inserted at line 1010, inside the `SimpleValue::isIdenticalTo` method.\n\n```cpp\n        // If the calls have different strictfp attributes, they are not identical.\n        if (CB->isStrictFP() != OtherCB->isStrictFP())\n          return false;\n```\n\nThis change ensures that two calls are only considered identical for CSE if their `strictfp` status matches, preventing the pass from attempting to merge incompatible call sites and thus avoiding the assertion.\n\n### 5. Conclusion\n\nBy strengthening the equality check in `SimpleValue::isIdenticalTo` to include the `strictfp` attribute, we resolve the inconsistency between the instruction comparison logic and the attribute merging logic. This fixes the immediate assertion failure and makes the `early-cse` pass more robust by correctly handling an important aspect of call site semantics.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Scalar/EarlyCSE.cpp b/llvm/lib/Transforms/Scalar/EarlyCSE.cpp\nindex 09cb2f4cb010..24bfa940067f 100644\n--- a/llvm/lib/Transforms/Scalar/EarlyCSE.cpp\n+++ b/llvm/lib/Transforms/Scalar/EarlyCSE.cpp\n@@ -397,6 +397,8 @@ static bool isEqualImpl(SimpleValue LHS, SimpleValue RHS) {\n   auto *RII = dyn_cast<IntrinsicInst>(RHSI);\n   if (LII && RII && LII->getIntrinsicID() == RII->getIntrinsicID() &&\n       LII->isCommutative() && LII->arg_size() >= 2) {\n+    if (LII->isStrictFP() != RII->isStrictFP())\n+      return false;\n     return LII->getArgOperand(0) == RII->getArgOperand(1) &&\n            LII->getArgOperand(1) == RII->getArgOperand(0) &&\n            std::equal(LII->arg_begin() + 2, LII->arg_end(),\n"
+  ]
+}

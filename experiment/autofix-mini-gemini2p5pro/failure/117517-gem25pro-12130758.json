@@ -1,0 +1,38 @@
+{
+  "command": {
+    "issue": "117517",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/117517-gem25pro-12130758.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 4956903,
+  "output_tokens": 39308,
+  "cached_tokens": 4714597,
+  "total_tokens": 5031635,
+  "chat_rounds": 162,
+  "total_time_sec": 917.1722786426544,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "addMask",
+    1143
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      15002,
+      15004
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe `slp-vectorizer` is crashing with an assertion failure inside the `addMask` function. This function is responsible for composing shuffle masks. The assertion that fails is:\n\n```c++\nassert((!ExtendingManyInputs || SubMask.size() > Mask.size() || ... ) && \"SubMask with many inputs support must be larger than the mask.\");\n```\n\nThis assertion ensures that when we are building a shuffle mask that might draw elements from two separate input vectors (indicated by `ExtendingManyInputs = true`), the `SubMask` (which represents the shuffle for one of the inputs) must be larger than the `Mask` (the shuffle being built). This is because the `SubMask` is expected to be sized for the combined two-vector input. The crash indicates that `addMask` was called with `ExtendingManyInputs = true`, but `SubMask.size()` was not greater than `Mask.size()`.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log and backtrace show that the crash occurs during the cost analysis of vectorizing a horizontal reduction. The vectorizer identifies a large bundle of 16 `zext` instructions as a candidate for vectorization. The inputs to these `zext` instructions are reused multiple times.\n\nThe key sequence of events is:\n1.  The vectorizer decides to vectorize a set of 16 `zext` instructions. The vectorization factor (VF) is 16.\n2.  It analyzes the inputs to these `zext`s and finds that many are duplicates (e.g., `%xor148.2.i` is used as an input for two different `zext`s). These are identified as \"reused scalars\".\n3.  The crash happens in `BoUpSLP::processBuildVector` when it calls `ShuffleCostEstimator::finalize` to calculate the cost of shuffling these reused scalars.\n\n### 3. Root Cause Analysis\n\nThe root cause lies in `BoUpSLP::processBuildVector` when it prepares the arguments for `ShuffleCostEstimator::finalize`.\n\n1.  **`Mask` vs. `SubMask`**: The call that triggers the assertion is `addMask(ReuseShuffleIndices, ReuseMask, true)`. Here, `ReuseShuffleIndices` becomes the `Mask` parameter in `addMask`, and `ReuseMask` becomes the `SubMask`.\n2.  **Incorrect Sizing**: In the failing case, `ReuseShuffleIndices` has a size of 16 (the vectorization factor, VF). However, `ReuseMask`, which is the shuffle mask for the unique reused scalars, is constructed based on the number of *unique* reused inputs. In the reproducer, there are only 8 unique inputs for the 16 `zext` instructions. Thus, `ReuseMask` has a size of 8.\n3.  **`ExtendingManyInputs`**: The `ExtendingManyInputs` flag is set to `true` because the vectorizer is preparing to shuffle from two conceptual input vectors: one for the primary operands and one for the reused scalars.\n4.  **Assertion Trigger**: The call to `addMask` fails because `ExtendingManyInputs` is `true`, `Mask.size()` is 16, and `SubMask.size()` is 8. The condition `SubMask.size() > Mask.size()` (i.e., `8 > 16`) is false, triggering the assertion.\n\nThe logic in `processBuildVector` incorrectly assumes that the shuffle mask for reused scalars (`ReuseMask`) will be appropriately sized for a two-vector shuffle. It needs to be explicitly resized to reflect the two-vector input scenario, which is `VF * 2`.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to resize the `ReuseMask` in `BoUpSLP::processBuildVector` before it is passed to `ShuffleCostEstimator::finalize`. When `ExtendingManyInputs` is true, the mask should be resized to twice the vectorization factor (`VF * 2`) and padded with `PoisonMaskElem`. This correctly models a shuffle from two concatenated vectors, where the reused scalars are only found in the first vector.\n\n```cpp\n// llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n\n15000:       // The shuffle will be created using 2 input vectors.\n15001:       if (ExtendingManyInputs) {\n15002:         // The shuffle is build from 2 vectors, so we need to resize the\n15003:         // submask to make it twice larger.\n15004:         ReuseMask.resize(VF * 2, PoisonMaskElem);\n15005:       }\n```\n\nThis edit should be inserted just before the call to `SCE.finalize` in `BoUpSLP::processBuildVector`.\n\n### 5. Conclusion\n\nThe crash is due to a faulty assumption in the SLP vectorizer's cost estimation logic for `build_vector` operations with many reused scalars. The shuffle mask for the reused scalars was not correctly sized for a multi-input shuffle scenario, leading to an assertion failure. By explicitly resizing the mask to `VF * 2`, we align the data structures with the requirements of the `addMask` function, resolving the crash and enabling the vectorizer to correctly assess the cost of this vectorization candidate.",
+  "test_traj": [
+    "",
+    "",
+    "",
+    ""
+  ]
+}

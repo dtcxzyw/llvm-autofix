@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "112666",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/112666-gem25pro-12121311.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 398009,
+  "output_tokens": 15238,
+  "cached_tokens": 295138,
+  "total_tokens": 431356,
+  "chat_rounds": 32,
+  "total_time_sec": 877.0212016105652,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineNegator.cpp",
+    "llvm::Negator::negate",
+    514
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineNegator.cpp",
+      515,
+      515
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe transformation `y - x` into `y + (-x)` is miscompiling when `x` is a `select` and the original subtraction has the `nsw` (no signed wrap) flag. The reproducer demonstrates this with `sub i8 %y, (select i1 %c, i8 %x, i8 %t0)`, where `%t0` is `sub nsw i8 0, %x`. The optimizer sinks the negation into the `select`, yielding `add i8 %y, (select i1 %c, i8 %t0, i8 %x)`. \n\nThe problem occurs when `%x` is `-128` (`0x80` for `i8`). The initial negation `sub nsw i8 0, %x` results in `poison` because negating the minimum signed integer causes signed overflow. \n\n- In the **source IR**, if `%c` is true, the `select` chooses `%x` (`-128`), and the final result is valid.\n- In the **target IR**, if `%c` is true, the `select` (with its arms swapped by the negation) chooses `%t0`, which is `poison`. This makes the entire expression `poison`.\n\nThis makes the transformed code more poisonous than the source, which is a violation of optimizer rules.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` debug log clearly attributes the transformation to the `Negator` utility:\n\n```\nIC: Visiting:   %t2 = sub i8 %y, %t1\nNegator: attempting to sink negation into   %t1 = select i1 %c, i8 %x, i8 %t0\nNegator: successfully sunk negation into   %t1 = select i1 %c, i8 %x, i8 %t0\n         NEW:   %1 = select i1 %c, i8 %t0, i8 %x\nIC: Old =   %t2 = sub i8 %y, %t1\n    New =   <badref> = add i8 %1, %y\n```\n\nThis confirms that `InstCombine`'s logic for `sub` invokes the `Negator` to transform `Y - X` into `Y + (-X)`. The `Negator` then incorrectly sinks the negation into the `select` operand without considering the `nsw` flag.\n\n### 3. Root Cause Analysis\n\nThe root cause is in the `Negator::negate` function in `llvm/lib/Transforms/InstCombine/InstCombineNegator.cpp`. This function is called recursively to find or create the negation of a given `Value *`.\n\nThe `Negator` class has member variables `HasNSW` and `HasNUW`, which are correctly initialized from the original `sub` instruction in the `Negator::Negate` wrapper function. However, when the recursive `negate` function needs to create a new negation instruction as a fallback, it fails to use these stored flags.\n\nThe specific faulty code is:\n\n```cpp\n// In Negator::negate(...)\n\n  // Otherwise, create a new negation.\n  if (V->getType()->isFPOrFPVector())\n    return Builder.CreateFNeg(V);\n  return Builder.CreateNeg(V); // This is the bug.\n```\n\nThe call `Builder.CreateNeg(V)` creates a `neg` instruction (which is canonicalized to `sub 0, V`) without any overflow flags. The correct behavior is to propagate the `HasNSW` and `HasNUW` flags from the `Negator` object to this new instruction.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to modify the `CreateNeg` call to pass the stored overflow flags.\n\n**File**: `llvm/lib/Transforms/InstCombine/InstCombineNegator.cpp`\n\n**Original Code (Line 515):**\n```cpp\n  return Builder.CreateNeg(V);\n```\n\n**Proposed Edit:**\n```cpp\n  return Builder.CreateNeg(V, \"\", HasNUW, HasNSW);\n```\n\nThis change ensures that if the `Negator` has to create a new `neg` instruction, that instruction will have the same `nsw`/`nuw` properties as the original operation that was being negated. This prevents the introduction of new undefined behavior.\n\n### 5. Conclusion\n\nBy propagating the `nsw` and `nuw` flags when creating new negation instructions within the `Negator` utility, the optimizer will correctly preserve the program's semantics with respect to signed/unsigned overflow. This fixes the miscompilation by preventing the transformation when it would illegally introduce `poison`.",
+  "test_traj": []
+}

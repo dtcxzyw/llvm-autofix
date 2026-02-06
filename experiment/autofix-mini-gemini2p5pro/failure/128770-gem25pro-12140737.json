@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "128770",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/128770-gem25pro-12140737.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 559195,
+  "output_tokens": 19759,
+  "cached_tokens": 473205,
+  "total_tokens": 602794,
+  "chat_rounds": 37,
+  "total_time_sec": 397.5899341106415,
+  "trans_point": [
+    "llvm/lib/IR/Verifier.cpp",
+    "llvm::VerifierPass::run",
+    7783
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      1005,
+      1010
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe LLVM verifier is aborting with an `Instruction does not dominate all uses!` error. This indicates that the `slp-vectorizer` pass generated invalid LLVM IR. Specifically, a newly created `insertelement` instruction is used by a `shufflevector` instruction, but the `insertelement` is not placed in a basic block that dominates the block containing the `shufflevector`.\n\n### 2. Analyzing `opt`'s Log\n\nThe log shows the crash occurs during the `slp-vectorizer` pass. The failing IR snippet provided in the symptom is:\n```llvm\n  %6 = insertelement <4 x ptr> poison, ptr %0, i32 0\n  %4 = shufflevector <4 x ptr> %6, <4 x ptr> poison, <4 x i32> zeroinitializer\n```\nThis pattern is characteristic of creating a \"splat\" vector, where a scalar value (here, `%0`) is broadcast into all elements of a vector. The vectorizer is attempting to vectorize a group of identical `ptrtoint ptr %0 to i64` instructions by first creating a vector of pointers and then casting the vector.\n\n### 3. Root Cause Analysis\n\nThe root cause lies in the `SLPVectorizer::getInsertionPoint` function, which determines where to place newly generated instructions. The logic for handling splats is flawed.\n\nIn the provided reproducer, the vectorizer identifies multiple identical `ptrtoint ptr %0 to i64` instructions for vectorization. This should be treated as a splat operation of the pointer `%0`. The `getInsertionPoint` function, however, fails to recognize this scenario as a splat because its check is too simple (`if (Instructions.size() == 1)`). Since the `Instructions` array contains multiple identical `ptrtoint` instructions, this check fails.\n\nConsequently, the code falls through to the general-purpose logic for finding an insertion point, which attempts to find a common dominator block for all *users* of the instructions being vectorized. In this case, the `ptrtoint` instructions are in the `entry` block, but their users (`or` instructions) are in the `.preheader.us.us.preheader` block. The function incorrectly decides to place the splat's `insertelement` instruction in this later block.\n\nHowever, the `shufflevector` that uses the `insertelement` is placed in the `entry` block (where the original `ptrtoint`s were). Since `.preheader.us.us.preheader` is dominated by `entry`, the `insertelement` does not dominate its use, leading to the verifier error.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to correct the logic in `SLPVectorizer::getInsertionPoint` to properly identify all splat scenarios. Instead of just checking if the list of instructions has a single element, we should check if all instructions in the list are either identical to the first one or are `poison` values. If this condition holds, it's a splat, and the insertion point for the new instructions should be immediately before the first instruction in the group. This ensures the new splat instructions are created at a location that dominates all original uses.\n\n**File**: `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp`\n\n**Original Code**:\n```cpp\nInstruction *SLPVectorizer::getInsertionPoint(ArrayRef<Value *> Instructions) const {\n  // If we are building a splat, create the splat right before the first\n  // instruction in the bundle.\n  if (Instructions.size() == 1) {\n    if (auto *I = dyn_cast<Instruction>(Instructions[0]))\n      return I;\n  }\n```\n\n**Proposed Change**:\n```cpp\nInstruction *SLPVectorizer::getInsertionPoint(ArrayRef<Value *> Instructions) const {\n  // If we are building a splat, create the splat right before the first\n  // instruction in the vectorized group.\n  if (Instructions.size() > 0 && all_of(Instructions, [&](Value *V) {\n        return V == Instructions[0] || isa<PoisonValue>(V);\n      })) {\n    if (auto *I = dyn_cast<Instruction>(Instructions[0]))\n      return I;\n  }\n```\nThis change replaces the simplistic `Instructions.size() == 1` check with a more robust one that correctly identifies the splat pattern present in the reproducer, thereby ensuring the generated code is placed correctly and avoids the dominance violation.\n\n### 5. Conclusion\n\nThe crash was caused by a flaw in the `getInsertionPoint` logic within the SLP vectorizer, which failed to correctly identify a splat operation involving multiple identical instructions. This led to the misplacement of new instructions and a dominance violation. The proposed edit corrects the splat detection logic, ensuring that the generated code is valid and resolving the crash.",
+  "test_traj": []
+}

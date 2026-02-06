@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "114879",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/114879-gem25pro-12122222.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 2995733,
+  "output_tokens": 19451,
+  "cached_tokens": 2656739,
+  "total_tokens": 3028590,
+  "chat_rounds": 55,
+  "total_time_sec": 898.7625045776367,
+  "trans_point": [
+    "llvm/lib/IR/BasicBlock.cpp",
+    "llvm::BasicBlock::splitBasicBlock",
+    596
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/LoopPeel.cpp",
+      580,
+      580
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe `loop-unroll-full` pass is causing a miscompilation by incorrectly peeling a loop. The `Alive2` tool shows that the transformed code returns `null` instead of a pointer to a global variable. This points to an error in how values, particularly from PHI nodes, are handled during the peeling process.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log indicates that `ScalarEvolution` correctly identifies the loop's trip count, and the unroller decides to peel one iteration. The transformation is performed by `llvm::peelLoop`. The key problem is visible in the generated IR for the peeled iteration:\n```llvm\ncleanup.peel:\n  %retval.2.peel = phi ptr [ undef, %for.body.peel ], [ @GlobIntONE, %cleanup.loopexit.peel ]\n```\nIn the peeled iteration, the loop condition is constant `true`, making the path from `%cleanup.loopexit.peel` to `%cleanup.peel` unreachable. However, the PHI node `%retval.2.peel` incorrectly includes an incoming value from this dead path. This prevents proper simplification and leads to `undef` (`null`) being propagated as the function's return value.\n\n### 3. Root Cause Analysis\n\nThe root of the problem is in the `peelLoop` function in `LoopPeel.cpp`. When cloning the original loop body to create the peeled iteration, the logic for cloning PHI nodes is flawed. It iterates over all incoming values of an original PHI node and adds a corresponding remapped entry to the new PHI in the peeled block.\n\nThe bug is that this process does not verify if the predecessor block for an incoming value is actually part of the set of blocks being peeled. In this case, the PHI `%retval.2` has an incoming value from `%cleanup.loopexit`. The cloning logic sees this, remaps `%cleanup.loopexit` to `%cleanup.loopexit.peel`, and adds `[ @GlobIntONE, %cleanup.loopexit.peel ]` to the new PHI, `%retval.2.peel`. It fails to recognize that this edge is internal to the loop and should only be considered if the predecessor is also part of the same peeled iteration. Because the control flow within the peeled iteration makes this path impossible, this PHI entry is incorrect and should not have been added.\n\nThe fix is to add a check within the PHI cloning loop in `peelLoop`. Before adding an incoming value to the new PHI, we must verify that the original predecessor block is one of the blocks that was cloned for the peeled iteration.\n\n### 4. Proposed Edit Point(s)\n\nThe fix should be applied in `llvm/lib/Transforms/Utils/LoopPeel.cpp` inside the `peelLoop` function, within the loop that populates the new PHI nodes.\n\n```cpp\n// llvm/lib/Transforms/Utils/LoopPeel.cpp:580\n// Inside the loop `for (unsigned i = 0, e = OrigPN->getNumIncomingValues(); ...`\n\n// The original code is:\n// NewPN->addIncoming(V, BB);\n\n// It should be changed to:\nif (PeeledBBs.count(OrigPN->getIncomingBlock(i)))\n  NewPN->addIncoming(V, BB);\n```\n\nThis change ensures that we only add incoming values to the peeled PHI node if the corresponding predecessor block is also part of the peeled iteration. This correctly prunes the infeasible edge from `%cleanup.loopexit.peel`, preventing the bug.\n\n### 5. Conclusion\n\nThe miscompilation is caused by a bug in `peelLoop` where it creates an invalid PHI node by including an incoming value from a path that is unreachable within the peeled iteration. By adding a check to ensure that a PHI's incoming value only comes from a block that is also part of the peeled iteration, we can fix the incorrect PHI construction and resolve the bug. This ensures that the semantics of the program are preserved after peeling.",
+  "test_traj": []
+}

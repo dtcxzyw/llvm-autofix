@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "118850",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/118850-qwen3max-11240957.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp b/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp\nindex f653269713b3..3f5ee1dec5ae 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp\n@@ -168,7 +168,7 @@ void UnrollState::unrollWidenInductionByUF(\n   auto *ConstStep = ScalarStep->isLiveIn()\n                         ? dyn_cast<ConstantInt>(ScalarStep->getLiveInIRValue())\n                         : nullptr;\n-  if (!ConstStep || ConstStep->getZExtValue() != 1) {\n+  if (!ConstStep || ConstStep->getBitWidth() > 64 || ConstStep->getZExtValue() != 1) {\n     if (TypeInfo.inferScalarType(ScalarStep) != IVTy) {\n       ScalarStep =\n           Builder.createWidenCast(Instruction::Trunc, ScalarStep, IVTy);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 245382,
+  "output_tokens": 2007,
+  "cached_tokens": 114560,
+  "total_tokens": 247389,
+  "chat_rounds": 28,
+  "total_time_sec": 144.7355980873108,
+  "trans_point": [
+    "llvm/include/llvm/IR/Constants.h",
+    "llvm::ConstantInt::getZExtValue",
+    157
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp",
+      171,
+      171
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The crash occurs when the loop vectorizer encounters an induction variable with a bit width greater than 64 bits (specifically i65 in the reproducer). The code attempts to call `getZExtValue()` on a `ConstantInt` with 65 bits, which triggers an assertion failure because `getZExtValue()` can only handle values that fit in 64 bits.\n\n2. **Analyzing `opt`'s Log**: The backtrace shows the crash occurs in `VPlanUnroll.cpp:171` within the `unrollWidenInductionByUF` function. The code is checking if the induction step equals 1 by calling `ConstStep->getZExtValue() != 1`, but this fails when the constant has more than 64 bits.\n\n3. **Root Cause Analysis**: The problematic code assumes that any `ConstantInt` can safely have `getZExtValue()` called on it. However, `ConstantInt` can represent integers of arbitrary bit width (up to the limits of APInt), and `getZExtValue()` has a hard requirement that the value must fit in 64 bits. In the reproducer, we have an i65 induction variable with a step of -1, which creates a 65-bit `ConstantInt` that cannot be converted to uint64_t.\n\n4. **Proposed Edit Point(s)**\n   + The fix is to modify line 171 in `llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp` to check if the constant fits in 64 bits before calling `getZExtValue()`. If it doesn't fit, we should treat it as a non-constant step and skip the optimization path.\n   + Change: `if (!ConstStep || ConstStep->getZExtValue() != 1) {`\n   + To: `if (!ConstStep || ConstStep->getBitWidth() > 64 || ConstStep->getZExtValue() != 1) {`\n\n5. **Conclusion**: This fix ensures that the vectorizer safely handles induction variables with bit widths greater than 64 by avoiding the call to `getZExtValue()` when it would cause an assertion failure. The code will correctly fall back to the general case handling for wide integer steps, preventing the crash while maintaining correct functionality for normal 64-bit and smaller cases.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp b/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp\nindex f653269713b3..3f5ee1dec5ae 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanUnroll.cpp\n@@ -168,7 +168,7 @@ void UnrollState::unrollWidenInductionByUF(\n   auto *ConstStep = ScalarStep->isLiveIn()\n                         ? dyn_cast<ConstantInt>(ScalarStep->getLiveInIRValue())\n                         : nullptr;\n-  if (!ConstStep || ConstStep->getZExtValue() != 1) {\n+  if (!ConstStep || ConstStep->getBitWidth() > 64 || ConstStep->getZExtValue() != 1) {\n     if (TypeInfo.inferScalarType(ScalarStep) != IVTy) {\n       ScalarStep =\n           Builder.createWidenCast(Instruction::Trunc, ScalarStep, IVTy);\n"
+  ]
+}

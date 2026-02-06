@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "134115",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/134115-qwen3max-11250837.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex bbfed2ac2c09..3e2ccce20451 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -57,6 +57,7 @@\n #include \"llvm/Support/Compiler.h\"\n #include \"llvm/Support/Debug.h\"\n #include \"llvm/Support/ErrorHandling.h\"\n+#include \"llvm/Support/MathExtras.h\"\n #include \"llvm/Support/raw_ostream.h\"\n #include \"llvm/Transforms/IPO.h\"\n #include \"llvm/Transforms/Utils/Local.h\"\n@@ -661,8 +662,12 @@ ArgumentAccessInfo getArgumentAccessInfo(const Instruction *I,\n     auto TypeSize = DL.getTypeStoreSize(Ty);\n     if (!TypeSize.isScalable() && Offset) {\n       int64_t Size = TypeSize.getFixedValue();\n+      // Check for signed overflow when computing the upper bound.\n+      int64_t Upper;\n+      if (AddOverflow(*Offset, Size, Upper))\n+        return std::nullopt;\n       return ConstantRange(APInt(64, *Offset, true),\n-                           APInt(64, *Offset + Size, true));\n+                           APInt(64, Upper, true));\n     }\n     return std::nullopt;\n   };\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 421163,
+  "output_tokens": 2994,
+  "cached_tokens": 79872,
+  "total_tokens": 424157,
+  "chat_rounds": 30,
+  "total_time_sec": 250.23826360702515,
+  "trans_point": [
+    "llvm/lib/IR/ConstantRangeList.cpp",
+    "llvm::ConstantRangeList::insert",
+    41
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/FunctionAttrs.cpp",
+      664,
+      665
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The crash occurs in `ConstantRangeList::insert()` due to an assertion failure that requires `NewRange.getLower().slt(NewRange.getUpper())`. From debugging, we see that the problematic `ConstantRange` has lower=9223372036854775804 and upper=9223372036854775808 (which is -9223372036854775808 when interpreted as a signed 64-bit integer). This happens because 9223372036854775804 + 4 (the size of i32) overflows the signed 64-bit range, causing the upper bound to wrap around to a negative value, making the range invalid.\n\n2. **Analyzing `opt`'s Log**: The log shows the crash occurs during `function-attrs` pass when processing a store instruction with a large GEP offset (9223372036854775804). The pass attempts to create a `ConstantRange` for the memory access range but doesn't handle overflow cases properly.\n\n3. **Root Cause Analysis**: In `GetTypeAccessRange` lambda (lines 658-668), when computing the access range for a store/load instruction, the code calculates `*Offset + Size` without checking for signed overflow. When the offset is near `INT64_MAX`, adding the type size causes signed overflow, resulting in an invalid `ConstantRange` where the upper bound is less than the lower bound when compared as signed integers.\n\n4. **Proposed Edit Point(s)**: The fix should be applied in the `GetTypeAccessRange` lambda at line 664-665. Before creating the `ConstantRange`, we need to check if the addition would cause signed overflow. If it would, we should return `std::nullopt` to indicate that we cannot represent this access range safely, which will cause the pass to treat this as an unknown/conservative case rather than crashing.\n\n5. **Conclusion**: By adding overflow checking in `GetTypeAccessRange`, we prevent the creation of invalid `ConstantRange` objects that violate the assertion in `ConstantRangeList::insert()`. This makes the pass more robust when dealing with large offsets that would cause arithmetic overflow, falling back to conservative analysis instead of crashing.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex bbfed2ac2c09..3e2ccce20451 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -57,6 +57,7 @@\n #include \"llvm/Support/Compiler.h\"\n #include \"llvm/Support/Debug.h\"\n #include \"llvm/Support/ErrorHandling.h\"\n+#include \"llvm/Support/MathExtras.h\"\n #include \"llvm/Support/raw_ostream.h\"\n #include \"llvm/Transforms/IPO.h\"\n #include \"llvm/Transforms/Utils/Local.h\"\n@@ -661,8 +662,12 @@ ArgumentAccessInfo getArgumentAccessInfo(const Instruction *I,\n     auto TypeSize = DL.getTypeStoreSize(Ty);\n     if (!TypeSize.isScalable() && Offset) {\n       int64_t Size = TypeSize.getFixedValue();\n+      // Check for signed overflow when computing the upper bound.\n+      int64_t Upper;\n+      if (AddOverflow(*Offset, Size, Upper))\n+        return std::nullopt;\n       return ConstantRange(APInt(64, *Offset, true),\n-                           APInt(64, *Offset + Size, true));\n+                           APInt(64, Upper, true));\n     }\n     return std::nullopt;\n   };\n"
+  ]
+}

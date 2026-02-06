@@ -1,0 +1,38 @@
+{
+  "command": {
+    "issue": "113794",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/113794-gem25pro-12121748.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ValueError",
+  "errmsg": "Line numbers 6400 and 6400 are out of bounds for file /llvm-autofix-deps/llvm/llvm/llvm/include/llvm/Transforms/Vectorize/LoopVectorize.h",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 289, in patch_and_fix\n    code=extract_code_snippet(\n         ^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 240, in extract_code_snippet\n    raise ValueError(\nValueError: Line numbers 6400 and 6400 are out of bounds for file /llvm-autofix-deps/llvm/llvm/llvm/include/llvm/Transforms/Vectorize/LoopVectorize.h\n",
+  "input_tokens": 33599,
+  "output_tokens": 2976,
+  "cached_tokens": 0,
+  "total_tokens": 37579,
+  "chat_rounds": 1,
+  "total_time_sec": 55.882216930389404,
+  "trans_point": [
+    "llvm/include/llvm/Analysis/ScalarEvolutionExpressions.h",
+    "llvm::SCEVTraversal<llvm::SCEVExprContains<ScalarEvolution::checkValidity(const llvm::SCEV*) const::<lambda(const SCEV*)> >(const SCEV*, ScalarEvolution::checkValidity(const llvm::SCEV*) const::<lambda(const SCEV*)>)::FindClosure>::push(const llvm::SCEV *)",
+    668
+  ],
+  "edit_points": [
+    [
+      "llvm/include/llvm/Transforms/Vectorize/LoopVectorize.h",
+      6400,
+      6400
+    ],
+    [
+      "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+      6391,
+      6397
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe compiler is crashing with a `SIGSEGV` while running the `loop-vectorize` pass. The extremely deep and repetitive stack trace is a dead giveaway for an infinite recursion. The crash itself is a symptom of stack exhaustion.\n\nThe recursion happens within the `LoopVectorizationCostModel` as it tries to determine which values are loop-invariant and can be hoisted out of the loop. Specifically, the function `shouldConsiderInvariant` calls itself on the operands of an instruction to see if they too are invariant.\n\n### 2. Analyzing `opt`'s Log\n\nThe provided IR has a peculiar reduction:\n\n```llvm\n%red = phi i32 [ %start, %entry ], [ %red.next, %loop ]\n%red.next = add i32 0, %red\n```\n\nThe instruction `%red.next = add i32 0, %red` is a no-op; `%red.next` is functionally identical to `%red`. This creates a direct cycle in the dataflow graph: `%red` depends on `%red.next`, which in turn depends on `%red`.\n\nThe `scalar-evolution` analysis correctly identifies `%red` and `%red.next` as loop-invariant, having the value `%start` throughout the loop. This is correct because the `add i32 0, %red` doesn't actually change the value.\n\nHowever, the `loop-vectorize` pass's cost model isn't quite as clever. When it analyzes `%red.next`, it sees an `add` instruction inside the loop. To determine if `%red.next` is invariant, it checks its operands. One operand is `0` (invariant), and the other is `%red`. It then recursively calls `shouldConsiderInvariant` on `%red`.\n\nWhen analyzing `%red`, it sees a `phi` node. To determine if `%red` is invariant, it checks its operands. One is `%start` (invariant), and the other is `%red.next`. It then recursively calls `shouldConsiderInvariant` on `%red.next`.\n\nAnd there's our infinite loop: `shouldConsiderInvariant(%red.next)` -> `shouldConsiderInvariant(%red)` -> `shouldConsiderInvariant(%red.next)`... This continues until the stack is exhausted, leading to the crash.\n\n### 3. Root Cause Analysis\n\nThe root cause is the mutual recursion in `shouldConsiderInvariant` when it encounters a cycle of instructions that are all considered for hoisting. The function lacks a mechanism to detect and break this recursion, such as keeping track of the values it's currently visiting.\n\nThe function `shouldConsiderInvariant` is defined in `llvm/lib/Transforms/Vectorize/LoopVectorize.cpp`. The recursive call is:\n\n```cpp\n// In llvm::LoopVectorizationCostModel::shouldConsiderInvariant\nif (auto *I = dyn_cast<Instruction>(V))\n  return all_of(I->operands(), [this](Value *V) {\n    return shouldConsiderInvariant(V) || isInvariant(V);\n  });\n```\n\nThis code iterates through an instruction's operands and recursively calls `shouldConsiderInvariant`. Without a \"visited\" set, the cycle between `%red` and `%red.next` causes infinite recursion.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to add a \"visited\" set to `shouldConsiderInvariant` to track the `Value`s currently being processed in the recursion stack. If the function is called again for a value that's already in the set, it means we've detected a cycle. In this case, we should stop recursing and assume the value is not a candidate for hoisting (by returning `false`), which breaks the infinite loop.\n\nI will add a `DenseSet` to the `LoopVectorizationCostModel` class to serve as this visited set.\n\n**File**: `llvm/include/llvm/Transforms/Vectorize/LoopVectorize.h`\n**Edit Point**: Add a `DenseSet` member to the `LoopVectorizationCostModel` class.\n\n```cpp\nclass LoopVectorizationCostModel {\n  // ... existing members ...\nprivate:\n  /// A set of values that are under consideration for hoisting. Used to avoid\n  /// infinite recursion.\n  DenseSet<Value *> ValuesBeingConsidered;\n\n  // ... existing members ...\n```\n\n**File**: `llvm/lib/Transforms/Vectorize/LoopVectorize.cpp`\n**Edit Point**: Modify `shouldConsiderInvariant` to use the new `ValuesBeingConsidered` set.\n\n```cpp\nbool LoopVectorizationCostModel::shouldConsiderInvariant(Value *V) {\n  // We are looking for instructions that have all of their operands\n  // loop-invariant.\n  if (auto *I = dyn_cast<Instruction>(V)) {\n    if (!ValuesBeingConsidered.insert(I).second)\n      return false;\n    bool Ret = all_of(I->operands(), [this](Value *V) {\n      return shouldConsiderInvariant(V) || isInvariant(V);\n    });\n    ValuesBeingConsidered.erase(I);\n    return Ret;\n  }\n\n  return true;\n}\n```\n\nI will replace the original implementation of `shouldConsiderInvariant` with this new version. The logic is as follows:\n1.  When `shouldConsiderInvariant` is called for an `Instruction`, try to insert it into `ValuesBeingConsidered`.\n2.  If the insertion fails (i.e., the instruction is already in the set), we have found a cycle. Return `false` to break the recursion.\n3.  If the insertion succeeds, proceed with the recursive check on the operands.\n4.  Crucially, after the recursive calls are done for the current instruction, remove it from the set. This is essential so that the same value can be correctly analyzed later through a different path in the dataflow graph.\n\n### 5. Conclusion\n\nThe crash is caused by an infinite recursion in the loop vectorizer's cost model when analyzing a cyclic dependency in the IR. By introducing a \"visited\" set (`ValuesBeingConsidered`), we can detect and break these cycles, preventing the stack overflow and allowing the compiler to proceed correctly. This is a standard technique for handling recursion on cyclic graphs and makes the analysis more robust.",
+  "test_traj": []
+}

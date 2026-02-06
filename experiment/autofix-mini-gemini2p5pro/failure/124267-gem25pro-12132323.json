@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "124267",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/124267-gem25pro-12132323.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 594609,
+  "output_tokens": 19270,
+  "cached_tokens": 519745,
+  "total_tokens": 643727,
+  "chat_rounds": 43,
+  "total_time_sec": 1002.2093162536621,
+  "trans_point": [
+    "llvm/lib/Transforms/Scalar/InstSimplifyPass.cpp",
+    "runImpl",
+    56
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Analysis/InstructionSimplify.cpp",
+      3589,
+      3603
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe core of the problem is an incorrect simplification of an `icmp ult` instruction within the `instsimplify` module. The transformation incorrectly concludes that the result of the comparison is always `false`. This faulty conclusion stems from a misunderstanding of the facts established by a dominating conditional branch.\n\nThe `LHS_true` block in the provided LLVM IR is executed only when `%LHS = icmp ugt i8 %L0, %L1` is true, and it is known that `%L0` and `%L1` have the same sign. This is what the non-standard `icmp samesign ugt` syntax in the reproducer's log implies; the `samesign` is a fact derived from context, not a real predicate.\n\nInside this block, the instruction `%RHS = icmp ult i8 %R0, -1` (where `%R0 = sub nsw i8 %L0, %L1`) is simplified to `false`. This simplification is only valid if `%R0` is never less than `-1` (unsigned), which means `%R0` must always be equal to `-1` (255).\n\nThe Alive2 counterexample (`%L0 = 15`, `%L1 = 0`) clearly refutes this:\n1.  `%L0` (15) and `%L1` (0) have the same sign (both are positive).\n2.  `15 ugt 0` is true. The branch to `LHS_true` is taken.\n3.  `%R0 = sub nsw i8 15, 0` results in `15`.\n4.  `%RHS = icmp ult i8 15, -1` (i.e., `15 < 255`) is `true`.\n\nThe original code returns `true`, but the simplified code returns `false`, proving the transformation is incorrect.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log and the Alive2 log clearly show the miscompilation:\n```\n--- src ---\n%RHS = icmp ult i8 %R0, -1\nret i1 %RHS\n--- tgt ---\nret i1 false\n```\nThe backtrace provided points to `InstSimplifyPass.cpp`, which is the driver for the `instsimplify` library. The actual simplification logic resides in `llvm/lib/Analysis/InstructionSimplify.cpp`. The transformation is happening within the main simplification routine for `ICmpInst`.\n\n### 3. Root Cause Analysis\n\nThe issue lies in a specific piece of logic within `visitICmpInst` in `llvm/lib/Analysis/InstructionSimplify.cpp`. This logic was added to handle a pattern involving the `samesign` predicate, but it is flawed and over-aggressive.\n\nThe code attempts to simplify an `icmp` instruction by looking at one of its operands. If that operand is a `sub` instruction, it tries to use facts about the inputs to the `sub` to simplify the outer `icmp`. The problematic code path is triggered when `instsimplify` tries to use a dominating `icmp samesign` condition to reason about the result of the `sub`.\n\nThe logic incorrectly assumes that if `samesign(X, Y)` is true and `X u> Y`, then `X - Y` must be `-1`. This is fundamentally wrong. As the counterexample shows, `samesign(15, 0)` is true and `15 u> 0` is true, but `15 - 0` is `15`, not `-1`. The optimization seems to confuse unsigned and signed arithmetic properties.\n\nThis faulty reasoning leads to the incorrect conclusion that `%R0` must be `-1`, causing the `icmp ult %R0, -1` to be folded to `false`. The correct action is to remove this invalid optimization.\n\n### 4. Proposed Edit Point(s)\n\nThe incorrect simplification logic should be removed entirely. It is located in `llvm/lib/Analysis/InstructionSimplify.cpp`.\n\n**File**: `llvm/lib/Analysis/InstructionSimplify.cpp`\n\nThe block of code to be removed is an `if` statement that checks for `ICMP_SAMESIGN` and attempts to transform `icmp pred (sub X, Y), C` based on it. This logic is unsound.",
+  "test_traj": []
+}

@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "124518",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/124518-gpt5-12061620.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Scalar/LoopUnrollAndJamPass.cpp b/llvm/lib/Transforms/Scalar/LoopUnrollAndJamPass.cpp\nindex f1d1f3bc1e30..83f9a0383ede 100644\n--- a/llvm/lib/Transforms/Scalar/LoopUnrollAndJamPass.cpp\n+++ b/llvm/lib/Transforms/Scalar/LoopUnrollAndJamPass.cpp\n@@ -461,7 +461,5 @@ PreservedAnalyses LoopUnrollAndJamPass::run(LoopNest &LN,\n                              OptLevel, U))\n     return PreservedAnalyses::all();\n \n-  auto PA = getLoopPassPreservedAnalyses();\n-  PA.preserve<LoopNestAnalysis>();\n-  return PA;\n+  return getLoopPassPreservedAnalyses();\n }\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 48967,
+  "output_tokens": 2292,
+  "cached_tokens": 22784,
+  "total_tokens": 51259,
+  "chat_rounds": 7,
+  "total_time_sec": 82.05361485481262,
+  "trans_point": [
+    "llvm/lib/Transforms/Utils/LoopUtils.cpp",
+    "llvm::appendReversedLoopsToWorklist<llvm::iterator_range<std::reverse_iterator<llvm::Loop* const*> > >",
+    1807
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/LoopUnrollAndJamPass.cpp",
+      465,
+      466
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs due to an assertion in GenericLoopInfo::getSubLoops() stating that a Loop is not in a valid state. This implies that a Loop object being traversed has been marked invalid (Loop::markAsInvalid()) due to prior IR modifications, but is still being used by later code.\n\n2. Analyzing opt's Log:\nThe opt log shows:\n- LoopSimplify created a dedicated exit block.\n- LoopUnrollAndJam completely unrolled-and-jammed loop %do.body2.\n- Then the pass crashes in appendReversedLoopsToWorklist while building a worklist for loops.\nThe pipeline is loop(invalidate<all>,loop-unroll-and-jam,loop-unroll-and-jam). The first LoopUnrollAndJam pass modifies the loop nest (fully unrolling the middle loop). The second invocation then attempts to build a traversal from a LoopNest, and crashes.\n\nThe stack trace points to:\n- llvm::appendReversedLoopsToWorklist(reverse(Loops), Worklist)\n- where Loops = LN.getLoops() from the LoopNest analysis.\nThe assertion triggers when calling L->begin()/end(), which internally checks the loop's validity. This typically happens when a Loop object has been invalidated after structural changes but a stale LoopNest still references it.\n\n3. Root Cause Analysis:\nIn LoopUnrollAndJamPass::run, after performing transformations, the pass unconditionally preserves LoopNestAnalysis:\n  auto PA = getLoopPassPreservedAnalyses();\n  PA.preserve<LoopNestAnalysis>();\n  return PA;\nHowever, LoopUnrollAndJam modifies the loop structure (e.g., fully unrolling jammed loops). Preserving LoopNestAnalysis in that case is incorrect because the cached LoopNest will reference old Loop objects that may have been invalidated. When the second loop-unroll-and-jam pass runs, it reuses this preserved LoopNest, leading to traversal of invalid Loop objects and the assertion failure in getSubLoops/end().\n\nThus, the first transformation (complete unroll-and-jam of %do.body2) invalidates the loop nest, and the incorrect preservation of LoopNestAnalysis causes a stale LN to be used by the subsequent pass invocation.\n\n4. Proposed Edit Point(s):\n- File: llvm/lib/Transforms/Scalar/LoopUnrollAndJamPass.cpp\n- Lines: 465-466\n- Change: Do not preserve LoopNestAnalysis when the pass made modifications. Either remove the preservation entirely or guard it so that it is only preserved when the function is unmodified (in which case the code already returns PreservedAnalyses::all()).\n\nConcretely, remove:\n  PA.preserve<LoopNestAnalysis>();\nso that the returned PreservedAnalyses from getLoopPassPreservedAnalyses() does not include LoopNestAnalysis, forcing it to be recomputed for the next pass invocation.\n\nThis ensures the next pass builds a fresh LoopNest reflecting the updated LoopInfo and avoids traversing invalid Loop objects.\n\n5. Conclusion:\nThe crash is caused by erroneously preserving LoopNestAnalysis after loop transformations in LoopUnrollAndJamPass::run. Removing the preservation of LoopNestAnalysis when changes occur will force recomputation of the loop nest and prevent traversal of invalid Loop objects, fixing the assertion. This aligns with the principle that assertion failures indicate earlier logical errors\u2014in this case, incorrect analysis preservation after IR/loop structural changes.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Scalar/LoopUnrollAndJamPass.cpp b/llvm/lib/Transforms/Scalar/LoopUnrollAndJamPass.cpp\nindex f1d1f3bc1e30..83f9a0383ede 100644\n--- a/llvm/lib/Transforms/Scalar/LoopUnrollAndJamPass.cpp\n+++ b/llvm/lib/Transforms/Scalar/LoopUnrollAndJamPass.cpp\n@@ -461,7 +461,5 @@ PreservedAnalyses LoopUnrollAndJamPass::run(LoopNest &LN,\n                              OptLevel, U))\n     return PreservedAnalyses::all();\n \n-  auto PA = getLoopPassPreservedAnalyses();\n-  PA.preserve<LoopNestAnalysis>();\n-  return PA;\n+  return getLoopPassPreservedAnalyses();\n }\n"
+  ]
+}

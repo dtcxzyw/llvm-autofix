@@ -1,0 +1,31 @@
+{
+  "command": {
+    "issue": "115575",
+    "model": "gpt-5"
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 04ea12ef0f12..2069b50c7f74 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -13,6 +13,7 @@\n //===----------------------------------------------------------------------===//\n \n #include \"llvm/Transforms/Vectorize/VectorCombine.h\"\n+#include <optional>\n #include \"llvm/ADT/DenseMap.h\"\n #include \"llvm/ADT/STLExtras.h\"\n #include \"llvm/ADT/ScopeExit.h\"\n@@ -38,6 +39,21 @@\n #include \"llvm/Transforms/Utils/InstructionWorklist.h\"\n \n using namespace llvm;\n+\n+// PR115575 fix: guard scalarization on in-range insertelement index\n+static std::optional<unsigned> getInRangeConstIndex(Value *IdxVal, unsigned NumElts) {\n+  if (auto *CI = dyn_cast<ConstantInt>(IdxVal)) {\n+    // Negative indices or larger-than-numelts are OOB.\n+    // ConstantInt is unsigned compare safe via getLimitedValue.\n+    APInt A = CI->getValue();\n+    if (A.isIntN(64)) {\n+      uint64_t U = A.getZExtValue();\n+      if (U < NumElts)\n+        return (unsigned)U;\n+    }\n+  }\n+  return std::nullopt;\n+}\n using namespace llvm::PatternMatch;\n \n STATISTIC(NumVecLoad, \"Number of vector loads formed\");\n@@ -911,6 +927,27 @@ bool VectorCombine::scalarizeVPIntrinsic(Instruction &I) {\n /// Match a vector binop or compare instruction with at least one inserted\n /// scalar operand and convert to scalar binop/cmp followed by insertelement.\n bool VectorCombine::scalarizeBinopOrCmp(Instruction &I) {\n+  // PR115575 GUARD: Bail out of scalarization if insertelement uses an OOB constant index.\n+  auto GuardOOBInsertIdx = [&](Value *Op) -> bool {\n+    if (auto *IE = dyn_cast<InsertElementInst>(Op)) {\n+      if (auto *FVT = dyn_cast<FixedVectorType>(IE->getType())) {\n+        unsigned NumElts = FVT->getNumElements();\n+        auto Idx = getInRangeConstIndex(IE->getOperand(2), NumElts);\n+        if (!Idx)\n+          return false; // OOB index detected\n+      }\n+    }\n+    return true;\n+  };\n+  bool IsBinOrCmp = Instruction::isBinaryOp(I.getOpcode()) ||\n+                    I.getOpcode() == Instruction::ICmp ||\n+                    I.getOpcode() == Instruction::FCmp;\n+  if (IsBinOrCmp) {\n+    if (!GuardOOBInsertIdx(I.getOperand(0)) ||\n+        !GuardOOBInsertIdx(I.getOperand(1)))\n+      return false;\n+  }\n+\n   CmpInst::Predicate Pred = CmpInst::BAD_ICMP_PREDICATE;\n   Value *Ins0, *Ins1;\n   if (!match(&I, m_BinOp(m_Value(Ins0), m_Value(Ins1))) &&\n@@ -2915,4 +2952,4 @@ PreservedAnalyses VectorCombinePass::run(Function &F,\n   PreservedAnalyses PA;\n   PA.preserveSet<CFGAnalyses>();\n   return PA;\n-}\n+}\n\\ No newline at end of file\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 97386,
+  "output_tokens": 23753,
+  "cached_tokens": 80384,
+  "total_tokens": 121139,
+  "chat_rounds": 10,
+  "total_time_sec": 574.8447878360748,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 04ea12ef0f12..2069b50c7f74 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -13,6 +13,7 @@\n //===----------------------------------------------------------------------===//\n \n #include \"llvm/Transforms/Vectorize/VectorCombine.h\"\n+#include <optional>\n #include \"llvm/ADT/DenseMap.h\"\n #include \"llvm/ADT/STLExtras.h\"\n #include \"llvm/ADT/ScopeExit.h\"\n@@ -38,6 +39,21 @@\n #include \"llvm/Transforms/Utils/InstructionWorklist.h\"\n \n using namespace llvm;\n+\n+// PR115575 fix: guard scalarization on in-range insertelement index\n+static std::optional<unsigned> getInRangeConstIndex(Value *IdxVal, unsigned NumElts) {\n+  if (auto *CI = dyn_cast<ConstantInt>(IdxVal)) {\n+    // Negative indices or larger-than-numelts are OOB.\n+    // ConstantInt is unsigned compare safe via getLimitedValue.\n+    APInt A = CI->getValue();\n+    if (A.isIntN(64)) {\n+      uint64_t U = A.getZExtValue();\n+      if (U < NumElts)\n+        return (unsigned)U;\n+    }\n+  }\n+  return std::nullopt;\n+}\n using namespace llvm::PatternMatch;\n \n STATISTIC(NumVecLoad, \"Number of vector loads formed\");\n@@ -911,6 +927,27 @@ bool VectorCombine::scalarizeVPIntrinsic(Instruction &I) {\n /// Match a vector binop or compare instruction with at least one inserted\n /// scalar operand and convert to scalar binop/cmp followed by insertelement.\n bool VectorCombine::scalarizeBinopOrCmp(Instruction &I) {\n+  // PR115575 GUARD: Bail out of scalarization if insertelement uses an OOB constant index.\n+  auto GuardOOBInsertIdx = [&](Value *Op) -> bool {\n+    if (auto *IE = dyn_cast<InsertElementInst>(Op)) {\n+      if (auto *FVT = dyn_cast<FixedVectorType>(IE->getType())) {\n+        unsigned NumElts = FVT->getNumElements();\n+        auto Idx = getInRangeConstIndex(IE->getOperand(2), NumElts);\n+        if (!Idx)\n+          return false; // OOB index detected\n+      }\n+    }\n+    return true;\n+  };\n+  bool IsBinOrCmp = Instruction::isBinaryOp(I.getOpcode()) ||\n+                    I.getOpcode() == Instruction::ICmp ||\n+                    I.getOpcode() == Instruction::FCmp;\n+  if (IsBinOrCmp) {\n+    if (!GuardOOBInsertIdx(I.getOperand(0)) ||\n+        !GuardOOBInsertIdx(I.getOperand(1)))\n+      return false;\n+  }\n+\n   CmpInst::Predicate Pred = CmpInst::BAD_ICMP_PREDICATE;\n   Value *Ins0, *Ins1;\n   if (!match(&I, m_BinOp(m_Value(Ins0), m_Value(Ins1))) &&\n@@ -2915,4 +2952,4 @@ PreservedAnalyses VectorCombinePass::run(Function &F,\n   PreservedAnalyses PA;\n   PA.preserveSet<CFGAnalyses>();\n   return PA;\n-}\n+}\n\\ No newline at end of file\n"
+  ]
+}

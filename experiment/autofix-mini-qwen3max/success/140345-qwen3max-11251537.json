@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "140345",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/140345-qwen3max-11251537.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex f918d7e059b6..a2458447b160 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -677,9 +677,12 @@ ArgumentAccessInfo getArgumentAccessInfo(const Instruction *I,\n     auto *ConstantLength = dyn_cast<ConstantInt>(Length);\n     if (ConstantLength && Offset &&\n         ConstantLength->getValue().isStrictlyPositive()) {\n-      return ConstantRange(\n-          APInt(64, *Offset, true),\n-          APInt(64, *Offset + ConstantLength->getSExtValue(), true));\n+      APInt Lower(64, *Offset, true);\n+      bool Overflow;\n+      APInt Upper = Lower.sadd_ov(APInt(64, ConstantLength->getSExtValue()), Overflow);\n+      // If signed addition would overflow, we cannot create a valid ConstantRange.\n+      if (!Overflow)\n+        return ConstantRange(Lower, Upper);\n     }\n     return std::nullopt;\n   };\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 425834,
+  "output_tokens": 1721,
+  "cached_tokens": 141312,
+  "total_tokens": 427555,
+  "chat_rounds": 30,
+  "total_time_sec": 355.55531430244446,
+  "trans_point": [
+    "llvm/lib/IR/ConstantRangeList.cpp",
+    "llvm::ConstantRangeList::insert",
+    41
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/FunctionAttrs.cpp",
+      680,
+      682
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs in `ConstantRangeList::insert()` when trying to insert a `ConstantRange` where the lower bound is not less than the upper bound (`NewRange.getLower().slt(NewRange.getUpper())` assertion fails). From debugging, we see that the problematic range has lower = 9223372036854775805 and upper = 9223372036854775808, but since these are signed 64-bit values, the upper value actually wraps around to -9223372036854775808, making the lower > upper condition true.\n\n2. Analyzing `opt`'s Log: The issue stems from processing a `llvm.memset` intrinsic with a large offset (9223372036854775805) and size (3). The `GetConstantIntRange` lambda function computes the access range as [offset, offset + length), but doesn't handle signed overflow properly.\n\n3. Root Cause Analysis: In `GetConstantIntRange` (lines 674-685), when computing the upper bound as `*Offset + ConstantLength->getSExtValue()`, this addition can cause signed integer overflow. Specifically, 9223372036854775805 + 3 = 9223372036854775808, which exceeds INT64_MAX (9223372036854775807) and wraps to a negative value. The `ConstantRange` constructor doesn't detect this overflow, creating an invalid range that violates the assertion in `ConstantRangeList::insert()`.\n\n4. Proposed Edit Point(s): The fix should be applied to the `GetConstantIntRange` lambda function to detect signed overflow when computing the upper bound. We need to check if the addition would overflow before constructing the `ConstantRange`.\n\n5. Conclusion: By adding overflow checking in `GetConstantIntRange`, we prevent the creation of invalid `ConstantRange` objects that would cause assertion failures in `ConstantRangeList::insert()`. This makes the function-attrs pass more robust when handling edge cases with large offsets near the limits of signed 64-bit integers.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex f918d7e059b6..a2458447b160 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -677,9 +677,12 @@ ArgumentAccessInfo getArgumentAccessInfo(const Instruction *I,\n     auto *ConstantLength = dyn_cast<ConstantInt>(Length);\n     if (ConstantLength && Offset &&\n         ConstantLength->getValue().isStrictlyPositive()) {\n-      return ConstantRange(\n-          APInt(64, *Offset, true),\n-          APInt(64, *Offset + ConstantLength->getSExtValue(), true));\n+      APInt Lower(64, *Offset, true);\n+      bool Overflow;\n+      APInt Upper = Lower.sadd_ov(APInt(64, ConstantLength->getSExtValue()), Overflow);\n+      // If signed addition would overflow, we cannot create a valid ConstantRange.\n+      if (!Overflow)\n+        return ConstantRange(Lower, Upper);\n     }\n     return std::nullopt;\n   };\n"
+  ]
+}

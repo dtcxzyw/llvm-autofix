@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "122584",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/122584-gem25pro-12132136.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 742282,
+  "output_tokens": 10886,
+  "cached_tokens": 607374,
+  "total_tokens": 764156,
+  "chat_rounds": 50,
+  "total_time_sec": 240.59864497184753,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::ShuffleCostEstimator::finalize(llvm::ArrayRef<int>, llvm::ArrayRef<std::pair<llvm::slpvectorizer::BoUpSLP::TreeEntry const*, unsigned int> >, llvm::ArrayRef<int>, unsigned int, llvm::function_ref<void (llvm::Value*&, llvm::SmallVectorImpl<int>&)>)",
+    10936
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      14923,
+      14923
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe crash is an assertion failure, `I1 == PoisonMaskElem`, within the `ShuffleCostEstimator::finalize` function. This function is responsible for calculating the cost of a `shufflevector` instruction that combines multiple sub-vectors. The `PoisonMaskElem` (-2) is a special value used in shuffle masks to indicate that a particular lane of the resulting vector is not used and can be considered \"poison\" (or \"undef\"). The assertion fails because it expects a mask element corresponding to an unused sub-vector to be `PoisonMaskElem`, but it finds a different value (in this case, 0).\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log shows the SLP vectorizer attempting to vectorize a group of four PHI nodes in the `s` basic block. It builds a dependency tree and calculates the vectorization cost bottom-up. The key points from the log are:\n\n- The vectorizer identifies a set of PHI nodes to vectorize: `%m.4`, `%l.4`, `%j.2`, `%xor36`.\n- It recursively analyzes their operands, creating `TreeEntry` objects for sub-groups of instructions.\n- The crash occurs during the cost calculation phase (`getTreeCost`), specifically when processing a `build_vector` operation for a `TreeEntry` that gathers scalars from multiple sources.\n- The log message `SLP: perfect diamond match for gather bundle Idx: 1, n=4...` points to the problematic operation. This \"gather bundle\" is trying to construct a vector of 4 elements, but some of its inputs are scalars that are not part of any vectorized sub-tree.\n\n### 3. Root Cause Analysis\n\nBy inspecting the debugger state at the point of the crash, we can pinpoint the exact cause.\n\n- The `ShuffleCostEstimator::finalize` function is called with a `SubvectorMask` of `{0, 1, -1, -1}`. This mask indicates how the four lanes of the final vector are constructed:\n  - Lane 0 comes from sub-vector 0.\n  - Lane 1 comes from sub-vector 1.\n  - Lanes 2 and 3 are unused (indicated by -1).\n- The `Subvectors` array contains two entries. The first is a `TreeEntry` that will be vectorized. The second is a `nullptr`, representing a scalar that is not part of any vectorized sub-tree.\n- The code iterates through the `SubvectorMask`. When it encounters an unused lane (mask value -1), it correctly checks the corresponding element in the main shuffle `Mask`.\n- The problem lies in how the main shuffle `Mask` is constructed. For the unused lanes (2 and 3), the `Mask` contains `0` instead of the expected `PoisonMaskElem` (-2).\n\nThis happens because the logic in `processBuildVector` that builds the shuffle mask does not correctly handle the case where a scalar operand is not part of any sub-vector (`SubEntry` is `nullptr`). The code initializes the mask elements for these scalar operands to their lane index (e.g., 2 and 3), and then fails to update them to `PoisonMaskElem` when it's later determined that these lanes are unused.\n\nThe fix is to ensure that when a lane in the `SubvectorMask` is marked as unused (-1), the corresponding element in the main shuffle `Mask` is explicitly set to `PoisonMaskElem`.\n\n### 4. Proposed Edit Point(s)\n\nThe fix involves modifying `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp` to correctly populate the shuffle mask.\n\n```cpp\n// In llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n\n// ... around line 14920\n      if (SubvectorMask[I] == -1) {\n        // This is an unused subvector.\n        auto MaskIt = Mask.begin() + I;\n        assert(*MaskIt == I && \"Unexpected mask element\");\n        *MaskIt = PoisonMaskElem;\n        continue;\n      }\n// ...\n```\n\nHere is the proposed edit:\n\n[[14923, 14923, \"llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\"]]\n\n### 5. Conclusion\n\nThis small but crucial change ensures that the shuffle mask passed to `ShuffleCostEstimator::finalize` is well-formed, even in complex scenarios involving scalars that are not part of any vectorized sub-tree. This resolves the assertion failure and allows the SLP vectorizer to correctly estimate the cost and proceed with vectorization.",
+  "test_traj": []
+}

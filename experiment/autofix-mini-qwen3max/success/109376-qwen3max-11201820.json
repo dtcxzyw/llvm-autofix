@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "109376",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/109376-qwen3max-11201820.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex a88702b81096..df4d69010db9 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -18606,7 +18606,10 @@ public:\n             LocalExternallyUsedValues[RdxVal];\n             continue;\n           }\n-          Value *OrigV = TrackedToOrig.at(RdxVal);\n+          auto It = TrackedToOrig.find(RdxVal);\n+          if (It == TrackedToOrig.end())\n+            continue;\n+          Value *OrigV = It->second;\n           unsigned NumOps =\n               VectorizedVals.lookup(OrigV) + At(SameValuesCounter, OrigV);\n           if (NumOps != ReducedValsToOps.at(OrigV).size())\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 655073,
+  "output_tokens": 2324,
+  "cached_tokens": 211712,
+  "total_tokens": 657397,
+  "chat_rounds": 24,
+  "total_time_sec": 279.247670173645,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "(anonymous namespace)::HorizontalReduction::tryToReduce",
+    18609
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      18609,
+      18609
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs in `HorizontalReduction::tryToReduce()` when trying to access `TrackedToOrig.at(RdxVal)`. The assertion failure indicates that `RdxVal` is not present in the `TrackedToOrig` map, which should contain mappings from tracked values to their original values.\n\n2. Analyzing `opt`'s Log: The debug log shows that the SLP vectorizer successfully builds and schedules a bundle containing various add instructions, then proceeds to vectorize a horizontal reduction. The crash happens during the processing of externally used values when trying to map a reduced value back to its original form.\n\n3. Root Cause Analysis: From the debugger inspection, we can see that:\n   - `RdxVal` is `%subi = add i16 0, 0`\n   - `TrackedVals` contains `RdxVal` (as confirmed by `TrackedVals.find(RdxVal) != TrackedVals.end()` returning true)\n   - However, `TrackedToOrig` does not contain `RdxVal` (as `TrackedToOrig.find(RdxVal)` equals `TrackedToOrig.end()`)\n   \n   Looking at the code around line 18385-18398, we see that `TrackedToOrig` is populated only for values that pass certain conditions in the loop. Specifically, values are only added to `TrackedToOrig` if they are not filtered out by the condition on lines 18392-18395. However, later in the code (line 18598-18609), the code assumes that any `RdxVal` from `TrackedVals` will have a corresponding entry in `TrackedToOrig`.\n   \n   The issue is that `%subi` is used as an operand in the reduction chain but was filtered out during the initial candidate selection because it might have been considered incompatible with other values (possibly due to being a constant-like value or having different opcode characteristics). However, it's still referenced later when processing externally used values.\n\n4. Proposed Edit Point(s):\n   + The fix is to check if `RdxVal` exists in `TrackedToOrig` before calling `at()`. If it doesn't exist, we should skip processing this value or handle it appropriately. Looking at the context, the safest approach is to continue to the next iteration if the key is not found, similar to how other maps are handled in the codebase.\n   + Line 18609 should be changed from `Value *OrigV = TrackedToOrig.at(RdxVal);` to first check if the key exists.\n\n5. Conclusion: The fix ensures that we don't attempt to access a non-existent key in the `TrackedToOrig` map, preventing the assertion failure. This handles the edge case where a value is present in `TrackedVals` but was filtered out from `TrackedToOrig` during the initial candidate selection phase.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex a88702b81096..df4d69010db9 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -18606,7 +18606,10 @@ public:\n             LocalExternallyUsedValues[RdxVal];\n             continue;\n           }\n-          Value *OrigV = TrackedToOrig.at(RdxVal);\n+          auto It = TrackedToOrig.find(RdxVal);\n+          if (It == TrackedToOrig.end())\n+            continue;\n+          Value *OrigV = It->second;\n           unsigned NumOps =\n               VectorizedVals.lookup(OrigV) + At(SameValuesCounter, OrigV);\n           if (NumOps != ReducedValsToOps.at(OrigV).size())\n"
+  ]
+}

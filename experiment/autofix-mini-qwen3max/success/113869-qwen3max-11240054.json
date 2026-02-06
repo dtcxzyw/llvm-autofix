@@ -1,0 +1,40 @@
+{
+  "command": {
+    "issue": "113869",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/113869-qwen3max-11240054.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex 162ebebf1b8f..8fde1cabc5d1 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -1046,7 +1046,7 @@ static Value *canonicalizeSaturatedAdd(ICmpInst *Cmp, Value *TVal, Value *FVal,\n   // Match unsigned saturated add of 2 variables with an unnecessary 'not'.\n   // Strictness of the comparison is irrelevant.\n   Value *Y;\n-  if (match(Cmp0, m_Not(m_Value(X))) &&\n+  if (match(Cmp0, m_NotForbidPoison(m_Value(X))) &&\n       match(FVal, m_c_Add(m_Specific(X), m_Value(Y))) && Y == Cmp1) {\n     // (~X u< Y) ? -1 : (X + Y) --> uadd.sat(X, Y)\n     // (~X u< Y) ? -1 : (Y + X) --> uadd.sat(X, Y)\n@@ -1056,7 +1056,7 @@ static Value *canonicalizeSaturatedAdd(ICmpInst *Cmp, Value *TVal, Value *FVal,\n   // Strictness of the comparison is irrelevant.\n   X = Cmp0;\n   Y = Cmp1;\n-  if (match(FVal, m_c_Add(m_Not(m_Specific(X)), m_Specific(Y)))) {\n+  if (match(FVal, m_c_Add(m_NotForbidPoison(m_Specific(X)), m_Specific(Y)))) {\n     // (X u< Y) ? -1 : (~X + Y) --> uadd.sat(~X, Y)\n     // (X u< Y) ? -1 : (Y + ~X) --> uadd.sat(Y, ~X)\n     BinaryOperator *BO = cast<BinaryOperator>(FVal);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 196280,
+  "output_tokens": 6856,
+  "cached_tokens": 11520,
+  "total_tokens": 203136,
+  "chat_rounds": 17,
+  "total_time_sec": 802.5074362754822,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+    "llvm::InstCombinerImpl::foldSelectInstWithICmp",
+    1987
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+      1049,
+      1049
+    ],
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+      1059,
+      1059
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The problem is that the transformation from a select instruction with icmp condition to uadd.sat intrinsic introduces more poison than the original code. In the source, when the add operands contain poison but the condition is true, the select returns the true value (-1). However, the uadd.sat intrinsic returns poison whenever any input is poison, making the target more poisonous than the source.\n\n2. Analyzing `opt`'s Log: The log shows that the transformation occurs in `canonicalizeSaturatedAdd` function, specifically matching the pattern `(~X u< Y) ? -1 : (X + Y)` \u2192 `uadd.sat(X, Y)`. The debug output confirms that the second element of the result changes from -1 in the source to poison in the target.\n\n3. Root Cause Analysis: The root cause is in the pattern matching within `canonicalizeSaturatedAdd`. The function uses `m_Not(m_Value(X))` which matches xor operations with all-ones constants, but `m_AllOnes()` (used internally by `m_Not`) allows poison in vector elements. When the all-ones constant contains poison (like `<i32 -1, i32 poison>`), the transformation becomes invalid because the poison behavior differs between the select and uadd.sat.\n\n4. Proposed Edit Point(s):\n   + Line 1049: Change `match(Cmp0, m_Not(m_Value(X)))` to `match(Cmp0, m_NotForbidPoison(m_Value(X)))`\n   + Line 1059: Change `match(FVal, m_c_Add(m_Not(m_Specific(X)), m_Specific(Y)))` to `match(FVal, m_c_Add(m_NotForbidPoison(m_Specific(X)), m_Specific(Y)))`\n   \n   These changes ensure that the transformation only applies when the \"not\" operation doesn't involve poison in the constant, preserving the equivalence between the original select and the uadd.sat intrinsic.\n\n5. Conclusion: By using `m_NotForbidPoison` instead of `m_Not`, we prevent the transformation when the all-ones constant contains poison, which maintains the correct poison semantics. This fix ensures that the optimization is only applied when it's safe to do so, avoiding the introduction of additional poison that would make the target more poisonous than the source.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex 162ebebf1b8f..8fde1cabc5d1 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -1046,7 +1046,7 @@ static Value *canonicalizeSaturatedAdd(ICmpInst *Cmp, Value *TVal, Value *FVal,\n   // Match unsigned saturated add of 2 variables with an unnecessary 'not'.\n   // Strictness of the comparison is irrelevant.\n   Value *Y;\n-  if (match(Cmp0, m_Not(m_Value(X))) &&\n+  if (match(Cmp0, m_NotForbidPoison(m_Value(X))) &&\n       match(FVal, m_c_Add(m_Specific(X), m_Value(Y))) && Y == Cmp1) {\n     // (~X u< Y) ? -1 : (X + Y) --> uadd.sat(X, Y)\n     // (~X u< Y) ? -1 : (Y + X) --> uadd.sat(X, Y)\n@@ -1056,7 +1056,7 @@ static Value *canonicalizeSaturatedAdd(ICmpInst *Cmp, Value *TVal, Value *FVal,\n   // Strictness of the comparison is irrelevant.\n   X = Cmp0;\n   Y = Cmp1;\n-  if (match(FVal, m_c_Add(m_Not(m_Specific(X)), m_Specific(Y)))) {\n+  if (match(FVal, m_c_Add(m_NotForbidPoison(m_Specific(X)), m_Specific(Y)))) {\n     // (X u< Y) ? -1 : (~X + Y) --> uadd.sat(~X, Y)\n     // (X u< Y) ? -1 : (Y + ~X) --> uadd.sat(Y, ~X)\n     BinaryOperator *BO = cast<BinaryOperator>(FVal);\n"
+  ]
+}

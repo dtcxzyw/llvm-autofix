@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "140442",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/140442-gpt5-11271517.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Utils/LoopPeel.cpp b/llvm/lib/Transforms/Utils/LoopPeel.cpp\nindex c5c637ab6e20..3982c13191b1 100644\n--- a/llvm/lib/Transforms/Utils/LoopPeel.cpp\n+++ b/llvm/lib/Transforms/Utils/LoopPeel.cpp\n@@ -1213,8 +1213,15 @@ bool llvm::peelLoop(Loop *L, unsigned PeelCount, bool PeelLast, LoopInfo *LI,\n   if (PeelLast) {\n     // Now adjust users of the original exit values by replacing them with the\n     // exit value from the peeled iteration.\n-    for (const auto &[P, E] : ExitValues)\n-      P->replaceAllUsesWith(VMap.lookup(E));\n+    for (const auto &[P, E] : ExitValues) {\n+      // VMap only contains entries for values that were cloned. If the\n+      // incoming value E was not cloned (e.g., it is a constant or comes from\n+      // outside the loop), fall back to replacing with E itself.\n+      Value *NewV = VMap.lookup(E);\n+      if (!NewV)\n+        NewV = E;\n+      P->replaceAllUsesWith(NewV);\n+    }\n     formLCSSA(*L, DT, LI, SE);\n   } else {\n     // Now adjust the phi nodes in the loop header to get their initial values\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 100835,
+  "output_tokens": 6304,
+  "cached_tokens": 66816,
+  "total_tokens": 107139,
+  "chat_rounds": 11,
+  "total_time_sec": 191.32462692260742,
+  "trans_point": [
+    "llvm/lib/IR/Value.cpp",
+    "llvm::Value::doRAUW",
+    516
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/LoopPeel.cpp",
+      1215,
+      1218
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs during peeling of the last iteration of a loop (PeelLast=true) in peelLoop. Specifically, when adjusting users of the original exit PHI values, the code calls replaceAllUsesWith(VMap.lookup(E)). If E (the incoming value along the latch into the exit PHI) is a constant or otherwise not cloned, VMap.lookup(E) returns null, leading to an assertion failure in Value::replaceAllUsesWith(<null>). The minimized test indicates this situation arises after completely unrolling an inner loop, leaving an LCSSA PHI in the outer loop's exit whose incoming value from the latch is a constant.\n\n2. Analyzing opt's Log:\n- The inner loop is completely unrolled.\n- Then the outer loop is peeled with PeelLast=true: \"PEELING loop %outer.header with iteration count 1!\".\n- The crash happens at peelLoop's replacement of exit values.\n- The first transformation point is Value::doRAUW triggered from P->replaceAllUsesWith(VMap.lookup(E)). This suggests VMap.lookup(E) returned null.\n\n3. Root Cause Analysis:\nWhen PeelLast is true, peelLoop records ExitValues mapping each exit PHI P to the value E incoming from the latch before peeling. After cloning one peeled iteration, it tries to replace all uses of P with the cloned equivalent of E via VMap.lookup(E). However, not all incoming values are cloned/mapped: constants and other values outside the cloned loop are not inserted into VMap, so VMap.lookup(E) returns nullptr. Attempting replaceAllUsesWith(nullptr) triggers the assertion. This matches the test case name hinting at a constant LCSSA PHI value after unrolling the inner loop.\n\n4. Proposed Edit Point(s)\n- File: llvm/lib/Transforms/Utils/LoopPeel.cpp\n- Location: Around the code that replaces exit PHI uses when PeelLast is true.\n- Change: Use the original value E if no mapping exists in VMap.\n\nEdit:\n  for (const auto &[P, E] : ExitValues)\n-     P->replaceAllUsesWith(VMap.lookup(E));\n+     {\n+       // VMap does not contain entries for values that were not cloned\n+       // (e.g., constants or values defined outside the loop). In that case\n+       // the correct replacement is the original value itself.\n+       Value *NewV = VMap.lookup(E);\n+       if (!NewV)\n+         NewV = E;\n+       P->replaceAllUsesWith(NewV);\n+     }\n\nThis ensures constants and other unmapped values are handled safely and correctly.\n\n5. Conclusion:\nThe crash is due to replacing uses with a null pointer when the incoming exit value is not cloned (e.g., a constant). By falling back to the original value when no VMap entry exists, we avoid the assertion and preserve correct semantics. This fix maintains correctness for both cloned and non-cloned values and prevents the crash during last-iteration peeling.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/LoopPeel.cpp b/llvm/lib/Transforms/Utils/LoopPeel.cpp\nindex c5c637ab6e20..3982c13191b1 100644\n--- a/llvm/lib/Transforms/Utils/LoopPeel.cpp\n+++ b/llvm/lib/Transforms/Utils/LoopPeel.cpp\n@@ -1213,8 +1213,15 @@ bool llvm::peelLoop(Loop *L, unsigned PeelCount, bool PeelLast, LoopInfo *LI,\n   if (PeelLast) {\n     // Now adjust users of the original exit values by replacing them with the\n     // exit value from the peeled iteration.\n-    for (const auto &[P, E] : ExitValues)\n-      P->replaceAllUsesWith(VMap.lookup(E));\n+    for (const auto &[P, E] : ExitValues) {\n+      // VMap only contains entries for values that were cloned. If the\n+      // incoming value E was not cloned (e.g., it is a constant or comes from\n+      // outside the loop), fall back to replacing with E itself.\n+      Value *NewV = VMap.lookup(E);\n+      if (!NewV)\n+        NewV = E;\n+      P->replaceAllUsesWith(NewV);\n+    }\n     formLCSSA(*L, DT, LI, SE);\n   } else {\n     // Now adjust the phi nodes in the loop header to get their initial values\n"
+  ]
+}

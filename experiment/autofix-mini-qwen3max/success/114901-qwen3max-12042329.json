@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "114901",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/114901-qwen3max-12042329.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 025234c54956..757d1f94768f 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -1037,6 +1037,11 @@ bool VectorCombine::foldExtractedCmps(Instruction &I) {\n   if (!I.isBinaryOp() || !I.getType()->isIntegerTy(1))\n     return false;\n \n+  // Shift operations on i1 are problematic because shifting by >= 1 bit\n+  // produces poison (since i1 only has 1 bit). Avoid vectorizing these.\n+  if (I.isShift())\n+    return false;\n+\n   // The compare predicates should match, and each compare should have a\n   // constant operand.\n   Value *B0 = I.getOperand(0), *B1 = I.getOperand(1);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 306426,
+  "output_tokens": 1865,
+  "cached_tokens": 104576,
+  "total_tokens": 308291,
+  "chat_rounds": 29,
+  "total_time_sec": 633.8352556228638,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+    "(anonymous namespace)::VectorCombine::foldExtractedCmps",
+    1113
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+      1115,
+      1115
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The problem occurs when the vector-combine pass transforms scalar comparisons and an arithmetic right shift (ashr) into vector operations. The original code performs two scalar icmp operations on extracted elements and then an ashr operation on the resulting i1 values. The transformation creates a vector icmp, a shufflevector to rearrange the comparison results, and then a vector ashr. However, the issue is that ashr with i1 operands has undefined behavior when the shift amount is >= 1 (since i1 only has 1 bit). In the original scalar code, %cmp1 is 0, so ashr i1 %cmp3, %cmp1 is valid (shifting by 0). But in the transformed vector code, the shuffle creates a vector where the element at index 1 (CheapIndex) contains the value from index 3 (ExpensiveIndex), which is 1. Then the vector ashr attempts to shift by 1, which is >= width of i1 (1 bit), producing poison.\n\n2. Analyzing `opt`'s Log: The log shows that the transformation creates a vector icmp with poison in unused lanes, then a shuffle that places the %cmp3 result (1) into the position needed for the shift operand. The vector ashr then operates on vectors where one operand has 0 in position 1 and the other has 1 in position 1, causing ashr <4 x i1> with shift amount 1, which is invalid for i1 type.\n\n3. Root Cause Analysis: The foldExtractedCmps function assumes that any binary operation on i1 values can be safely vectorized. However, this is not true for shift operations (ashr, lshr, shl) on i1 types because shifting by any amount >= 1 is undefined (produces poison). The function needs to exclude shift operations from this transformation when the operand type is i1.\n\n4. Proposed Edit Point(s): The issue is in the foldExtractedCmps function at line 1115 where it creates the vector binary operation without checking if the operation is safe for i1 types. Specifically, shift operations on i1 are problematic. We need to add a check to exclude shift operations when the result type is i1 (which means the operands are also i1).\n\n5. Conclusion: The fix is to add a condition in foldExtractedCmps to reject shift operations when working with i1 types, since these operations have undefined behavior when the shift amount is >= 1. This will prevent the incorrect transformation that introduces poison where the original code was well-defined.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 025234c54956..757d1f94768f 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -1037,6 +1037,11 @@ bool VectorCombine::foldExtractedCmps(Instruction &I) {\n   if (!I.isBinaryOp() || !I.getType()->isIntegerTy(1))\n     return false;\n \n+  // Shift operations on i1 are problematic because shifting by >= 1 bit\n+  // produces poison (since i1 only has 1 bit). Avoid vectorizing these.\n+  if (I.isShift())\n+    return false;\n+\n   // The compare predicates should match, and each compare should have a\n   // constant operand.\n   Value *B0 = I.getOperand(0), *B1 = I.getOperand(1);\n"
+  ]
+}

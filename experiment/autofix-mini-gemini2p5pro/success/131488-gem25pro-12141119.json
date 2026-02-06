@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "131488",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/131488-gem25pro-12141119.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..7b1044f9dde4 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2551,6 +2551,9 @@ static bool OptimizeNonTrivialIFuncs(\n         }))\n       continue;\n \n+    if (Callees.empty())\n+      continue;\n+\n     assert(!Callees.empty() && \"Expecting successful collection of versions\");\n \n     LLVM_DEBUG(dbgs() << \"Statically resolving calls to function \"\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 30610,
+  "output_tokens": 2903,
+  "cached_tokens": 14240,
+  "total_tokens": 36596,
+  "chat_rounds": 5,
+  "total_time_sec": 101.45086336135864,
+  "trans_point": [
+    "llvm/lib/Transforms/IPO/GlobalOpt.cpp",
+    "OptimizeNonTrivialIFuncs(llvm::Module &, llvm::function_ref<llvm::TargetTransformInfo&(llvm::Function&)>)",
+    2554
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/GlobalOpt.cpp",
+      2554,
+      2554
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe `globalopt` pass is designed to perform various interprocedural optimizations on LLVM modules. One of its tasks is to resolve indirect function calls made through `ifunc` (indirect function) globals. An `ifunc` has an associated \"resolver\" function, which is executed at load time to determine the actual function to be called. The `OptimizeNonTrivialIFuncs` function within `globalopt` attempts to statically determine the outcome of this resolution at compile time based on target features.\n\nThe issue arises with the provided reproducer:\n\n```llvm\ndefine ptr @f1() {\n  unreachable\n}\n\n@i1 = ifunc void(), ptr @f1\n```\n\nHere, the resolver function `@f1` does not return any value; its entry block terminates with an `unreachable` instruction. The `OptimizeNonTrivialIFuncs` logic iterates through the resolver's basic blocks, looking for `return` instructions to identify the set of possible functions (versions) that the `ifunc` can resolve to. When it encounters a resolver like `@f1` with no `return` instructions, it fails to collect any versions. This leads to an empty `Callees` vector, which subsequently triggers an assertion `!Callees.empty()`, causing the compiler to crash.\n\n### 2. Analyzing `opt`'s Log\n\nThe backtrace confirms that the crash occurs within the `OptimizeNonTrivialIFuncs` function at `llvm/lib/Transforms/IPO/GlobalOpt.cpp:2554`. The assertion message `!Callees.empty() && \"Expecting successful collection of versions\"` clearly indicates that the program state at that point violates the assumption that at least one function version would be collected from the resolver.\n\n### 3. Root Cause Analysis\n\nThe root cause is an incomplete assumption in the `OptimizeNonTrivialIFuncs` implementation. The code that collects the versions is:\n\n```cpp\n// llvm/lib/Transforms/IPO/GlobalOpt.cpp:2545-2552\nSmallVector<Function *> Callees;\nif (any_of(*Resolver, [&TTI, &Callees](BasicBlock &BB) {\n      if (auto *Ret = dyn_cast_or_null<ReturnInst>(BB.getTerminator()))\n        if (!collectVersions(TTI, Ret->getReturnValue(), Callees))\n          return true;\n      return false;\n    }))\n  continue;\n```\n\nThis loop iterates through the basic blocks of the resolver. For the given reproducer, the resolver `@f1` has a single basic block ending in `unreachable`. The `dyn_cast_or_null<ReturnInst>` check fails for this block's terminator. Consequently, `collectVersions` is never called, and the `Callees` vector remains empty.\n\nImmediately following this loop is the assertion:\n\n```cpp\n// llvm/lib/Transforms/IPO/GlobalOpt.cpp:2554\nassert(!Callees.empty() && \"Expecting successful collection of versions\");\n```\n\nThis assertion incorrectly assumes that any resolver processed will yield at least one version. It does not account for valid resolvers that might not have any `return` instructions (e.g., those that unconditionally lead to `unreachable` or are part of a non-returning function). The logic should be able to handle this case gracefully by simply skipping the optimization for such an `ifunc`.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to add a check after the version collection loop to see if the `Callees` vector is empty. If it is, it means no versions could be determined, and we should proceed to the next `ifunc` in the module without attempting further optimization on the current one.\n\n**File**: `llvm/lib/Transforms/IPO/GlobalOpt.cpp`\n\n**Edit Point**: Insert a check before the assertion at line 2554.\n\n```cpp\n// llvm/lib/Transforms/IPO/GlobalOpt.cpp:2552\n       continue;\n \n+    if (Callees.empty())\n+      continue;\n+\n     assert(!Callees.empty() && \"Expecting successful collection of versions\");\n```\n\nThis change ensures that if no versions are found, the pass doesn't crash and simply moves on, which is the correct behavior.\n\n### 5. Conclusion\n\nThe crash in `globalopt` is due to a faulty assertion that doesn't consider `ifunc` resolvers that never return a function pointer. By adding a simple check for an empty list of collected callees and continuing to the next `ifunc` if none are found, we make the optimization pass more robust and prevent the crash. This allows LLVM to correctly process modules containing such `ifunc` definitions.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex d7edd1288309..7b1044f9dde4 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -2551,6 +2551,9 @@ static bool OptimizeNonTrivialIFuncs(\n         }))\n       continue;\n \n+    if (Callees.empty())\n+      continue;\n+\n     assert(!Callees.empty() && \"Expecting successful collection of versions\");\n \n     LLVM_DEBUG(dbgs() << \"Statically resolving calls to function \"\n"
+  ]
+}

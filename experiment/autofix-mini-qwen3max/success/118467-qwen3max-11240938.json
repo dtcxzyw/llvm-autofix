@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "118467",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/118467-qwen3max-11240938.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\nindex b5b561797f75..e63add84c10f 100644\n--- a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\n+++ b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\n@@ -804,7 +804,8 @@ static bool foldConsecutiveLoads(Instruction &I, const DataLayout &DL,\n     Load1Ptr = Load1Ptr->stripAndAccumulateConstantOffsets(\n         DL, Offset1, /* AllowNonInbounds */ true);\n     Load1Ptr = Builder.CreatePtrAdd(Load1Ptr,\n-                                    Builder.getInt32(Offset1.getZExtValue()));\n+                                    Builder.getIntN(DL.getIndexTypeSizeInBits(Load1Ptr->getType()),\n+                                                   Offset1.getZExtValue()));\n   }\n   // Generate wider load.\n   NewLoad = Builder.CreateAlignedLoad(WiderType, Load1Ptr, LI1->getAlign(),\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 264977,
+  "output_tokens": 2164,
+  "cached_tokens": 60160,
+  "total_tokens": 267141,
+  "chat_rounds": 28,
+  "total_time_sec": 638.1795058250427,
+  "trans_point": [
+    "llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp",
+    "foldConsecutiveLoads",
+    806
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp",
+      806,
+      807
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The problem occurs when `aggressive-instcombine` tries to combine two consecutive byte loads into a single 16-bit load. The original code has GEP indices of 2149675577 and 2149675576 (i64 values). When creating the new GEP for the combined load, the pass strips the constant offset from the first load's pointer (2149675576) and then creates a `PtrAdd` instruction using `Builder.getInt32(Offset1.getZExtValue())`. However, 2149675576 as a 32-bit signed integer is -2145291720, which causes the new GEP to point to an invalid negative offset, triggering undefined behavior in the target code.\n\n2. **Analyzing `opt`'s Log**: The log shows that the transformation creates `%0 = getelementptr i8, ptr %data, i32 -2145291720`, which is clearly wrong. The original offsets are positive 64-bit values, but they're being truncated to 32-bit signed integers. The Alive2 verification correctly identifies this as problematic because the source code accesses valid positive offsets while the target accesses a negative offset that may be out of bounds.\n\n3. **Root Cause Analysis**: In `foldConsecutiveLoads()`, at lines 803-807, the code extracts the constant offset as a 64-bit APInt but then uses `Builder.getInt32(Offset1.getZExtValue())` to create the new pointer. This assumes the offset fits in a 32-bit signed integer, which is not always true. The data layout specifies `e-n64` (64-bit native pointers), so GEP indices should remain 64-bit to preserve the full address space.\n\n4. **Proposed Edit Point(s)**:\n   + The issue is on line 806-807 where `Builder.getInt32()` is used instead of using the appropriate index type size from the DataLayout. The fix should use `Builder.getIntN()` with the correct bit width from `DL.getIndexTypeSizeInBits()`.\n\n5. **Conclusion**: The fix ensures that when reconstructing the GEP pointer after stripping constant offsets, we use the correct integer type width as specified by the data layout, preventing truncation of large 64-bit offsets to 32-bit values that can become negative and cause undefined behavior.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\nindex b5b561797f75..e63add84c10f 100644\n--- a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\n+++ b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\n@@ -804,7 +804,8 @@ static bool foldConsecutiveLoads(Instruction &I, const DataLayout &DL,\n     Load1Ptr = Load1Ptr->stripAndAccumulateConstantOffsets(\n         DL, Offset1, /* AllowNonInbounds */ true);\n     Load1Ptr = Builder.CreatePtrAdd(Load1Ptr,\n-                                    Builder.getInt32(Offset1.getZExtValue()));\n+                                    Builder.getIntN(DL.getIndexTypeSizeInBits(Load1Ptr->getType()),\n+                                                   Offset1.getZExtValue()));\n   }\n   // Generate wider load.\n   NewLoad = Builder.CreateAlignedLoad(WiderType, Load1Ptr, LI1->getAlign(),\n"
+  ]
+}

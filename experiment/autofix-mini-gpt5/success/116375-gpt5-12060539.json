@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "116375",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/116375-gpt5-12060539.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\nindex 71aca3be9e5d..0b87425aef05 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n@@ -3317,7 +3317,9 @@ void VPFirstOrderRecurrencePHIRecipe::execute(VPTransformState &State) {\n InstructionCost\n VPFirstOrderRecurrencePHIRecipe::computeCost(ElementCount VF,\n                                              VPCostContext &Ctx) const {\n-  if (VF.isScalable() && VF.getKnownMinValue() == 1)\n+  // FOR cost modeling uses vector shuffle costs. For any scalar VF, there is no\n+  // vector shuffle, so return invalid to indicate no meaningful vector cost.\n+  if (VF.isScalar() || (VF.isScalable() && VF.getKnownMinValue() == 1))\n     return InstructionCost::getInvalid();\n \n   SmallVector<int> Mask(VF.getKnownMinValue());\n@@ -3326,6 +3328,8 @@ VPFirstOrderRecurrencePHIRecipe::computeCost(ElementCount VF,\n       ToVectorTy(Ctx.Types.inferScalarType(this->getVPSingleValue()), VF);\n \n   TTI::TargetCostKind CostKind = TTI::TCK_RecipThroughput;\n+  // VectorTy must be a vector type for shuffle cost computation.\n+  assert(isa<VectorType>(VectorTy) && \"Expected vector type for FOR cost\");\n   return Ctx.TTI.getShuffleCost(TargetTransformInfo::SK_Splice,\n                                 cast<VectorType>(VectorTy), Mask, CostKind,\n                                 VF.getKnownMinValue() - 1);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 22577,
+  "output_tokens": 1799,
+  "cached_tokens": 9600,
+  "total_tokens": 24376,
+  "chat_rounds": 4,
+  "total_time_sec": 71.27588081359863,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp",
+    "llvm::VPFirstOrderRecurrencePHIRecipe::computeCost",
+    3329
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp",
+      3318,
+      3332
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs inside VPFirstOrderRecurrencePHIRecipe::computeCost when it attempts to cast a Type* to VectorType via cast<VectorType>(VectorTy). The assertion fails because VectorTy is not a VectorType; it is a scalar type when VF == 1. The cost model path is using a shuffle cost (SK_Splice) which requires a vector type, but the code doesn\u2019t guard against the scalar VF case.\n\n2. Analyzing opt's Log:\nThe opt output shows the crash in computeCost with VF values leading to mask construction and a call to getShuffleCost using a VectorType cast. The Scalar Evolution analysis indicates fixed trip counts and nothing unusual that would force vectorization. The earlier check only handles scalable VF with known min value of 1. In our reproducer, VF is likely a fixed (non-scalable) 1, leading to VectorTy being scalar from ToVectorTy(..., VF) and the subsequent cast failing.\n\n3. Root Cause Analysis:\nIn VPFirstOrderRecurrencePHIRecipe::computeCost, the logic constructs a mask and infers a vector type using ToVectorTy(..., VF). For VF == 1 (fixed scalar), ToVectorTy returns the scalar type. The function then unconditionally calls TTI.getShuffleCost with cast<VectorType>(VectorTy), causing an assertion failure. The code only guards the scalable VF==1 case, but misses the fixed VF==1 case. Therefore, the root cause is a missing guard for VF.isScalar() (i.e., VF == 1 fixed) before using vector-only cost computations.\n\n4. Proposed Edit Point(s):\nEdit Point: llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp:3318-3332.\nChange VPFirstOrderRecurrencePHIRecipe::computeCost to early-return for any scalar VF, not just the scalable VF==1 case. Also, construct the mask and invoke getShuffleCost only when VF.isVector().\n\nSuggested patch (conceptual):\n- Add: if (VF.isScalar()) return InstructionCost::getInvalid();\n- Keep existing scalable guard or unify it with the scalar guard.\n- Ensure we only build Mask and call getShuffleCost when VectorTy is a VectorType.\n\nConcretely, replace:\n  if (VF.isScalable() && VF.getKnownMinValue() == 1)\n    return InstructionCost::getInvalid();\n  SmallVector<int> Mask(VF.getKnownMinValue());\n  std::iota(Mask.begin(), Mask.end(), VF.getKnownMinValue() - 1);\n  Type *VectorTy = ToVectorTy(..., VF);\n  return Ctx.TTI.getShuffleCost(..., cast<VectorType>(VectorTy), Mask, ..., ...);\nwith:\n  if (VF.isScalar() || (VF.isScalable() && VF.getKnownMinValue() == 1))\n    return InstructionCost::getInvalid();\n  SmallVector<int> Mask(VF.getKnownMinValue());\n  std::iota(Mask.begin(), Mask.end(), VF.getKnownMinValue() - 1);\n  Type *VectorTy = ToVectorTy(..., VF);\n  assert(isa<VectorType>(VectorTy) && \"Expected vector type for FOR cost\");\n  return Ctx.TTI.getShuffleCost(..., cast<VectorType>(VectorTy), Mask, ..., ...);\n\nThis ensures we never attempt a vector shuffle cost for scalar VF.\n\n5. Conclusion:\nThe crash is due to requesting a vector shuffle cost with VF==1 (fixed scalar), leading to a cast of a scalar Type* to VectorType*. Adding an early return for VF.isScalar(), alongside the existing scalable VF==1 guard, prevents the erroneous path and aligns the cost computation with valid vectorization scenarios. This fix avoids the assertion and keeps the cost model well-defined for the first-order recurrence PHIs.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\nindex 71aca3be9e5d..0b87425aef05 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n@@ -3317,7 +3317,9 @@ void VPFirstOrderRecurrencePHIRecipe::execute(VPTransformState &State) {\n InstructionCost\n VPFirstOrderRecurrencePHIRecipe::computeCost(ElementCount VF,\n                                              VPCostContext &Ctx) const {\n-  if (VF.isScalable() && VF.getKnownMinValue() == 1)\n+  // FOR cost modeling uses vector shuffle costs. For any scalar VF, there is no\n+  // vector shuffle, so return invalid to indicate no meaningful vector cost.\n+  if (VF.isScalar() || (VF.isScalable() && VF.getKnownMinValue() == 1))\n     return InstructionCost::getInvalid();\n \n   SmallVector<int> Mask(VF.getKnownMinValue());\n@@ -3326,6 +3328,8 @@ VPFirstOrderRecurrencePHIRecipe::computeCost(ElementCount VF,\n       ToVectorTy(Ctx.Types.inferScalarType(this->getVPSingleValue()), VF);\n \n   TTI::TargetCostKind CostKind = TTI::TCK_RecipThroughput;\n+  // VectorTy must be a vector type for shuffle cost computation.\n+  assert(isa<VectorType>(VectorTy) && \"Expected vector type for FOR cost\");\n   return Ctx.TTI.getShuffleCost(TargetTransformInfo::SK_Splice,\n                                 cast<VectorType>(VectorTy), Mask, CostKind,\n                                 VF.getKnownMinValue() - 1);\n"
+  ]
+}

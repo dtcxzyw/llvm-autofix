@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "134013",
+    "model": "deepseek-chat"
+  },
+  "patch": null,
+  "error": "NoAvailablePatchFound",
+  "errmsg": "All efforts tried yet no available patches found.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/mswe.py\", line 346, in main\n    raise NoAvailablePatchFound(\"All efforts tried yet no available patches found.\")\nautofix.main.NoAvailablePatchFound: All efforts tried yet no available patches found.\n",
+  "input_tokens": 2512965,
+  "output_tokens": 19276,
+  "cached_tokens": 2484608,
+  "total_tokens": 2532241,
+  "chat_rounds": 110,
+  "total_time_sec": 1007.7587561607361,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex f9284b3a5f21..b9f6a846472b 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -11329,7 +11329,10 @@ class BoUpSLP::ShuffleCostEstimator : public BaseShuffleAnalysis {\n     if (!E2 && InVectors.size() == 1) {\n       unsigned VF = E1.getVectorFactor();\n       if (Value *V1 = dyn_cast<Value *>(InVectors.front())) {\n-        VF = std::max(VF, getVF(V1));\n+        if (isa<FixedVectorType>(V1->getType()))\n+          VF = std::max(VF, getVF(V1));\n+        else\n+          VF = std::max(VF, 1u);\n       } else {\n         const auto *E = cast<const TreeEntry *>(InVectors.front());\n         VF = std::max(VF, E->getVectorFactor());\n@@ -11528,14 +11531,21 @@ class BoUpSLP::ShuffleCostEstimator : public BaseShuffleAnalysis {\n     } else if (V1 && P2.isNull()) {\n       // Shuffle single vector.\n       ExtraCost += GetValueMinBWAffectedCost(V1);\n-      CommonVF = getVF(V1);\n+      if (isa<FixedVectorType>(V1->getType()))\n+        CommonVF = getVF(V1);\n+      else\n+        CommonVF = 1u;\n       assert(\n           all_of(Mask,\n                  [=](int Idx) { return Idx < static_cast<int>(CommonVF); }) &&\n           \"All elements in mask must be less than CommonVF.\");\n     } else if (V1 && !V2) {\n       // Shuffle vector and tree node.\n-      unsigned VF = getVF(V1);\n+      unsigned VF = 1u;\n+      if (isa<FixedVectorType>(V1->getType()))\n+        VF = getVF(V1);\n+      else\n+        VF = 1u;\n       const TreeEntry *E2 = cast<const TreeEntry *>(P2);\n       CommonVF = std::max(VF, E2->getVectorFactor());\n       assert(all_of(Mask,\n@@ -11561,7 +11571,11 @@ class BoUpSLP::ShuffleCostEstimator : public BaseShuffleAnalysis {\n       V2 = getAllOnesValue(*R.DL, getWidenedType(ScalarTy, CommonVF));\n     } else if (!V1 && V2) {\n       // Shuffle vector and tree node.\n-      unsigned VF = getVF(V2);\n+      unsigned VF = 1u;\n+      if (isa<FixedVectorType>(V2->getType()))\n+        VF = getVF(V2);\n+      else\n+        VF = 1u;\n       const TreeEntry *E1 = cast<const TreeEntry *>(P1);\n       CommonVF = std::max(VF, E1->getVectorFactor());\n       assert(all_of(Mask,\n@@ -11589,7 +11603,11 @@ class BoUpSLP::ShuffleCostEstimator : public BaseShuffleAnalysis {\n       V2 = getAllOnesValue(*R.DL, getWidenedType(ScalarTy, CommonVF));\n     } else {\n       assert(V1 && V2 && \"Expected both vectors.\");\n-      unsigned VF = getVF(V1);\n+      unsigned VF = 1u;\n+      if (isa<FixedVectorType>(V1->getType()))\n+        VF = getVF(V1);\n+      else\n+        VF = 1u;\n       CommonVF = std::max(VF, getVF(V2));\n       assert(all_of(Mask,\n                     [=](int Idx) {\n@@ -15718,7 +15736,9 @@ public:\n       transformMaskAfterShuffle(CommonMask, CommonMask);\n     }\n     V1 = createShuffle(V1, V2, Mask);\n-    unsigned VF = std::max(getVF(V1), getVF(Vec));\n+    unsigned VF1 = isa<FixedVectorType>(V1->getType()) ? getVF(V1) : 1u;\n+    unsigned VF2 = isa<FixedVectorType>(Vec->getType()) ? getVF(Vec) : 1u;\n+    unsigned VF = std::max(VF1, VF2);\n     for (unsigned Idx = 0, Sz = CommonMask.size(); Idx < Sz; ++Idx)\n       if (Mask[Idx] != PoisonMaskElem)\n         CommonMask[Idx] = Idx + VF;\n@@ -15777,8 +15797,14 @@ public:\n         }\n     }\n     unsigned VF = 0;\n-    for (Value *V : InVectors)\n-      VF = std::max(VF, getVF(V));\n+    for (auto &Elem : InVectors)\n+      if (Value *V = dyn_cast<Value *>(Elem))\n+        if (isa<FixedVectorType>(V->getType()))\n+          VF = std::max(VF, getVF(V));\n+        else\n+          VF = std::max(VF, 1u);\n+      else\n+        VF = std::max(VF, cast<const TreeEntry *>(Elem)->getVectorFactor());\n     for (unsigned Idx = 0, Sz = CommonMask.size(); Idx < Sz; ++Idx)\n       if (Mask[Idx] != PoisonMaskElem && CommonMask[Idx] == PoisonMaskElem)\n         CommonMask[Idx] = Mask[Idx] + (It == InVectors.begin() ? 0 : VF);\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex f9284b3a5f21..6a40fcb16e34 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -11329,7 +11329,10 @@ class BoUpSLP::ShuffleCostEstimator : public BaseShuffleAnalysis {\n     if (!E2 && InVectors.size() == 1) {\n       unsigned VF = E1.getVectorFactor();\n       if (Value *V1 = dyn_cast<Value *>(InVectors.front())) {\n-        VF = std::max(VF, getVF(V1));\n+        if (isa<FixedVectorType>(V1->getType()))\n+          VF = std::max(VF, getVF(V1));\n+        else\n+          VF = std::max(VF, 1u);\n       } else {\n         const auto *E = cast<const TreeEntry *>(InVectors.front());\n         VF = std::max(VF, E->getVectorFactor());\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex f9284b3a5f21..6a40fcb16e34 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -11329,7 +11329,10 @@ class BoUpSLP::ShuffleCostEstimator : public BaseShuffleAnalysis {\n     if (!E2 && InVectors.size() == 1) {\n       unsigned VF = E1.getVectorFactor();\n       if (Value *V1 = dyn_cast<Value *>(InVectors.front())) {\n-        VF = std::max(VF, getVF(V1));\n+        if (isa<FixedVectorType>(V1->getType()))\n+          VF = std::max(VF, getVF(V1));\n+        else\n+          VF = std::max(VF, 1u);\n       } else {\n         const auto *E = cast<const TreeEntry *>(InVectors.front());\n         VF = std::max(VF, E->getVectorFactor());\n"
+  ]
+}

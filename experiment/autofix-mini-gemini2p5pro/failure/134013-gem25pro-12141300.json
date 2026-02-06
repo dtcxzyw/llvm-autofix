@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "134013",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/134013-gem25pro-12141300.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 1362434,
+  "output_tokens": 13839,
+  "cached_tokens": 1213593,
+  "total_tokens": 1398991,
+  "chat_rounds": 43,
+  "total_time_sec": 400.6504557132721,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::processBuildVector<llvm::slpvectorizer::BoUpSLP::ShuffleCostEstimator, llvm::InstructionCost, llvm::TargetTransformInfo, llvm::ArrayRef<llvm::Value*>, llvm::slpvectorizer::BoUpSLP, llvm::SmallPtrSetImpl<llvm::Value*> >(llvm::slpvectorizer::BoUpSLP::TreeEntry const*, llvm::Type*, llvm::TargetTransformInfo&, llvm::ArrayRef<llvm::Value*>&, llvm::slpvectorizer::BoUpSLP&, llvm::SmallPtrSetImpl<llvm::Value*>&)::{lambda(llvm::SmallVectorImpl<llvm::Value*>&, llvm::SmallVectorImpl<int>&, bool)#1}::operator()(llvm::SmallVectorImpl<llvm::Value*>&, llvm::SmallVectorImpl<int>&, bool) const",
+    16250
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      12060,
+      12065
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe crash is a `SIGABRT` with a `malloc(): corrupted top size` error. This indicates a heap corruption, which is typically caused by a buffer overflow or a similar memory error, such as a double-free or use-after-free. The backtrace points to a lambda function within `BoUpSLP::processBuildVector`, which is part of the SLP vectorizer's cost estimation logic. This suggests that the corruption happens while the vectorizer is *simulating* the vectorization of a group of instructions to calculate its cost, not during the final IR transformation.\n\n### 2. Analyzing `opt`'s Log\n\nThe debug log from `opt` shows the SLP vectorizer attempting to vectorize a group of 12 `phi` nodes. It builds a tree of dependencies, including the `select` and `fcmp` instructions. A key observation from the log is:\n\n```\nSLP: We are not able to schedule this bundle!\n```\n\nThis message appears when the vectorizer tries to schedule the `fcmp` instructions. The scheduling fails because of a cyclic dependency: `%cmp119.1` depends on `%val.sroa.6.1`, which in turn depends on `%cmp119`. Both `%cmp119.1` and `%cmp119` are part of the same bundle being scheduled. The scheduler correctly identifies this cycle and aborts scheduling.\n\nHowever, the vectorizer proceeds to the cost calculation phase for the `select` instructions, which is where the crash occurs. This suggests that even though scheduling failed for the operands (the `fcmp`s), the logic continues and attempts to process a partially constructed (and likely inconsistent) state.\n\n### 3. Root Cause Analysis\n\nThe root cause lies in how `BoUpSLP::getEntryCost` handles the failure of `canSchedule`.\n\n1.  The vectorizer identifies a bundle of `select` instructions to analyze.\n2.  It calls `getEntryCost` on this bundle. Inside `getEntryCost`, it tries to analyze the operands.\n3.  One group of operands is the `fcmp` instructions. The vectorizer calls `canSchedule` to check if these `fcmp` instructions can be vectorized and scheduled together.\n4.  `canSchedule` correctly detects a data dependency cycle within the `fcmp` bundle and returns `false`.\n5.  Crucially, `getEntryCost` does not stop here. It proceeds as if scheduling was successful, but with an empty schedule (`Schedule`). It then calls `processBuildVector` to estimate the cost of gathering the `fcmp` results.\n6.  `processBuildVector` is designed to work with a valid schedule. It uses the `Schedule` to map original scalar instructions to their position in the vectorized bundle. Since `Schedule` is empty, the code attempts to access `Schedule[0]`, which is an out-of-bounds read.\n7.  This out-of-bounds read accesses invalid memory, leading to the heap corruption (`malloc(): corrupted top size`) and the subsequent `SIGABRT`.\n\nThe fundamental flaw is that `getEntryCost` does not properly handle the failure from `canSchedule` and continues execution with an invalid `Schedule` state.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to ensure that `getEntryCost` terminates its analysis and returns a high cost if `canSchedule` fails. This prevents the subsequent call to `processBuildVector` with an invalid, empty schedule.\n\nHere is the proposed edit for `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp`:\n\n```cpp\n// llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n\n// ... inside BoUpSLP::getEntryCost ...\n    if (canSchedule(Bundle, Schedule)) {\n      // We can schedule the instructions in the bundle. Now, estimate the cost\n      // of the vectorized instructions.\n      // ...\n    } else {\n      // We are not able to schedule this bundle. This is a bad option.\n      return getWorstCost();\n    }\n```\n\nThis change should be applied at the following location:\n\n*   **File**: `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp`\n*   **Lines**: 12060-12065\n",
+  "test_traj": []
+}

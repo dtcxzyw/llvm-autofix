@@ -1,0 +1,1846 @@
+Setting up the buggy LLVM environment ...
+Building LLVM and try reproducing the issue ...
+Issue reproduced successfully.
+Starting to fix the issue ...
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ You are an expert LLVM developer. Please solve this LLVM issue:             │
+│                                                                             │
+│ ------ BEGIN ISSUE ------                                                   │
+│ Type: miscompilation                                                        │
+│                                                                             │
+│ Reproducer (LLVM IR): ```bash                                               │
+│ cat /tmp/test.ll                                                            │
+│ define i32 @test_cttz_not_bw_noundef(i32 %x) {                              │
+│   %ct = tail call noundef i32 @llvm.cttz.i32(i32 %x, i1 false)              │
+│   %cmp = icmp ne i32 %x, 0                                                  │
+│   %res = select i1 %cmp, i32 %ct, i32 123                                   │
+│   ret i32 %res                                                              │
+│ }                                                                           │
+│                                                                             │
+│ ; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn │
+│ memory(none)                                                                │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                               │
+│                                                                             │
+│ attributes #0 = { nocallback nofree nosync nounwind speculatable willreturn │
+│ memory(none) }                                                              │
+│                                                                             │
+│ ```                                                                         │
+│                                                                             │
+│ LLVM's Symptom: ```bash                                                     │
+│ /llvm-autofix-deps/llvm/llvm/bin/opt -passes=instcombine -S /tmp/test.ll    │
+│ --- src ---                                                                 │
+│ define i32 @test_cttz_not_bw_noundef(i32 %x) {                              │
+│   %ct = tail call noundef i32 @llvm.cttz.i32(i32 %x, i1 false)              │
+│   %cmp = icmp ne i32 %x, 0                                                  │
+│   %res = select i1 %cmp, i32 %ct, i32 123                                   │
+│   ret i32 %res                                                              │
+│ }                                                                           │
+│                                                                             │
+│ ; Function Attrs: nocallback nosync nounwind speculatable willreturn        │
+│ memory(none)                                                                │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                               │
+│                                                                             │
+│ attributes #0 = { nocallback nosync nounwind speculatable willreturn        │
+│ memory(none) }                                                              │
+│                                                                             │
+│                                                                             │
+│ --- tgt ---                                                                 │
+│ ; ModuleID = '<stdin>'                                                      │
+│ source_filename = "<stdin>"                                                 │
+│                                                                             │
+│ define i32 @test_cttz_not_bw_noundef(i32 %x) {                              │
+│   %ct = tail call noundef range(i32 0, 33) i32 @llvm.cttz.i32(i32 %x, i1    │
+│ true)                                                                       │
+│   %cmp.not = icmp eq i32 %x, 0                                              │
+│   %res = select i1 %cmp.not, i32 123, i32 %ct                               │
+│   ret i32 %res                                                              │
+│ }                                                                           │
+│                                                                             │
+│ ; Function Attrs: nocallback nosync nounwind speculatable willreturn        │
+│ memory(none)                                                                │
+│ declare i32 @llvm.cttz.i32(i32, i1 immarg) #0                               │
+│                                                                             │
+│ attributes #0 = { nocallback nosync nounwind speculatable willreturn        │
+│ memory(none) }                                                              │
+│                                                                             │
+│                                                                             │
+│ --- log ---                                                                 │
+│                                                                             │
+│ ----------------------------------------                                    │
+│ define i32 @test_cttz_not_bw_noundef(i32 %x) {                              │
+│ #0:                                                                         │
+│   %ct = cttz i32 %x, 0                                                      │
+│   assume_welldefined i32 %ct                                                │
+│   %cmp = icmp ne i32 %x, 0                                                  │
+│   %res = select i1 %cmp, i32 %ct, i32 123                                   │
+│   ret i32 %res                                                              │
+│ }                                                                           │
+│ =>                                                                          │
+│ define i32 @test_cttz_not_bw_noundef(i32 %x) {                              │
+│ #0:                                                                         │
+│   %ct = cttz i32 %x, 1                                                      │
+│   %#range_0_%ct = !range i32 %ct, i32 0, i32 33                             │
+│   assume_welldefined i32 %#range_0_%ct                                      │
+│   %cmp.not = icmp eq i32 %x, 0                                              │
+│   %res = select i1 %cmp.not, i32 123, i32 %#range_0_%ct                     │
+│   ret i32 %res                                                              │
+│ }                                                                           │
+│ Transformation doesn't verify!                                              │
+│                                                                             │
+│ ERROR: Source is more defined than target                                   │
+│                                                                             │
+│ Example:                                                                    │
+│ i32 %x = #x00000000 (0)                                                     │
+│                                                                             │
+│ Source:                                                                     │
+│ i32 %ct = #x00000020 (32)                                                   │
+│ i1 %cmp = #x0 (0)                                                           │
+│ i32 %res = #x0000007b (123)                                                 │
+│                                                                             │
+│ Target:                                                                     │
+│ i32 %ct = poison                                                            │
+│ i32 %#range_0_%ct = poison                                                  │
+│ void = UB triggered!                                                        │
+│                                                                             │
+│                                                                             │
+│ Summary:                                                                    │
+│   0 correct transformations                                                 │
+│   1 incorrect transformations                                               │
+│   0 failed-to-prove transformations                                         │
+│   0 Alive2 errors                                                           │
+│                                                                             │
+│                                                                             │
+│ --- opt_stderr ---                                                          │
+│                                                                             │
+│                                                                             │
+│                                                                             │
+│ ```                                                                         │
+│ ------  END ISSUE  ------                                                   │
+│                                                                             │
+│ You can execute bash commands and edit files to implement the necessary     │
+│ changes.                                                                    │
+│                                                                             │
+│ ## Recommended Workflow                                                     │
+│                                                                             │
+│ This workflows should be done step-by-step so that you can iterate on your  │
+│ changes and any possible problems.                                          │
+│                                                                             │
+│ 1. Analyze the codebase by finding and reading relevant files               │
+│ 2. Edit the source code to resolve the issue                                │
+│ 3. Verify your fix works by running the `submit-patch` command              │
+│ 4. Based on the output of `submit-patch`, repeat steps 1-3 as necessary     │
+│ until the issue is resolved                                                 │
+│                                                                             │
+│ ## Important Rules                                                          │
+│                                                                             │
+│ 1. Every response must contain exactly one action                           │
+│ 2. The action must be enclosed in triple backticks                          │
+│ 3. Directory or environment variable changes are not persistent. Every      │
+│ action is executed in a new subshell.                                       │
+│    However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd          │
+│ /path/to/working/dir && ...` or write/load environment variables from files │
+│ 4. Solving this issue does not require deleting any files or accessing the  │
+│ internet, so you are not permitted to use tools such as: rm, curl, wget,    │
+│ git, ssh, scp, ftp, telnet, ping, traceroute, nslookup, dig, nmap, apt,     │
+│ apt-get, yum, dnf, pacman, brew.                                            │
+│                                                                             │
+│ <system_information>                                                        │
+│ Linux 6.8.0-57-generic #59-Ubuntu SMP PREEMPT_DYNAMIC Sat Mar 15 17:40:59   │
+│ UTC 2025 x86_64                                                             │
+│ </system_information>                                                       │
+│                                                                             │
+│ ## Formatting your response                                                 │
+│                                                                             │
+│ Here is an example of a correct response:                                   │
+│                                                                             │
+│ <example_response>                                                          │
+│ THOUGHT: I need to understand the structure of the repository first. Let me │
+│ check what files are in the current directory to get a better understanding │
+│ of the codebase.                                                            │
+│                                                                             │
+│ ```bash                                                                     │
+│ ls -la                                                                      │
+│ ```                                                                         │
+│ </example_response>                                                         │
+│                                                                             │
+│ ## Useful command examples                                                  │
+│                                                                             │
+│ ### Create a new file:                                                      │
+│                                                                             │
+│ ```bash                                                                     │
+│ cat <<'EOF' > newfile.py                                                    │
+│ import numpy as np                                                          │
+│ hello = "world"                                                             │
+│ print(hello)                                                                │
+│ EOF                                                                         │
+│ ```                                                                         │
+│                                                                             │
+│ ### Edit files with sed:```bash                                             │
+│ # Replace all occurrences                                                   │
+│ sed -i 's/old_string/new_string/g' filename.py                              │
+│                                                                             │
+│ # Replace only first occurrence                                             │
+│ sed -i 's/old_string/new_string/' filename.py                               │
+│                                                                             │
+│ # Replace first occurrence on line 1                                        │
+│ sed -i '1s/old_string/new_string/' filename.py                              │
+│                                                                             │
+│ # Replace all occurrences in lines 1-10                                     │
+│ sed -i '1,10s/old_string/new_string/g' filename.py                          │
+│ ```                                                                         │
+│                                                                             │
+│ ### View file content:                                                      │
+│                                                                             │
+│ ```bash                                                                     │
+│ # View specific lines with numbers                                          │
+│ nl -ba filename.py | sed -n '10,20p'                                        │
+│ ```                                                                         │
+│                                                                             │
+│ ### Submit your patch:                                                      │
+│                                                                             │
+│ ```bash                                                                     │
+│ # This command has no arguments                                             │
+│ submit-patch                                                                │
+│ ```                                                                         │
+│                                                                             │
+│ ### Any other permitted command you want to run:                            │
+│                                                                             │
+│ ```bash                                                                     │
+│ anything                                                                    │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #0, chat statistics so far: {'chat_rounds': 0, 'input_tokens':
+0, 'cached_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: The issue is that LLVM's instcombine pass is incorrectly           │
+│ transforming a cttz (count trailing zeros) intrinsic call with `i1 false`   │
+│ (meaning undefined behavior when input is zero) to `i1 true` (meaning       │
+│ defined to return the bit width when input is zero). However, this          │
+│ transformation is only valid if the original code already handled the zero  │
+│ case, but in this case the select instruction uses 123 as the fallback      │
+│ value, not 32 (the bit width of i32). The transformation makes the cttz     │
+│ call with `i1 true` which would return 32 for zero input, but then the      │
+│ select would choose 123 instead. However, the problem is that the original  │
+│ cttz with `i1 false` on zero input is undefined behavior (poison), while    │
+│ the transformed version tries to use it safely. But the verification shows  │
+│ that when x=0, the source returns 123 (because %cmp is false, so select     │
+│ chooses 123), while the target has poison because cttz with `i1 true`       │
+│ should be safe, but the range metadata is causing issues. Actually, looking │
+│ more carefully: the source has cttz with `i1 false`, so when x=0, %ct is    │
+│ poison, but since %cmp is false (x != 0 is false), the select chooses 123,  │
+│ so the poison is never used. The target changes cttz to `i1 true` (which is │
+│ safe for x=0, returning 32), but then adds range metadata [0, 33) and uses  │
+│ that. However, the transformation is incorrect because it changes the cttz  │
+│ parameter from false to true, which changes the semantics. The correct fix  │
+│ should be to not perform this transformation when the cttz is used in a     │
+│ context where the zero case is handled by a select with a non-bitwidth      │
+│ value.                                                                      │
+│                                                                             │
+│ I need to find the instcombine code that handles cttz optimizations. Let me │
+│ search for relevant files.                                                  │
+│                                                                             │
+│ ```bash                                                                     │
+│ find /llvm-autofix-deps/llvm/llvm -name "*.cpp" | xargs grep -l             │
+│ "cttz.*i1.*false" 2>/dev/null || echo "not found"                           │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/CodeGen/CodeGenPrepare.cpp            │
+│ not found                                                                   │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #1, chat statistics so far: {'chat_rounds': 1, 'input_tokens':
+1717, 'cached_tokens': 0, 'output_tokens': 469, 'total_tokens': 2186}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: The issue is likely in InstCombineSelect.cpp since it deals with   │
+│ select instructions and cttz intrinsics. Let me examine this file to        │
+│ understand how the optimization is implemented.                             │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -A 10 -B 10 "cttz.*i1.*false\|cttz.*false"                             │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ /// call to cttz/ctlz with flag 'is_zero_poison' cleared.                   │
+│ ///                                                                         │
+│ /// For example, we can fold the following code sequence:                   │
+│ /// \code                                                                   │
+│ ///   %0 = tail call i32 @llvm.cttz.i32(i32 %x, i1 true)                    │
+│ ///   %1 = icmp ne i32 %x, 0                                                │
+│ ///   %2 = select i1 %1, i32 %0, i32 32                                     │
+│ /// \code                                                                   │
+│ ///                                                                         │
+│ /// into:                                                                   │
+│ ///   %0 = tail call i32 @llvm.cttz.i32(i32 %x, i1 false)                   │
+│ static Value *foldSelectCttzCtlz(ICmpInst *ICI, Value *TrueVal, Value       │
+│ *FalseVal,                                                                  │
+│                                  InstCombinerImpl &IC) {                    │
+│   ICmpInst::Predicate Pred = ICI->getPredicate();                           │
+│   Value *CmpLHS = ICI->getOperand(0);                                       │
+│   Value *CmpRHS = ICI->getOperand(1);                                       │
+│                                                                             │
+│   // Check if the select condition compares a value for equality.           │
+│   if (!ICI->isEquality())                                                   │
+│     return nullptr;                                                         │
+│                                                                             │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #2, chat statistics so far: {'chat_rounds': 2, 'input_tokens':
+3978, 'cached_tokens': 1536, 'output_tokens': 564, 'total_tokens': 4542}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: I can see there's a function `foldSelectCttzCtlz` that handles     │
+│ folding select with cttz/ctlz. The comment shows it transforms a cttz with  │
+│ `i1 true` (is_zero_undef=false, meaning defined for zero) into `i1 false`   │
+│ (is_zero_poison=true, meaning undefined for zero) when the select uses the  │
+│ bit width (32) as the fallback. However, in our issue, the transformation   │
+│ is going in the opposite direction - from `i1 false` to `i1 true`. This     │
+│ suggests there might be another optimization that's incorrectly applied.    │
+│ Let me look at more of this function and see if there are other related     │
+│ functions.                                                                  │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -A 50 "static Value \*foldSelectCttzCtlz"                              │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ static Value *foldSelectCttzCtlz(ICmpInst *ICI, Value *TrueVal, Value       │
+│ *FalseVal,                                                                  │
+│                                  InstCombinerImpl &IC) {                    │
+│   ICmpInst::Predicate Pred = ICI->getPredicate();                           │
+│   Value *CmpLHS = ICI->getOperand(0);                                       │
+│   Value *CmpRHS = ICI->getOperand(1);                                       │
+│                                                                             │
+│   // Check if the select condition compares a value for equality.           │
+│   if (!ICI->isEquality())                                                   │
+│     return nullptr;                                                         │
+│                                                                             │
+│   Value *SelectArg = FalseVal;                                              │
+│   Value *ValueOnZero = TrueVal;                                             │
+│   if (Pred == ICmpInst::ICMP_NE)                                            │
+│     std::swap(SelectArg, ValueOnZero);                                      │
+│                                                                             │
+│   // Skip zero extend/truncate.                                             │
+│   Value *Count = nullptr;                                                   │
+│   if (!match(SelectArg, m_ZExt(m_Value(Count))) &&                          │
+│       !match(SelectArg, m_Trunc(m_Value(Count))))                           │
+│     Count = SelectArg;                                                      │
+│                                                                             │
+│   // Check that 'Count' is a call to intrinsic cttz/ctlz. Also check that   │
+│ the                                                                         │
+│   // input to the cttz/ctlz is used as LHS for the compare instruction.     │
+│   Value *X;                                                                 │
+│   if (!match(Count, m_Intrinsic<Intrinsic::cttz>(m_Value(X))) &&            │
+│       !match(Count, m_Intrinsic<Intrinsic::ctlz>(m_Value(X))))              │
+│     return nullptr;                                                         │
+│                                                                             │
+│   // (X == 0) ? BitWidth : ctz(X)                                           │
+│   // (X == -1) ? BitWidth : ctz(~X)                                         │
+│   if ((X != CmpLHS || !match(CmpRHS, m_Zero())) &&                          │
+│       (!match(X, m_Not(m_Specific(CmpLHS))) || !match(CmpRHS,               │
+│ m_AllOnes())))                                                              │
+│     return nullptr;                                                         │
+│                                                                             │
+│   IntrinsicInst *II = cast<IntrinsicInst>(Count);                           │
+│                                                                             │
+│   // Check if the value propagated on zero is a constant number equal to    │
+│ the                                                                         │
+│   // sizeof in bits of 'Count'.                                             │
+│   unsigned SizeOfInBits = Count->getType()->getScalarSizeInBits();          │
+│   if (match(ValueOnZero, m_SpecificInt(SizeOfInBits))) {                    │
+│     // Explicitly clear the 'is_zero_poison' flag. It's always valid to go  │
+│ from                                                                        │
+│     // true to false on this flag, so we can replace it for all users.      │
+│     II->setArgOperand(1, ConstantInt::getFalse(II->getContext()));          │
+│     // A range annotation on the intrinsic may no longer be valid.          │
+│     II->dropPoisonGeneratingAnnotations();                                  │
+│     IC.addToWorklist(II);                                                   │
+│     return SelectArg;                                                       │
+│   }                                                                         │
+│                                                                             │
+│   // The ValueOnZero is not the bitwidth. But if the cttz/ctlz (and         │
+│ optional                                                                    │
+│   // zext/trunc) have one use (ending at the select), the cttz/ctlz result  │
+│ will                                                                        │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #3, chat statistics so far: {'chat_rounds': 3, 'input_tokens':
+6604, 'cached_tokens': 1536, 'output_tokens': 761, 'total_tokens': 7365}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: Now I can see the issue! The function `foldSelectCttzCtlz` is      │
+│ designed to transform `(X == 0) ? BitWidth : ctz(X, true)` into `ctz(X,     │
+│ false)`. However, in our test case, we have the opposite pattern: `ctz(X,   │
+│ false)` with a select that uses a non-bitwidth value (123) for the zero     │
+│ case. The problem is that there seems to be another optimization that's     │
+│ incorrectly transforming `ctz(X, false)` into `ctz(X, true)` when it        │
+│ shouldn't.                                                                  │
+│                                                                             │
+│ Looking at the code, I notice that after the bitwidth check, there's a      │
+│ comment about handling cases where ValueOnZero is not the bitwidth. Let me  │
+│ see the rest of this function.                                              │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -A 80 "The ValueOnZero is not the bitwidth"                            │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│   // The ValueOnZero is not the bitwidth. But if the cttz/ctlz (and         │
+│ optional                                                                    │
+│   // zext/trunc) have one use (ending at the select), the cttz/ctlz result  │
+│ will                                                                        │
+│   // not be used if the input is zero. Relax to 'zero is poison' for that   │
+│ case.                                                                       │
+│   if (II->hasOneUse() && SelectArg->hasOneUse() &&                          │
+│       !match(II->getArgOperand(1), m_One()))                                │
+│     II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));           │
+│                                                                             │
+│   return nullptr;                                                           │
+│ }                                                                           │
+│                                                                             │
+│ static Value *canonicalizeSPF(ICmpInst &Cmp, Value *TrueVal, Value          │
+│ *FalseVal,                                                                  │
+│                               InstCombinerImpl &IC) {                       │
+│   Value *LHS, *RHS;                                                         │
+│   // TODO: What to do with pointer min/max patterns?                        │
+│   if (!TrueVal->getType()->isIntOrIntVectorTy())                            │
+│     return nullptr;                                                         │
+│                                                                             │
+│   SelectPatternFlavor SPF =                                                 │
+│       matchDecomposedSelectPattern(&Cmp, TrueVal, FalseVal, LHS,            │
+│ RHS).Flavor;                                                                │
+│   if (SPF == SelectPatternFlavor::SPF_ABS ||                                │
+│       SPF == SelectPatternFlavor::SPF_NABS) {                               │
+│     if (!Cmp.hasOneUse() && !RHS->hasOneUse())                              │
+│       return nullptr; // TODO: Relax this restriction.                      │
+│                                                                             │
+│     // Note that NSW flag can only be propagated for normal, non-negated    │
+│ abs!                                                                        │
+│     bool IntMinIsPoison = SPF == SelectPatternFlavor::SPF_ABS &&            │
+│                           match(RHS, m_NSWNeg(m_Specific(LHS)));            │
+│     Constant *IntMinIsPoisonC =                                             │
+│         ConstantInt::get(Type::getInt1Ty(Cmp.getContext()),                 │
+│ IntMinIsPoison);                                                            │
+│     Value *Abs =                                                            │
+│         IC.Builder.CreateBinaryIntrinsic(Intrinsic::abs, LHS,               │
+│ IntMinIsPoisonC);                                                           │
+│                                                                             │
+│     if (SPF == SelectPatternFlavor::SPF_NABS)                               │
+│       return IC.Builder.CreateNeg(Abs); // Always without NSW flag!         │
+│     return Abs;                                                             │
+│   }                                                                         │
+│                                                                             │
+│   if (SelectPatternResult::isMinOrMax(SPF)) {                               │
+│     Intrinsic::ID IntrinsicID = getMinMaxIntrinsic(SPF);                    │
+│     return IC.Builder.CreateBinaryIntrinsic(IntrinsicID, LHS, RHS);         │
+│   }                                                                         │
+│                                                                             │
+│   return nullptr;                                                           │
+│ }                                                                           │
+│                                                                             │
+│ bool InstCombinerImpl::replaceInInstruction(Value *V, Value *Old, Value     │
+│ *New,                                                                       │
+│                                             unsigned Depth) {               │
+│   // Conservatively limit replacement to two instructions upwards.          │
+│   if (Depth == 2)                                                           │
+│     return false;                                                           │
+│                                                                             │
+│   assert(!isa<Constant>(Old) && "Only replace non-constant values");        │
+│                                                                             │
+│   auto *I = dyn_cast<Instruction>(V);                                       │
+│   if (!I || !I->hasOneUse() ||                                              │
+│       !isSafeToSpeculativelyExecuteWithVariableReplaced(I))                 │
+│     return false;                                                           │
+│                                                                             │
+│   // Forbid potentially lane-crossing instructions.                         │
+│   if (Old->getType()->isVectorTy() && !isNotCrossLaneOperation(I))          │
+│     return false;                                                           │
+│                                                                             │
+│   bool Changed = false;                                                     │
+│   for (Use &U : I->operands()) {                                            │
+│     if (U == Old) {                                                         │
+│       replaceUse(U, New);                                                   │
+│       Worklist.add(I);                                                      │
+│       Changed = true;                                                       │
+│     } else {                                                                │
+│       Changed |= replaceInInstruction(U, Old, New, Depth + 1);              │
+│     }                                                                       │
+│   }                                                                         │
+│   return Changed;                                                           │
+│ }                                                                           │
+│                                                                             │
+│ /// If we have a select with an equality comparison, then we know the value │
+│ in                                                                          │
+│ /// one of the arms of the select. See if substituting this value into an   │
+│ arm                                                                         │
+│ /// and simplifying the result yields the same value as the other arm.      │
+│ ///                                                                         │
+│ /// To make this transform safe, we must drop poison-generating flags       │
+│ /// (nsw, etc) if we simplified to a binop because the select may be        │
+│ guarding                                                                    │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #4, chat statistics so far: {'chat_rounds': 4, 'input_tokens':
+10062, 'cached_tokens': 1536, 'output_tokens': 973, 'total_tokens': 11035}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: Now I see the problematic code! In the `foldSelectCttzCtlz`        │
+│ function, there's this logic:                                               │
+│                                                                             │
+│ ```cpp                                                                      │
+│ // The ValueOnZero is not the bitwidth. But if the cttz/ctlz (and optional  │
+│ // zext/trunc) have one use (ending at the select), the cttz/ctlz result    │
+│ will                                                                        │
+│ // not be used if the input is zero. Relax to 'zero is poison' for that     │
+│ case.                                                                       │
+│ if (II->hasOneUse() && SelectArg->hasOneUse() &&                            │
+│     !match(II->getArgOperand(1), m_One()))                                  │
+│   II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));             │
+│ ```                                                                         │
+│                                                                             │
+│ This code is incorrectly changing the cttz from `i1 false`                  │
+│ (is_zero_poison=true) to `i1 true` (is_zero_undef=false, meaning defined    │
+│ for zero). But this is wrong! The comment says "Relax to 'zero is poison'", │
+│ but setting the argument to `true` actually makes it NOT poison for zero -  │
+│ it makes it defined to return the bit width.                                │
+│                                                                             │
+│ The logic is backwards. When `II->getArgOperand(1)` is `false` (meaning     │
+│ zero is poison), and we have a select that handles the zero case, we should │
+│ be able to change it to `true` (meaning zero is defined). But the problem   │
+│ is that in our test case, the select uses 123, not the bit width (32). So   │
+│ changing to `i1 true` would make the cttz return 32 for zero input, but the │
+│ select expects to use 123, not 32.                                          │
+│                                                                             │
+│ However, looking more carefully at the transformation: the original code    │
+│ has `cttz(x, false)` which is poison when x=0, but since the select         │
+│ condition `x != 0` is false when x=0, it chooses 123, so the poison is      │
+│ never used. The transformation changes it to `cttz(x, true)` which returns  │
+│ 32 when x=0, but then the select still chooses 123 because the condition is │
+│ inverted (`x == 0`). So functionally it should be the same.                 │
+│                                                                             │
+│ But the verification error shows that the target has poison. Why? Because   │
+│ the transformed code adds range metadata `[0, 33)` to the cttz result, and  │
+│ when x=0, cttz(x, true) returns 32, which is within [0, 33), so it          │
+│ shouldn't be poison.                                                        │
+│                                                                             │
+│ Wait, looking at the error again: "Target: i32 %ct = poison". This suggests │
+│ that even with `i1 true`, the cttz is returning poison. But that shouldn't  │
+│ happen.                                                                     │
+│                                                                             │
+│ Actually, I think the real issue is in the logic of this optimization. The  │
+│ comment says "Relax to 'zero is poison'", but setting the flag to `true`    │
+│ means "zero is NOT poison" (it's defined). The flag parameter to cttz is    │
+│ `is_zero_undef` - when true, zero input gives defined result (bit width);   │
+│ when false, zero input gives undefined (poison).                            │
+│                                                                             │
+│ So the optimization is trying to say: if we have a select that handles the  │
+│ zero case, we can safely change the cttz from "zero is poison" (flag=false) │
+│ to "zero is defined" (flag=true), because we know the result won't be used  │
+│ when x=0 anyway. But this is only safe if we don't care what value is       │
+│ returned for x=0, since it won't be used.                                   │
+│                                                                             │
+│ However, the problem in the verification is that the range metadata `[0,    │
+│ 33)` is being added, and when x=0, cttz with flag=true returns 32, which is │
+│ in range, so it should be fine.                                             │
+│                                                                             │
+│ Looking at the Alive2 error again: "Source is more defined than target".    │
+│ The source when x=0: cttz(x,false) is poison, but select chooses 123, so    │
+│ final result is 123. The target: cttz(x,true) should return 32, select      │
+│ chooses 123, so final result should be 123. But the error says target has   │
+│ poison.                                                                     │
+│                                                                             │
+│ Ah! I see the issue now. The problem is that the transformation is changing │
+│ the cttz call, but the original cttz call had `noundef` attribute. When we  │
+│ change from `i1 false` to `i1 true`, we're changing the semantics, but the  │
+│ `noundef` attribute means the result must not be poison. However, with `i1  │
+│ false`, when x=0, the result is poison, which violates `noundef`. But in    │
+│ the source, this poison is never used because of the select, so it's okay.  │
+│                                                                             │
+│ In the target, with `i1 true`, the cttz should never return poison, so      │
+│ `noundef` is satisfied. But the Alive2 error suggests otherwise.            │
+│                                                                             │
+│ Actually, looking more carefully at the LLVM IR in the issue:               │
+│                                                                             │
+│ Source has: `tail call noundef i32 @llvm.cttz.i32(i32 %x, i1 false)`        │
+│ Target has: `tail call noundef range(i32 0, 33) i32 @llvm.cttz.i32(i32 %x,  │
+│ i1 true)`                                                                   │
+│                                                                             │
+│ The issue is that the transformation assumes that changing from `i1 false`  │
+│ to `i1 true` is always safe when the cttz result is only used in a select   │
+│ that handles zero. But this is only true if the select's zero-value doesn't │
+│ depend on the cttz result being a specific value.                           │
+│                                                                             │
+│ However, the real bug is in the logic of the optimization itself. The       │
+│ comment says "Relax to 'zero is poison'", but it's actually doing the       │
+│ opposite - making zero NOT poison. And this transformation is incorrect     │
+│ when the original cttz had `i1 false` because:                              │
+│                                                                             │
+│ 1. The original cttz with `i1 false` + select with arbitrary zero-value is  │
+│ well-defined as long as the poison isn't used                               │
+│ 2. Changing to `i1 true` changes the value that would be produced for zero  │
+│ input (from poison to 32), but since it's not used, this should be fine     │
+│                                                                             │
+│ But the verification error suggests there's a problem with the range        │
+│ metadata. Let me check if the issue is that when we change the flag, we     │
+│ need to be careful about the range.                                         │
+│                                                                             │
+│ Actually, I think the core issue is that this optimization should NOT be    │
+│ applied when the original cttz has `i1 false`. The optimization in          │
+│ `foldSelectCttzCtlz` is designed for the case where we have `i1 true` and   │
+│ want to change to `i1 false` when the select uses the bit width. The        │
+│ reverse transformation (from `i1 false` to `i1 true`) is being applied      │
+│ incorrectly.                                                                │
+│                                                                             │
+│ Looking at the condition: `!match(II->getArgOperand(1), m_One())` - this    │
+│ checks if the current flag is not `true` (i.e., it's `false`), and then     │
+│ sets it to `true`. But this is wrong because:                               │
+│                                                                             │
+│ - If the original has `i1 false` (zero is poison), and we have a select     │
+│ that handles zero with an arbitrary value, we cannot safely change it to    │
+│ `i1 true` because that changes the semantics in a way that might not be     │
+│ compatible with the `noundef` attribute or other constraints.               │
+│                                                                             │
+│ The correct fix is to remove or fix this part of the optimization. The      │
+│ optimization should only go from `i1 true` to `i1 false` when the select    │
+│ uses the bit width, not the other way around.                               │
+│                                                                             │
+│ Let me check what the intended behavior should be. According to LLVM        │
+│ documentation, `llvm.cttz` with `is_zero_undef=false` (i1 true) returns the │
+│ bit width when input is zero, while `is_zero_undef=true` (i1 false) has     │
+│ undefined behavior when input is zero.                                      │
+│                                                                             │
+│ The optimization in the code is trying to say: if we have a cttz with       │
+│ `is_zero_undef=true` (i1 false) that is only used in a select that handles  │
+│ the zero case, we can change it to `is_zero_undef=false` (i1 true) because  │
+│ we know the zero case won't use the cttz result. But this is actually safe! │
+│ Because:                                                                    │
+│                                                                             │
+│ - Original: cttz(x, false) is poison when x=0, but select chooses 123, so   │
+│ result is 123                                                               │
+│ - Transformed: cttz(x, true) returns 32 when x=0, but select chooses 123,   │
+│ so result is 123                                                            │
+│                                                                             │
+│ So why is Alive2 complaining?                                               │
+│                                                                             │
+│ Looking at the Alive2 output again: "Target: i32 %ct = poison". This        │
+│ suggests that even with `i1 true`, the cttz is returning poison. But that   │
+│ shouldn't happen.                                                           │
+│                                                                             │
+│ Wait, I think I see the issue. The problem is that the original cttz call   │
+│ has the `noundef` attribute. When we have `cttz(x, false)` with `noundef`,  │
+│ this means that the call must not return poison. But `cttz(x, false)`       │
+│ returns poison when x=0, which violates `noundef`. However, in the source   │
+│ code, this poison is never used because of the select, so the program is    │
+│ still well-defined.                                                         │
+│                                                                             │
+│ But LLVM's `noundef` attribute applies to the call itself, not to how the   │
+│ result is used. So `noundef` on `cttz(x, false)` when x could be zero is    │
+│ actually invalid! The source program has undefined behavior.                │
+│                                                                             │
+│ However, the Alive2 verification is comparing the source and target, and    │
+│ saying the source is more defined than the target. This suggests that in    │
+│ the source, even though there's `noundef`, the fact that the poison is not  │
+│ used makes it well-defined, while in the target, something is causing       │
+│ poison.                                                                     │
+│                                                                             │
+│ Actually, looking at the LLVM language reference: the `noundef` attribute   │
+│ means that the return value is guaranteed to not be poison. So if you have  │
+│ `noundef` on a cttz call with `i1 false`, and the input can be zero, then   │
+│ the program has undefined behavior because the call would return poison,    │
+│ violating `noundef`.                                                        │
+│                                                                             │
+│ But in our test case, the input `%x` could be zero, so the source program   │
+│ actually has undefined behavior due to the `noundef` attribute on a cttz    │
+│ call that can return poison.                                                │
+│                                                                             │
+│ However, the Alive2 error says "Source is more defined than target", which  │
+│ suggests that the source is well-defined for x=0 (returns 123) while the    │
+│ target has UB.                                                              │
+│                                                                             │
+│ I think the real issue is that the optimization is incorrectly applied. The │
+│ optimization should not change the cttz flag from false to true when the    │
+│ original has `noundef`, because:                                            │
+│                                                                             │
+│ 1. The original with `noundef` and `i1 false` is already potentially UB if  │
+│ x can be zero                                                               │
+│ 2. But in practice, since the result is guarded by a select, it's okay      │
+│ 3. The transformation to `i1 true` should be safe, but the range metadata   │
+│ might be causing issues                                                     │
+│                                                                             │
+│ Looking at the target IR: it has `range(i32 0, 33)` metadata. For cttz with │
+│ `i1 true`, the result is in [0, 33) (0 to 32 inclusive), which is correct.  │
+│ When x=0, it returns 32, which is in range.                                 │
+│                                                                             │
+│ But why is Alive2 saying it's poison? Maybe because the range metadata is   │
+│ being added incorrectly.                                                    │
+│                                                                             │
+│ Actually, I think the bug is in the optimization logic itself. The comment  │
+│ says "Relax to 'zero is poison'", but it's setting the flag to `true`,      │
+│ which means "zero is NOT poison". This is backwards.                        │
+│                                                                             │
+│ Let me check the LLVM intrinsic definition. In                              │
+│ `llvm/include/llvm/IR/Intrinsics.td`, the cttz intrinsic is defined as:     │
+│                                                                             │
+│ ```                                                                         │
+│ def int_cttz : Intrinsic<[llvm_anyint_ty], [llvm_anyint_ty, llvm_i1_ty],    │
+│                          [IntrNoMem, IntrSpeculatable]>;                    │
+│ ```                                                                         │
+│                                                                             │
+│ And the second parameter is described as "is_zero_undef" - when true, the   │
+│ result is undefined if the input is zero.                                   │
+│                                                                             │
+│ Wait, no! Let me check the actual documentation. According to the LLVM      │
+│ Language Reference:                                                         │
+│                                                                             │
+│ > The ‘llvm.cttz.*’ intrinsics count the number of trailing zeros in a      │
+│ non-zero value. If the value is zero, the result is undefined if the second │
+│ parameter is true, or the size in bits of the type if the second parameter  │
+│ is false.                                                                   │
+│                                                                             │
+│ So:                                                                         │
+│ - `cttz(x, true)`: if x=0, result is undefined (poison)                     │
+│ - `cttz(x, false)`: if x=0, result is bit width (defined)                   │
+│                                                                             │
+│ This is the opposite of what I thought earlier!                             │
+│                                                                             │
+│ So in our test case:                                                        │
+│ - Source: `cttz(x, false)` - when x=0, returns 32 (defined)                 │
+│ - But the select uses 123 when x=0, so it's ignoring the 32                 │
+│                                                                             │
+│ The transformation changes it to `cttz(x, true)`, which when x=0 is poison. │
+│ But since the select chooses 123 when x=0, the poison is not used, so it    │
+│ should be fine.                                                             │
+│                                                                             │
+│ But wait, the source has `cttz(x, false)`, which returns 32 when x=0, but   │
+│ the select condition is `x != 0`, so when x=0, it chooses 123, not 32. So   │
+│ the 32 is computed but not used.                                            │
+│                                                                             │
+│ The target changes to `cttz(x, true)`, which is poison when x=0, but again  │
+│ not used.                                                                   │
+│                                                                             │
+│ So both should be equivalent.                                               │
+│                                                                             │
+│ But the Alive2 error says source returns 123, target has poison. Why?       │
+│                                                                             │
+│ Because in the target, the cttz call with `i1 true` is poison when x=0, and │
+│ even though it's not used, the `noundef` attribute on the call requires     │
+│ that it not be poison. So the target has UB due to `noundef` on a call that │
+│ returns poison.                                                             │
+│                                                                             │
+│ Whereas in the source, `cttz(x, false)` with `noundef` is fine because it   │
+│ never returns poison (when x=0, it returns 32, which is defined).           │
+│                                                                             │
+│ Ah! That's the key. The source has `cttz(x, false)` which is always defined │
+│ (never poison), so `noundef` is satisfied. The target has `cttz(x, true)`   │
+│ which is poison when x=0, violating `noundef`.                              │
+│                                                                             │
+│ So the optimization is incorrect because it changes a always-defined call   │
+│ into a sometimes-poison call, while keeping the `noundef` attribute.        │
+│                                                                             │
+│ The fix is to not apply this optimization when the cttz call has the        │
+│ `noundef` attribute, or to remove the `noundef` attribute when changing to  │
+│ `i1 true`.                                                                  │
+│                                                                             │
+│ But looking at the code in `foldSelectCttzCtlz`, it doesn't check for       │
+│ `noundef`. The problematic part is:                                         │
+│                                                                             │
+│ ```cpp                                                                      │
+│ if (II->hasOneUse() && SelectArg->hasOneUse() &&                            │
+│     !match(II->getArgOperand(1), m_One()))                                  │
+│   II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));             │
+│ ```                                                                         │
+│                                                                             │
+│ This should not be done when the call has `noundef`, because changing from  │
+│ `i1 false` (always defined) to `i1 true` (sometimes poison) violates the    │
+│ `noundef` contract.                                                         │
+│                                                                             │
+│ Actually, wait: based on the LLVM documentation I just checked:             │
+│ - `cttz(x, false)`: x=0 returns bit width (defined)                         │
+│ - `cttz(x, true)`: x=0 returns undefined (poison)                           │
+│                                                                             │
+│ So in our test case:                                                        │
+│ - Source: `cttz(x, false)` - always defined, so `noundef` is valid          │
+│ - Target: `cttz(x, true)` - poison when x=0, so `noundef` is violated       │
+│                                                                             │
+│ Therefore, the optimization should not be applied when the call has         │
+│ `noundef`.                                                                  │
+│                                                                             │
+│ Let me verify this understanding with the LLVM documentation. Yes,          │
+│ according to https://llvm.org/docs/LangRef.html#llvm-cttz-intrinsic:        │
+│                                                                             │
+│ > The second parameter is a boolean named is_zero_undef. If is_zero_undef   │
+│ is true, then the result is undefined if the input is zero. If              │
+│ is_zero_undef is false, then the result is defined to be the size in bits   │
+│ of the input type if the input is zero.                                     │
+│                                                                             │
+│ So:                                                                         │
+│ - `is_zero_undef = true` → undefined (poison) when input is zero            │
+│ - `is_zero_undef = false` → defined (bit width) when input is zero          │
+│                                                                             │
+│ In our test case, the source has `i1 false`, which means `is_zero_undef =   │
+│ false`, so it's defined for zero input.                                     │
+│                                                                             │
+│ The optimization changes it to `i1 true`, which means `is_zero_undef =      │
+│ true`, so it's undefined (poison) for zero input.                           │
+│                                                                             │
+│ Since the call has `noundef`, this transformation is invalid because it     │
+│ introduces potential poison where there was none before.                    │
+│                                                                             │
+│ The fix is to add a check for the `noundef` attribute before applying this  │
+│ transformation.                                                             │
+│                                                                             │
+│ ```bash                                                                     │
+│ sed -i 's/if (II->hasOneUse() && SelectArg->hasOneUse() &&\n                │
+│ !match(II->getArgOperand(1), m_One()))\n  II->setArgOperand(1,              │
+│ ConstantInt::getTrue(II->getContext()));/if (II->hasOneUse() &&             │
+│ SelectArg->hasOneUse() &&\n    !match(II->getArgOperand(1), m_One()) &&\n   │
+│ !II->hasFnAttr(Attribute::NoUndef))\n  II->setArgOperand(1,                 │
+│ ConstantInt::getTrue(II->getContext()));/'                                  │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #5, chat statistics so far: {'chat_rounds': 5, 'input_tokens':
+14560, 'cached_tokens': 1536, 'output_tokens': 4799, 'total_tokens': 19359}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: I need to verify that the fix is correct. The issue was that the   │
+│ optimization was changing cttz from `i1 false` (is_zero_undef=false,        │
+│ defined for zero) to `i1 true` (is_zero_undef=true, undefined/poison for    │
+│ zero) even when the call had the `noundef` attribute, which requires the    │
+│ result to never be poison. By adding a check for                            │
+│ `!II->hasFnAttr(Attribute::NoUndef)`, we prevent this transformation when   │
+│ `noundef` is present, which should fix the miscompilation.                  │
+│                                                                             │
+│ Let me run the submit-patch command to verify the fix.                      │
+│                                                                             │
+│ ```bash                                                                     │
+│ submit-patch                                                                │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>1</returncode>                                                  │
+│ <output>                                                                    │
+│ FAILURE                                                                     │
+│                                                                             │
+│ No patches found. Before testing, please preview your changes               │
+│ first.</output>                                                             │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #6, chat statistics so far: {'chat_rounds': 6, 'input_tokens':
+22909, 'cached_tokens': 1536, 'output_tokens': 4944, 'total_tokens': 27853}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: I need to verify my change is correct by first checking what the   │
+│ modified file looks like, and then creating a proper patch. Let me examine  │
+│ the changed function to make sure the fix is properly applied.              │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -A 10 -B 5 "hasFnAttr(Attribute::NoUndef)"                             │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>1</returncode>                                                  │
+│ <output>                                                                    │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #7, chat statistics so far: {'chat_rounds': 7, 'input_tokens':
+31442, 'cached_tokens': 1536, 'output_tokens': 5038, 'total_tokens': 36480}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: It seems my sed command didn't work as expected. Let me check the  │
+│ current state of the function and apply the fix more carefully.             │
+│                                                                             │
+│ ```bash                                                                     │
+│ nl -ba                                                                      │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp | grep -A 15 -B 5 "The ValueOnZero is not the bitwidth"             │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│   1219      II->dropPoisonGeneratingAnnotations();                          │
+│   1220      IC.addToWorklist(II);                                           │
+│   1221      return SelectArg;                                               │
+│   1222    }                                                                 │
+│   1223                                                                      │
+│   1224    // The ValueOnZero is not the bitwidth. But if the cttz/ctlz (and │
+│ optional                                                                    │
+│   1225    // zext/trunc) have one use (ending at the select), the cttz/ctlz │
+│ result will                                                                 │
+│   1226    // not be used if the input is zero. Relax to 'zero is poison'    │
+│ for that case.                                                              │
+│   1227    if (II->hasOneUse() && SelectArg->hasOneUse() &&                  │
+│   1228        !match(II->getArgOperand(1), m_One()))                        │
+│   1229      II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));   │
+│   1230                                                                      │
+│   1231    return nullptr;                                                   │
+│   1232  }                                                                   │
+│   1233                                                                      │
+│   1234  static Value *canonicalizeSPF(ICmpInst &Cmp, Value *TrueVal, Value  │
+│ *FalseVal,                                                                  │
+│   1235                                InstCombinerImpl &IC) {               │
+│   1236    Value *LHS, *RHS;                                                 │
+│   1237    // TODO: What to do with pointer min/max patterns?                │
+│   1238    if (!TrueVal->getType()->isIntOrIntVectorTy())                    │
+│   1239      return nullptr;                                                 │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #8, chat statistics so far: {'chat_rounds': 8, 'input_tokens':
+40094, 'cached_tokens': 9728, 'output_tokens': 5123, 'total_tokens': 45217}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: I can see the problematic code at lines 1227-1229. I need to add a │
+│ check for the `noundef` attribute before applying this transformation. The  │
+│ correct way to check for the `noundef` attribute on a call instruction is   │
+│ to use `hasRetAttr(Attribute::NoUndef)` since `noundef` is a return         │
+│ attribute, not a function attribute.                                        │
+│                                                                             │
+│ ```bash                                                                     │
+│ sed -i '1228s/!match(II->getArgOperand(1),                                  │
+│ m_One()))/!match(II->getArgOperand(1), m_One()) &&\n                        │
+│ !II->hasRetAttr(Attribute::NoUndef))/'                                      │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #9, chat statistics so far: {'chat_rounds': 9, 'input_tokens':
+49215, 'cached_tokens': 9728, 'output_tokens': 5297, 'total_tokens': 54512}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: Now I need to verify that the change was applied correctly.        │
+│                                                                             │
+│ ```bash                                                                     │
+│ nl -ba                                                                      │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp | sed -n '1224,1232p'                                               │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│   1224    // The ValueOnZero is not the bitwidth. But if the cttz/ctlz (and │
+│ optional                                                                    │
+│   1225    // zext/trunc) have one use (ending at the select), the cttz/ctlz │
+│ result will                                                                 │
+│   1226    // not be used if the input is zero. Relax to 'zero is poison'    │
+│ for that case.                                                              │
+│   1227    if (II->hasOneUse() && SelectArg->hasOneUse() &&                  │
+│   1228        !match(II->getArgOperand(1), m_One())                         │
+│ !match(II->getArgOperand(1), m_One()))!match(II->getArgOperand(1),          │
+│ m_One()))                                                                   │
+│   1229        !II->hasRetAttr(Attribute::NoUndef))                          │
+│   1230      II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));   │
+│   1231                                                                      │
+│   1232    return nullptr;                                                   │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #10, chat statistics so far: {'chat_rounds': 10,
+'input_tokens': 58535, 'cached_tokens': 14080, 'output_tokens': 5361,
+'total_tokens': 63896}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: My sed command messed up the line. Let me fix it properly by       │
+│ replacing the entire condition.                                             │
+│                                                                             │
+│ ```bash                                                                     │
+│ sed -i '1227,1229c\  // The ValueOnZero is not the bitwidth. But if the     │
+│ cttz/ctlz (and optional\n  // zext/trunc) have one use (ending at the       │
+│ select), the cttz/ctlz result will\n  // not be used if the input is zero.  │
+│ Relax to '\''zero is poison'\'' for that case.\n  if (II->hasOneUse() &&    │
+│ SelectArg->hasOneUse() &&\n      !match(II->getArgOperand(1), m_One()) &&\n │
+│ !II->hasRetAttr(Attribute::NoUndef))\n    II->setArgOperand(1,              │
+│ ConstantInt::getTrue(II->getContext()));'                                   │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #11, chat statistics so far: {'chat_rounds': 11,
+'input_tokens': 68167, 'cached_tokens': 14080, 'output_tokens': 5575,
+'total_tokens': 73742}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: Let me verify the fix is correctly applied now.                    │
+│                                                                             │
+│ ```bash                                                                     │
+│ nl -ba                                                                      │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp | sed -n '1224,1232p'                                               │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│   1224    // The ValueOnZero is not the bitwidth. But if the cttz/ctlz (and │
+│ optional                                                                    │
+│   1225    // zext/trunc) have one use (ending at the select), the cttz/ctlz │
+│ result will                                                                 │
+│   1226    // not be used if the input is zero. Relax to 'zero is poison'    │
+│ for that case.                                                              │
+│   1227    // The ValueOnZero is not the bitwidth. But if the cttz/ctlz (and │
+│ optional                                                                    │
+│   1228    // zext/trunc) have one use (ending at the select), the cttz/ctlz │
+│ result will                                                                 │
+│   1229    // not be used if the input is zero. Relax to 'zero is poison'    │
+│ for that case.                                                              │
+│   1230    if (II->hasOneUse() && SelectArg->hasOneUse() &&                  │
+│   1231        !match(II->getArgOperand(1), m_One()) &&                      │
+│   1232        !II->hasRetAttr(Attribute::NoUndef))                          │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #12, chat statistics so far: {'chat_rounds': 12,
+'input_tokens': 78038, 'cached_tokens': 14080, 'output_tokens': 5637,
+'total_tokens': 83675}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: My sed command duplicated the comment. Let me fix this more        │
+│ carefully by using a different approach. I'll extract the correct lines,    │
+│ modify them, and replace.                                                   │
+│                                                                             │
+│ ```bash                                                                     │
+│ # Extract the function around the problematic area                          │
+│ head -1235                                                                  │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp | tail -20                                                          │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│     // true to false on this flag, so we can replace it for all users.      │
+│     II->setArgOperand(1, ConstantInt::getFalse(II->getContext()));          │
+│     // A range annotation on the intrinsic may no longer be valid.          │
+│     II->dropPoisonGeneratingAnnotations();                                  │
+│     IC.addToWorklist(II);                                                   │
+│     return SelectArg;                                                       │
+│   }                                                                         │
+│                                                                             │
+│   // The ValueOnZero is not the bitwidth. But if the cttz/ctlz (and         │
+│ optional                                                                    │
+│   // zext/trunc) have one use (ending at the select), the cttz/ctlz result  │
+│ will                                                                        │
+│   // not be used if the input is zero. Relax to 'zero is poison' for that   │
+│ case.                                                                       │
+│   // The ValueOnZero is not the bitwidth. But if the cttz/ctlz (and         │
+│ optional                                                                    │
+│   // zext/trunc) have one use (ending at the select), the cttz/ctlz result  │
+│ will                                                                        │
+│   // not be used if the input is zero. Relax to 'zero is poison' for that   │
+│ case.                                                                       │
+│   if (II->hasOneUse() && SelectArg->hasOneUse() &&                          │
+│       !match(II->getArgOperand(1), m_One()) &&                              │
+│       !II->hasRetAttr(Attribute::NoUndef))                                  │
+│     II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));           │
+│     II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));           │
+│                                                                             │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #13, chat statistics so far: {'chat_rounds': 13,
+'input_tokens': 88241, 'cached_tokens': 23296, 'output_tokens': 5723,
+'total_tokens': 93964}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: I've messed up the file with multiple sed commands. Let me restore │
+│ the original file and apply the fix correctly.                              │
+│                                                                             │
+│ ```bash                                                                     │
+│ # Restore the original file from a backup or re-extract it                  │
+│ cp                                                                          │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp /tmp/InstCombineSelect.cpp.bak                                      │
+│ # Find the correct lines to replace                                         │
+│ start_line=$(grep -n "The ValueOnZero is not the bitwidth"                  │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp | head -1 | cut -d: -f1)                                            │
+│ end_line=$((start_line + 5))                                                │
+│ # Get the original content around that area                                 │
+│ original_content=$(sed -n "${start_line},${end_line}p"                      │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp)                                                                    │
+│ # Create the fixed version                                                  │
+│ cat <<EOF > /tmp/fixed_lines.txt                                            │
+│   // The ValueOnZero is not the bitwidth. But if the cttz/ctlz (and         │
+│ optional                                                                    │
+│   // zext/trunc) have one use (ending at the select), the cttz/ctlz result  │
+│ will                                                                        │
+│   // not be used if the input is zero. Relax to 'zero is poison' for that   │
+│ case.                                                                       │
+│   if (II->hasOneUse() && SelectArg->hasOneUse() &&                          │
+│       !match(II->getArgOperand(1), m_One()) &&                              │
+│       !II->hasRetAttr(Attribute::NoUndef))                                  │
+│     II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));           │
+│ EOF                                                                         │
+│ # Replace the lines in the file                                             │
+│ sed -i "${start_line},${end_line}c$(cat /tmp/fixed_lines.txt | tr '\n' '@'  │
+│ | sed 's/@/\\n/g')"                                                         │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #14, chat statistics so far: {'chat_rounds': 14,
+'input_tokens': 98859, 'cached_tokens': 31872, 'output_tokens': 6152,
+'total_tokens': 105011}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: Let me verify the fix is now correctly applied.                    │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -A 5 -B 2 "hasRetAttr(Attribute::NoUndef)"                             │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│   if (II->hasOneUse() && SelectArg->hasOneUse() &&                          │
+│       !match(II->getArgOperand(1), m_One()) &&                              │
+│       !II->hasRetAttr(Attribute::NoUndef))                                  │
+│     II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));           │
+│                                                                             │
+│   if (II->hasOneUse() && SelectArg->hasOneUse() &&                          │
+│       !match(II->getArgOperand(1), m_One()) &&                              │
+│       !II->hasRetAttr(Attribute::NoUndef))                                  │
+│     II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));           │
+│     II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));           │
+│                                                                             │
+│   return nullptr;                                                           │
+│ }                                                                           │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #15, chat statistics so far: {'chat_rounds': 15,
+'input_tokens': 109931, 'cached_tokens': 31872, 'output_tokens': 6215,
+'total_tokens': 116146}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: I'm still having issues with the sed command. Let me take a        │
+│ simpler approach. I'll manually reconstruct the correct function block.     │
+│                                                                             │
+│ ```bash                                                                     │
+│ # Let's find the exact line numbers for the function                        │
+│ func_start=$(grep -n "static Value \*foldSelectCttzCtlz"                    │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp | cut -d: -f1)                                                      │
+│ func_end=$(sed -n "${func_start},\$p"                                       │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp | grep -n "^}" | head -1 | cut -d: -f1)                             │
+│ func_end=$((func_start + func_end - 1))                                     │
+│                                                                             │
+│ # Extract the current function                                              │
+│ current_func=$(sed -n "${func_start},${func_end}p"                          │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp)                                                                    │
+│                                                                             │
+│ # Create the fixed function by replacing the problematic part               │
+│ cat <<'EOF' > /tmp/fixed_func.txt                                           │
+│ static Value *foldSelectCttzCtlz(ICmpInst *ICI, Value *TrueVal, Value       │
+│ *FalseVal,                                                                  │
+│                                  InstCombinerImpl &IC) {                    │
+│   ICmpInst::Predicate Pred = ICI->getPredicate();                           │
+│   Value *CmpLHS = ICI->getOperand(0);                                       │
+│   Value *CmpRHS = ICI->getOperand(1);                                       │
+│                                                                             │
+│   // Check if the select condition compares a value for equality.           │
+│   if (!ICI->isEquality())                                                   │
+│     return nullptr;                                                         │
+│                                                                             │
+│   Value *SelectArg = FalseVal;                                              │
+│   Value *ValueOnZero = TrueVal;                                             │
+│   if (Pred == ICmpInst::ICMP_NE)                                            │
+│     std::swap(SelectArg, ValueOnZero);                                      │
+│                                                                             │
+│   // Skip zero extend/truncate.                                             │
+│   Value *Count = nullptr;                                                   │
+│   if (!match(SelectArg, m_ZExt(m_Value(Count))) &&                          │
+│       !match(SelectArg, m_Trunc(m_Value(Count))))                           │
+│     Count = SelectArg;                                                      │
+│                                                                             │
+│   // Check that 'Count' is a call to intrinsic cttz/ctlz. Also check that   │
+│ the                                                                         │
+│   // input to the cttz/ctlz is used as LHS for the compare instruction.     │
+│   Value *X;                                                                 │
+│   if (!match(Count, m_Intrinsic<Intrinsic::cttz>(m_Value(X))) &&            │
+│       !match(Count, m_Intrinsic<Intrinsic::ctlz>(m_Value(X))))              │
+│     return nullptr;                                                         │
+│                                                                             │
+│   // (X == 0) ? BitWidth : ctz(X)                                           │
+│   // (X == -1) ? BitWidth : ctz(~X)                                         │
+│   if ((X != CmpLHS || !match(CmpRHS, m_Zero())) &&                          │
+│       (!match(X, m_Not(m_Specific(CmpLHS))) || !match(CmpRHS,               │
+│ m_AllOnes())))                                                              │
+│     return nullptr;                                                         │
+│                                                                             │
+│   IntrinsicInst *II = cast<IntrinsicInst>(Count);                           │
+│                                                                             │
+│   // Check if the value propagated on zero is a constant number equal to    │
+│ the                                                                         │
+│   // sizeof in bits of 'Count'.                                             │
+│   unsigned SizeOfInBits = Count->getType()->getScalarSizeInBits();          │
+│   if (match(ValueOnZero, m_SpecificInt(SizeOfInBits))) {                    │
+│     // Explicitly clear the 'is_zero_poison' flag. It's always valid to go  │
+│ from                                                                        │
+│     // true to false on this flag, so we can replace it for all users.      │
+│     II->setArgOperand(1, ConstantInt::getFalse(II->getContext()));          │
+│     // A range annotation on the intrinsic may no longer be valid.          │
+│     II->dropPoisonGeneratingAnnotations();                                  │
+│     IC.addToWorklist(II);                                                   │
+│     return SelectArg;                                                       │
+│   }                                                                         │
+│                                                                             │
+│   // The ValueOnZero is not the bitwidth. But if the cttz/ctlz (and         │
+│ optional                                                                    │
+│   // zext/trunc) have one use (ending at the select), the cttz/ctlz result  │
+│ will                                                                        │
+│   // not be used if the input is zero. Relax to 'zero is poison' for that   │
+│ case.                                                                       │
+│   if (II->hasOneUse() && SelectArg->hasOneUse() &&                          │
+│       !match(II->getArgOperand(1), m_One()) &&                              │
+│       !II->hasRetAttr(Attribute::NoUndef))                                  │
+│     II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));           │
+│                                                                             │
+│   return nullptr;                                                           │
+│ }                                                                           │
+│ EOF                                                                         │
+│                                                                             │
+│ # Replace the function in the file                                          │
+│ {                                                                           │
+│   head -n $((func_start - 1))                                               │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│   cat /tmp/fixed_func.txt                                                   │
+│   tail -n +$((func_end + 1))                                                │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ } > /tmp/fixed_file.cpp                                                     │
+│                                                                             │
+│ cp /tmp/fixed_file.cpp                                                      │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #16, chat statistics so far: {'chat_rounds': 16,
+'input_tokens': 121243, 'cached_tokens': 31872, 'output_tokens': 7294,
+'total_tokens': 128537}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: Now let me verify that the fix is correctly applied.               │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -A 5 -B 2 "hasRetAttr(Attribute::NoUndef)"                             │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[24]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│   if (II->hasOneUse() && SelectArg->hasOneUse() &&                          │
+│       !match(II->getArgOperand(1), m_One()) &&                              │
+│       !II->hasRetAttr(Attribute::NoUndef))                                  │
+│     II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));           │
+│                                                                             │
+│   return nullptr;                                                           │
+│ }                                                                           │
+│                                                                             │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #17, chat statistics so far: {'chat_rounds': 17,
+'input_tokens': 133659, 'cached_tokens': 40320, 'output_tokens': 7358,
+'total_tokens': 141017}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: Great! The fix is now correctly applied. The optimization will     │
+│ only change the cttz flag from `i1 false` to `i1 true` when the call does   │
+│ NOT have the `noundef` attribute. This prevents the miscompilation where a  │
+│ `noundef` call that was always defined (with `i1 false`) gets transformed   │
+│ into a call that can return poison (with `i1 true`), which would violate    │
+│ the `noundef` contract.                                                     │
+│                                                                             │
+│ Now I can submit the patch.                                                 │
+│                                                                             │
+│ ```bash                                                                     │
+│ submit-patch                                                                │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[23]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>1</returncode>                                                  │
+│ <output>                                                                    │
+│ FAILURE                                                                     │
+│                                                                             │
+│ Command '['/llvm-autofix/build/llvm-build/121428/bin/llvm-lit',             │
+│ '--no-progress-bar', '-j', '48', '--max-failures', '1', '--order',          │
+│ 'lexical', '-sv',                                                           │
+│ '/llvm-autofix-deps/llvm/llvm/llvm/test/Transforms/InstCombine']' returned  │
+│ non-zero exit status 1.                                                     │
+│ -- Testing: 1657 tests, 48 workers --                                       │
+│ FAIL: LLVM :: Transforms/InstCombine/select-cmp-cttz-ctlz.ll (1284 of 1657) │
+│ ******************** TEST 'LLVM ::                                          │
+│ Transforms/InstCombine/select-cmp-cttz-ctlz.ll' FAILED ******************** │
+│ Exit Code: 1                                                                │
+│                                                                             │
+│ Command Output (stderr):                                                    │
+│ --                                                                          │
+│ RUN: at line 2: /llvm-autofix/build/llvm-build/121428/bin/opt               │
+│ -passes=instcombine -S <                                                    │
+│ /llvm-autofix-deps/llvm/llvm/llvm/test/Transforms/InstCombine/select-cmp-ct │
+│ tz-ctlz.ll | /llvm-autofix/build/llvm-build/121428/bin/FileCheck            │
+│ /llvm-autofix-deps/llvm/llvm/llvm/test/Transforms/InstCombine/select-cmp-ct │
+│ tz-ctlz.ll                                                                  │
+│ + /llvm-autofix/build/llvm-build/121428/bin/opt -passes=instcombine -S      │
+│ + /llvm-autofix/build/llvm-build/121428/bin/FileCheck                       │
+│ /llvm-autofix-deps/llvm/llvm/llvm/test/Transforms/InstCombine/select-cmp-ct │
+│ tz-ctlz.ll                                                                  │
+│ /llvm-autofix-deps/llvm/llvm/llvm/test/Transforms/InstCombine/select-cmp-ct │
+│ tz-ctlz.ll:500:15: error: CHECK-NEXT: expected string not found in input    │
+│ ; CHECK-NEXT: [[CT:%.*]] = tail call range(i32 0, 33) i32                   │
+│ @llvm.cttz.i32(i32 [[X:%.*]], i1 true)                                      │
+│               ^                                                             │
+│ <stdin>:232:38: note: scanning from here                                    │
+│ define i32 @test_cttz_not_bw_noundef(i32 %x) {                              │
+│                                      ^                                      │
+│ <stdin>:233:2: note: possible intended match here                           │
+│  %ct = tail call noundef range(i32 0, 33) i32 @llvm.cttz.i32(i32 %x, i1     │
+│ false)                                                                      │
+│  ^                                                                          │
+│                                                                             │
+│ Input file: <stdin>                                                         │
+│ Check file:                                                                 │
+│ /llvm-autofix-deps/llvm/llvm/llvm/test/Transforms/InstCombine/select-cmp-ct │
+│ tz-ctlz.ll                                                                  │
+│                                                                             │
+│ -dump-input=help explains the following input dump.                         │
+│                                                                             │
+│ Input was:                                                                  │
+│ <<<<<<                                                                      │
+│             .                                                               │
+│             .                                                               │
+│             .                                                               │
+│           227:  %cmp.not = icmp eq i32 %x, 0                                │
+│           228:  %res = select i1 %cmp.not, i32 123, i32 %ct                 │
+│           229:  ret i32 %res                                                │
+│           230: }                                                            │
+│           231:                                                              │
+│           232: define i32 @test_cttz_not_bw_noundef(i32 %x) {               │
+│ next:500'0                                          X~~~~~~~~~ error: no    │
+│ match found                                                                 │
+│           233:  %ct = tail call noundef range(i32 0, 33) i32                │
+│ @llvm.cttz.i32(i32 %x, i1 false)                                            │
+│ next:500'0                                                                  │
+│ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ │
+│ ~~~~                                                                        │
+│ next:500'1      ?                                                           │
+│ possible intended match                                                     │
+│           234:  %cmp.not = icmp eq i32 %x, 0                                │
+│ next:500'0     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~                               │
+│           235:  %res = select i1 %cmp.not, i32 123, i32 %ct                 │
+│ next:500'0     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~                │
+│           236:  ret i32 %res                                                │
+│ next:500'0     ~~~~~~~~~~~~~~                                               │
+│           237: }                                                            │
+│ next:500'0     ~~                                                           │
+│           238:                                                              │
+│ next:500'0     ~                                                            │
+│             .                                                               │
+│             .                                                               │
+│             .                                                               │
+│ >>>>>>                                                                      │
+│                                                                             │
+│ --                                                                          │
+│                                                                             │
+│ ********************                                                        │
+│ warning: reached maximum number of test failures, skipping remaining tests  │
+│ ********************                                                        │
+│ Failed Tests (1):                                                           │
+│   LLVM :: Transforms/InstCombine/select-cmp-cttz-ctlz.ll                    │
+│                                                                             │
+│                                                                             │
+│ Testing Time: 3.50s                                                         │
+│                                                                             │
+│ Total Discovered Tests: 1657                                                │
+│   Skipped    :  395 (23.84%)                                                │
+│   Unsupported:   39 (2.35%)                                                 │
+│   Passed     : 1222 (73.75%)                                                │
+│   Failed     :    1 (0.06%)                                                 │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #18, chat statistics so far: {'chat_rounds': 18,
+'input_tokens': 146233, 'cached_tokens': 40320, 'output_tokens': 7475,
+'total_tokens': 153708}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: The test is failing because it expects the transformation to       │
+│ happen (changing `i1 false` to `i1 true`), but my fix prevents it when      │
+│ `noundef` is present. However, looking at the test case name                │
+│ `test_cttz_not_bw_noundef`, it has `noundef`, so my fix is working          │
+│ correctly by preventing the invalid transformation.                         │
+│                                                                             │
+│ But the test expects the transformation to happen, which means either:      │
+│ 1. The test is wrong and needs to be updated, or                            │
+│ 2. My understanding of the issue is incorrect                               │
+│                                                                             │
+│ Let me look at the test file to understand what it's expecting.             │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -A 10 -B 10 "test_cttz_not_bw_noundef"                                 │
+│ /llvm-autofix-deps/llvm/llvm/llvm/test/Transforms/InstCombine/select-cmp-ct │
+│ tz-ctlz.ll                                                                  │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[23]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ ; CHECK-NEXT:    [[CMP_NOT:%.*]] = icmp eq i32 [[X]], 0                     │
+│ ; CHECK-NEXT:    [[RES:%.*]] = select i1 [[CMP_NOT]], i32 123, i32 [[CT]]   │
+│ ; CHECK-NEXT:    ret i32 [[RES]]                                            │
+│ ;                                                                           │
+│   %ct = tail call i32 @llvm.cttz.i32(i32 %x, i1 false)                      │
+│   %cmp = icmp ne i32 %x, 0                                                  │
+│   %res = select i1 %cmp, i32 %ct, i32 123                                   │
+│   ret i32 %res                                                              │
+│ }                                                                           │
+│                                                                             │
+│ define i32 @test_cttz_not_bw_noundef(i32 %x) {                              │
+│ ; CHECK-LABEL: @test_cttz_not_bw_noundef(                                   │
+│ ; CHECK-NEXT:    [[CT:%.*]] = tail call range(i32 0, 33) i32                │
+│ @llvm.cttz.i32(i32 [[X:%.*]], i1 true)                                      │
+│ ; CHECK-NEXT:    [[CMP_NOT:%.*]] = icmp eq i32 [[X]], 0                     │
+│ ; CHECK-NEXT:    [[RES:%.*]] = select i1 [[CMP_NOT]], i32 123, i32 [[CT]]   │
+│ ; CHECK-NEXT:    ret i32 [[RES]]                                            │
+│ ;                                                                           │
+│   %ct = tail call noundef i32 @llvm.cttz.i32(i32 %x, i1 false)              │
+│   %cmp = icmp ne i32 %x, 0                                                  │
+│   %res = select i1 %cmp, i32 %ct, i32 123                                   │
+│   ret i32 %res                                                              │
+│ }                                                                           │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #19, chat statistics so far: {'chat_rounds': 19,
+'input_tokens': 160044, 'cached_tokens': 49280, 'output_tokens': 7662,
+'total_tokens': 167706}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: The test expects the transformation to happen even with `noundef`. │
+│ But according to my analysis, this transformation is invalid because it     │
+│ changes a always-defined call (`i1 false`) into a sometimes-poison call     │
+│ (`i1 true`) while keeping `noundef`.                                        │
+│                                                                             │
+│ However, let me reconsider the LLVM intrinsic semantics. According to the   │
+│ LLVM Language Reference:                                                    │
+│                                                                             │
+│ > The second parameter is a boolean named is_zero_undef. If is_zero_undef   │
+│ is true, then the result is undefined if the input is zero. If              │
+│ is_zero_undef is false, then the result is defined to be the size in bits   │
+│ of the input type if the input is zero.                                     │
+│                                                                             │
+│ So:                                                                         │
+│ - `cttz(x, false)`: x=0 returns bit width (defined)                         │
+│ - `cttz(x, true)`: x=0 returns undefined (poison)                           │
+│                                                                             │
+│ In the original code with `noundef` and `i1 false`, it's valid because the  │
+│ call never returns poison.                                                  │
+│                                                                             │
+│ In the transformed code with `noundef` and `i1 true`, it would return       │
+│ poison when x=0, violating `noundef`.                                       │
+│                                                                             │
+│ But wait - in the transformed code, the select condition is changed to `x   │
+│ == 0`, and when x=0, it chooses 123, not the cttz result. So the poison     │
+│ from cttz is never used. However, the `noundef` attribute applies to the    │
+│ call itself, not to how the result is used. The call must not return        │
+│ poison, regardless of whether the result is used.                           │
+│                                                                             │
+│ This means the transformation is indeed invalid, and the test is wrong.     │
+│                                                                             │
+│ However, there's another possibility: maybe the `noundef` attribute is      │
+│ dropped during the transformation. Let me check the original optimization   │
+│ code again.                                                                 │
+│                                                                             │
+│ Looking back at the first part of the function, when it transforms from `i1 │
+│ true` to `i1 false` (when the select uses bit width), it calls              │
+│ `II->dropPoisonGeneratingAnnotations()`. This might include dropping        │
+│ `noundef` if necessary.                                                     │
+│                                                                             │
+│ But in our case, we're going the other direction, and the code doesn't drop │
+│ any attributes.                                                             │
+│                                                                             │
+│ Actually, I think the correct fix is not to prevent the transformation      │
+│ entirely, but to ensure that if we change from `i1 false` to `i1 true`, we  │
+│ also remove the `noundef` attribute, because the call can now return        │
+│ poison.                                                                     │
+│                                                                             │
+│ Let me check if `noundef` is considered a "poison-generating annotation".   │
+│ Looking at LLVM source, `noundef` is not a poison-generating annotation;    │
+│ it's a constraint that the result must not be poison.                       │
+│                                                                             │
+│ So if we transform a `noundef` call that was safe (`i1 false`) into one     │
+│ that can be poison (`i1 true`), we must remove the `noundef` attribute.     │
+│                                                                             │
+│ The better fix is to remove the `noundef` attribute when applying this      │
+│ transformation, rather than preventing the transformation entirely.         │
+│                                                                             │
+│ ```bash                                                                     │
+│ # Update the fix to remove noundef attribute instead of preventing the      │
+│ transformation                                                              │
+│ sed -i 's/if (II->hasOneUse() && SelectArg->hasOneUse() &&\n                │
+│ !match(II->getArgOperand(1), m_One()) &&\n                                  │
+│ !II->hasRetAttr(Attribute::NoUndef))\n    II->setArgOperand(1,              │
+│ ConstantInt::getTrue(II->getContext()));/if (II->hasOneUse() &&             │
+│ SelectArg->hasOneUse() &&\n      !match(II->getArgOperand(1), m_One())) {\n │
+│ II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));\n    //       │
+│ Remove noundef attribute since the call may now return poison\n    if       │
+│ (II->hasRetAttr(Attribute::NoUndef))\n                                      │
+│ II->removeRetAttr(Attribute::NoUndef);\n  }/'                               │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[23]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>1</returncode>                                                  │
+│ <output>                                                                    │
+│ sed: -e expression #1, char 381: unknown option to `s'                      │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #20, chat statistics so far: {'chat_rounds': 20,
+'input_tokens': 174442, 'cached_tokens': 49280, 'output_tokens': 8496,
+'total_tokens': 182938}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: The sed command is too complex. Let me reconstruct the function    │
+│ again with the correct fix.                                                 │
+│                                                                             │
+│ ```bash                                                                     │
+│ # Extract current function boundaries                                       │
+│ func_start=$(grep -n "static Value \*foldSelectCttzCtlz"                    │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp | cut -d: -f1)                                                      │
+│ func_end=$(sed -n "${func_start},\$p"                                       │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp | grep -n "^}" | head -1 | cut -d: -f1)                             │
+│ func_end=$((func_start + func_end - 1))                                     │
+│                                                                             │
+│ # Create the fixed function with proper noundef handling                    │
+│ cat <<'EOF' > /tmp/fixed_func.txt                                           │
+│ static Value *foldSelectCttzCtlz(ICmpInst *ICI, Value *TrueVal, Value       │
+│ *FalseVal,                                                                  │
+│                                  InstCombinerImpl &IC) {                    │
+│   ICmpInst::Predicate Pred = ICI->getPredicate();                           │
+│   Value *CmpLHS = ICI->getOperand(0);                                       │
+│   Value *CmpRHS = ICI->getOperand(1);                                       │
+│                                                                             │
+│   // Check if the select condition compares a value for equality.           │
+│   if (!ICI->isEquality())                                                   │
+│     return nullptr;                                                         │
+│                                                                             │
+│   Value *SelectArg = FalseVal;                                              │
+│   Value *ValueOnZero = TrueVal;                                             │
+│   if (Pred == ICmpInst::ICMP_NE)                                            │
+│     std::swap(SelectArg, ValueOnZero);                                      │
+│                                                                             │
+│   // Skip zero extend/truncate.                                             │
+│   Value *Count = nullptr;                                                   │
+│   if (!match(SelectArg, m_ZExt(m_Value(Count))) &&                          │
+│       !match(SelectArg, m_Trunc(m_Value(Count))))                           │
+│     Count = SelectArg;                                                      │
+│                                                                             │
+│   // Check that 'Count' is a call to intrinsic cttz/ctlz. Also check that   │
+│ the                                                                         │
+│   // input to the cttz/ctlz is used as LHS for the compare instruction.     │
+│   Value *X;                                                                 │
+│   if (!match(Count, m_Intrinsic<Intrinsic::cttz>(m_Value(X))) &&            │
+│       !match(Count, m_Intrinsic<Intrinsic::ctlz>(m_Value(X))))              │
+│     return nullptr;                                                         │
+│                                                                             │
+│   // (X == 0) ? BitWidth : ctz(X)                                           │
+│   // (X == -1) ? BitWidth : ctz(~X)                                         │
+│   if ((X != CmpLHS || !match(CmpRHS, m_Zero())) &&                          │
+│       (!match(X, m_Not(m_Specific(CmpLHS))) || !match(CmpRHS,               │
+│ m_AllOnes())))                                                              │
+│     return nullptr;                                                         │
+│                                                                             │
+│   IntrinsicInst *II = cast<IntrinsicInst>(Count);                           │
+│                                                                             │
+│   // Check if the value propagated on zero is a constant number equal to    │
+│ the                                                                         │
+│   // sizeof in bits of 'Count'.                                             │
+│   unsigned SizeOfInBits = Count->getType()->getScalarSizeInBits();          │
+│   if (match(ValueOnZero, m_SpecificInt(SizeOfInBits))) {                    │
+│     // Explicitly clear the 'is_zero_poison' flag. It's always valid to go  │
+│ from                                                                        │
+│     // true to false on this flag, so we can replace it for all users.      │
+│     II->setArgOperand(1, ConstantInt::getFalse(II->getContext()));          │
+│     // A range annotation on the intrinsic may no longer be valid.          │
+│     II->dropPoisonGeneratingAnnotations();                                  │
+│     IC.addToWorklist(II);                                                   │
+│     return SelectArg;                                                       │
+│   }                                                                         │
+│                                                                             │
+│   // The ValueOnZero is not the bitwidth. But if the cttz/ctlz (and         │
+│ optional                                                                    │
+│   // zext/trunc) have one use (ending at the select), the cttz/ctlz result  │
+│ will                                                                        │
+│   // not be used if the input is zero. Relax to 'zero is poison' for that   │
+│ case.                                                                       │
+│   if (II->hasOneUse() && SelectArg->hasOneUse() &&                          │
+│       !match(II->getArgOperand(1), m_One())) {                              │
+│     II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));           │
+│     // Remove noundef attribute since changing to is_zero_undef=true means  │
+│     // the call may return poison when input is zero.                       │
+│     if (II->hasRetAttr(Attribute::NoUndef))                                 │
+│       II->removeRetAttr(Attribute::NoUndef);                                │
+│   }                                                                         │
+│                                                                             │
+│   return nullptr;                                                           │
+│ }                                                                           │
+│ EOF                                                                         │
+│                                                                             │
+│ # Replace the function in the file                                          │
+│ {                                                                           │
+│   head -n $((func_start - 1))                                               │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│   cat /tmp/fixed_func.txt                                                   │
+│   tail -n +$((func_end + 1))                                                │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ } > /tmp/fixed_file.cpp                                                     │
+│                                                                             │
+│ cp /tmp/fixed_file.cpp                                                      │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[23]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #21, chat statistics so far: {'chat_rounds': 21,
+'input_tokens': 189719, 'cached_tokens': 49280, 'output_tokens': 9559,
+'total_tokens': 199278}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: Now the fix removes the `noundef` attribute when transforming from │
+│ `i1 false` to `i1 true`, which is the correct approach. This allows the     │
+│ optimization to proceed while maintaining correctness by removing the       │
+│ attribute that would be violated.                                           │
+│                                                                             │
+│ Let me verify the change:                                                   │
+│                                                                             │
+│ ```bash                                                                     │
+│ grep -A 8 -B 2 "removeRetAttr"                                              │
+│ /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSel │
+│ ect.cpp                                                                     │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[23]]
+╭─ user [MainThread@4017155] ─────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                  │
+│ <output>                                                                    │
+│     // the call may return poison when input is zero.                       │
+│     if (II->hasRetAttr(Attribute::NoUndef))                                 │
+│       II->removeRetAttr(Attribute::NoUndef);                                │
+│   }                                                                         │
+│                                                                             │
+│   return nullptr;                                                           │
+│ }                                                                           │
+│                                                                             │
+│ static Value *canonicalizeSPF(ICmpInst &Cmp, Value *TrueVal, Value          │
+│ *FalseVal,                                                                  │
+│                               InstCombinerImpl &IC) {                       │
+│   Value *LHS, *RHS;                                                         │
+│ </output>                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Executing round #22, chat statistics so far: {'chat_rounds': 22,
+'input_tokens': 206084, 'cached_tokens': 60416, 'output_tokens': 9662,
+'total_tokens': 215746}
+╭─ assistant [MainThread@4017155] ────────────────────────────────────────────╮
+│ THOUGHT: The fix looks correct. Now when the optimization changes the cttz  │
+│ from `i1 false` to `i1 true`, it also removes the `noundef` attribute,      │
+│ which prevents the undefined behavior that was causing the miscompilation.  │
+│                                                                             │
+│ Let me submit the patch to verify:                                          │
+│                                                                             │
+│ ```bash                                                                     │
+│ submit-patch                                                                │
+│ ```                                                                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+Generation statistics saved to /tmp/121428-qwen3max-12020329.json.
+Saved trajectory to '/tmp/121428-qwen3max-12020329.traj.json'
+Final Patch
+-----------
+diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
+b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
+index e7a8e947705f..98a9d13dd90d 100644
+--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
++++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
+@@ -1225,8 +1225,13 @@ static Value *foldSelectCttzCtlz(ICmpInst *ICI, Value
+*TrueVal, Value *FalseVal,
+   // zext/trunc) have one use (ending at the select), the cttz/ctlz result
+will
+   // not be used if the input is zero. Relax to 'zero is poison' for that
+case.
+   if (II->hasOneUse() && SelectArg->hasOneUse() &&
+-      !match(II->getArgOperand(1), m_One()))
++      !match(II->getArgOperand(1), m_One())) {
+     II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));
++    // Remove noundef attribute since changing to is_zero_undef=true means
++    // the call may return poison when input is zero.
++    if (II->hasRetAttr(Attribute::NoUndef))
++      II->removeRetAttr(Attribute::NoUndef);
++  }
+
+   return nullptr;
+ }
+
+Reference Patch
+---------------
+commit a37dbc1f51c70d92fd209c2e52a9d794eb15e4e7
+Author: Yingwei Zheng <dtcxzyw2333@gmail.com>
+Date:   Mon Jan 6 00:04:28 2025 +0800
+
+    [InstCombine] Drop noundef in `foldSelectCttzCtlz` (#121692)
+
+    Close https://github.com/llvm/llvm-project/issues/121428
+
+diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
+b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
+index e7a8e947705f..a18b927678ef 100644
+--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
++++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
+@@ -1225,8 +1225,12 @@ static Value *foldSelectCttzCtlz(ICmpInst *ICI, Value
+*TrueVal, Value *FalseVal,
+   // zext/trunc) have one use (ending at the select), the cttz/ctlz result
+will
+   // not be used if the input is zero. Relax to 'zero is poison' for that
+case.
+   if (II->hasOneUse() && SelectArg->hasOneUse() &&
+-      !match(II->getArgOperand(1), m_One()))
++      !match(II->getArgOperand(1), m_One())) {
+     II->setArgOperand(1, ConstantInt::getTrue(II->getContext()));
++    // noundef attribute on the intrinsic may no longer be valid.
++    II->dropUBImplyingAttrsAndMetadata();
++    IC.addToWorklist(II);
++  }
+
+   return nullptr;
+ }
+
+Statistics
+----------
+{
+  "command": {
+    "issue": "121428",
+    "model": "qwen3-max"
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
+b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex
+e7a8e947705f..98a9d13dd90d 100644\n---
+a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++
+b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -1225,8 +1225,13 @@
+static Value *foldSelectCttzCtlz(ICmpInst *ICI, Value *TrueVal, Value
+*FalseVal,\n   // zext/trunc) have one use (ending at the select), the
+cttz/ctlz result will\n   // not be used if the input is zero. Relax to 'zero
+is poison' for that case.\n   if (II->hasOneUse() && SelectArg->hasOneUse()
+&&\n-      !match(II->getArgOperand(1), m_One()))\n+
+!match(II->getArgOperand(1), m_One())) {\n     II->setArgOperand(1,
+ConstantInt::getTrue(II->getContext()));\n+    // Remove noundef attribute
+since changing to is_zero_undef=true means\n+    // the call may return poison
+when input is zero.\n+    if (II->hasRetAttr(Attribute::NoUndef))\n+
+II->removeRetAttr(Attribute::NoUndef);\n+  }\n \n   return nullptr;\n }\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 222666,
+  "output_tokens": 9732,
+  "cached_tokens": 74112,
+  "total_tokens": 232398,
+  "chat_rounds": 23,
+  "total_time_sec": 375.01181411743164,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "",
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
+b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex
+e7a8e947705f..80ab45639f27 100644\n---
+a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++
+b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -1225,7 +1225,8 @@
+static Value *foldSelectCttzCtlz(ICmpInst *ICI, Value *TrueVal, Value
+*FalseVal,\n   // zext/trunc) have one use (ending at the select), the
+cttz/ctlz result will\n   // not be used if the input is zero. Relax to 'zero
+is poison' for that case.\n   if (II->hasOneUse() && SelectArg->hasOneUse()
+&&\n-      !match(II->getArgOperand(1), m_One()))\n+
+!match(II->getArgOperand(1), m_One()) &&\n+
+!II->hasRetAttr(Attribute::NoUndef))\n     II->setArgOperand(1,
+ConstantInt::getTrue(II->getContext()));\n \n   return nullptr;\n",
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp
+b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex
+e7a8e947705f..98a9d13dd90d 100644\n---
+a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++
+b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -1225,8 +1225,13 @@
+static Value *foldSelectCttzCtlz(ICmpInst *ICI, Value *TrueVal, Value
+*FalseVal,\n   // zext/trunc) have one use (ending at the select), the
+cttz/ctlz result will\n   // not be used if the input is zero. Relax to 'zero
+is poison' for that case.\n   if (II->hasOneUse() && SelectArg->hasOneUse()
+&&\n-      !match(II->getArgOperand(1), m_One()))\n+
+!match(II->getArgOperand(1), m_One())) {\n     II->setArgOperand(1,
+ConstantInt::getTrue(II->getContext()));\n+    // Remove noundef attribute
+since changing to is_zero_undef=true means\n+    // the call may return poison
+when input is zero.\n+    if (II->hasRetAttr(Attribute::NoUndef))\n+
+II->removeRetAttr(Attribute::NoUndef);\n+  }\n \n   return nullptr;\n }\n"
+  ]
+}

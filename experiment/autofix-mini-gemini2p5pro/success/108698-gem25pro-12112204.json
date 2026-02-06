@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "108698",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/108698-gem25pro-12112204.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex d7afe2f426d3..86ee868caee0 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -2591,6 +2591,16 @@ bool VectorCombine::shrinkType(llvm::Instruction &I) {\n       !match(&I, m_LShr(m_ZExt(m_Value(ZExted)), m_Value(OtherOperand))))\n     return false;\n \n+  // If we are shrinking to a 1-bit type, we can't sink the zext through\n+  // a shift operation unless the shift amount is known to be zero. A\n+  // non-zero shift of a 1-bit integer is poison.\n+  if (I.getOpcode() == Instruction::LShr) {\n+    auto *ZExt = cast<ZExtInst>(I.getOperand(I.getOperand(0) == OtherOperand ? 1 : 0));\n+    if (ZExt->getSrcTy()->getScalarType()->isIntegerTy(1) &&\n+        !isa<ConstantAggregateZero>(OtherOperand))\n+      return false;\n+  }\n+\n   Value *ZExtOperand = I.getOperand(I.getOperand(0) == OtherOperand ? 1 : 0);\n \n   auto *BigTy = cast<FixedVectorType>(I.getType());\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 123052,
+  "output_tokens": 5456,
+  "cached_tokens": 93697,
+  "total_tokens": 136469,
+  "chat_rounds": 10,
+  "total_time_sec": 679.9181137084961,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+    "(anonymous namespace)::VectorCombine::shrinkType",
+    2656
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+      2649,
+      2649
+    ]
+  ],
+  "reason_thou": "The logic to sink a `zext` through a binary operator in `shrinkType` is too aggressive for shift instructions. When the destination type is being shrunk to a single bit, the only valid, non-poison shift amount is 0. The transformation `lshr (zext V), S` to `zext (lshr V, trunc S)` is only valid if all elements of `S` are known to be 0 when `V` is `i1`. The fix is to add a check to ensure that if we are shrinking the shifted value to 1 bit, the shift amount is all zeros.\n\n```cpp\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -2646,6 +2646,14 @@\n       // TODO: Sink zext through more commute-able opcodes.\n       if (BO->isCommutative() || BO->getOpcode() == Instruction::Sub) {\n         // TODO: Sink zext through vector splat.\n+        // If we are shrinking to a 1-bit type, we can't sink the zext through\n+        // a shift operation unless the shift amount is known to be zero. A\n+        // non-zero shift of a 1-bit integer is poison.\n+        if (BO->isShift() && DstScalarTy->isIntegerTy(1) &&\n+            !isa<ConstantAggregateZero>(BO->getOperand(1))) {\n+          continue;\n+        }\n+\n         if (auto *Splat = dyn_cast<Constant>(BO->getOperand(1))) {\n           if (Splat->isZeroValue()) {\n             // zext(op C, 0) -> op (zext C), 0\n```\n\nThis change adds the necessary guard. It checks if the instruction is a shift, if the target type is `i1`, and if the shift amount is not a constant zero. If these conditions are met, it skips the transformation for that operand, preventing the miscompilation.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex d7afe2f426d3..ba889f9e9fda 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -2591,6 +2591,14 @@ bool VectorCombine::shrinkType(llvm::Instruction &I) {\n       !match(&I, m_LShr(m_ZExt(m_Value(ZExted)), m_Value(OtherOperand))))\n     return false;\n \n+  auto *SmallTy = cast<FixedVectorType>(cast<ZExtInst>(I.getOperand(I.getOperand(0) == OtherOperand ? 1 : 0))->getSrcTy());\n+  // If we are shrinking to a 1-bit type, we can't sink the zext through\n+  // a shift operation unless the shift amount is known to be zero. A\n+  // non-zero shift of a 1-bit integer is poison.\n+  if (I.getOpcode() == Instruction::LShr && SmallTy->getElementType()->isIntegerTy(1) &&\n+      !isa<ConstantAggregateZero>(OtherOperand))\n+    return false;\n+\n   Value *ZExtOperand = I.getOperand(I.getOperand(0) == OtherOperand ? 1 : 0);\n \n   auto *BigTy = cast<FixedVectorType>(I.getType());\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex d7afe2f426d3..86ee868caee0 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -2591,6 +2591,16 @@ bool VectorCombine::shrinkType(llvm::Instruction &I) {\n       !match(&I, m_LShr(m_ZExt(m_Value(ZExted)), m_Value(OtherOperand))))\n     return false;\n \n+  // If we are shrinking to a 1-bit type, we can't sink the zext through\n+  // a shift operation unless the shift amount is known to be zero. A\n+  // non-zero shift of a 1-bit integer is poison.\n+  if (I.getOpcode() == Instruction::LShr) {\n+    auto *ZExt = cast<ZExtInst>(I.getOperand(I.getOperand(0) == OtherOperand ? 1 : 0));\n+    if (ZExt->getSrcTy()->getScalarType()->isIntegerTy(1) &&\n+        !isa<ConstantAggregateZero>(OtherOperand))\n+      return false;\n+  }\n+\n   Value *ZExtOperand = I.getOperand(I.getOperand(0) == OtherOperand ? 1 : 0);\n \n   auto *BigTy = cast<FixedVectorType>(I.getType());\n"
+  ]
+}

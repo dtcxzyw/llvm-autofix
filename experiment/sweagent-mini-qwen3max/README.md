@@ -1,0 +1,1 @@
+We noticed that qwen3max may access some untended files and leak author's information. To avoid this, we did post-process on the trajectory files to avoid such issues. For those cases affecting the final results, we re-ran them. We will propose a more robust solution to avoid such issues in the future.

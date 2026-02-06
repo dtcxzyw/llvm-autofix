@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "150338",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/150338-gpt5-11272339.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Utils/Local.cpp b/llvm/lib/Transforms/Utils/Local.cpp\nindex babd7f6b3a05..65948c7a4411 100644\n--- a/llvm/lib/Transforms/Utils/Local.cpp\n+++ b/llvm/lib/Transforms/Utils/Local.cpp\n@@ -482,8 +482,12 @@ bool llvm::wouldInstructionBeTriviallyDead(const Instruction *I,\n \n     if (II->isLifetimeStartOrEnd()) {\n       auto *Arg = II->getArgOperand(1);\n-      // If the only uses of the alloca are lifetime intrinsics, then the\n-      // intrinsics are dead.\n+      // If the only uses of the pointer are lifetime intrinsics, then the\n+      // intrinsics are dead. Some Values (e.g. poison) do not maintain a\n+      // materialized use-list; in that case, the only known user here is this\n+      // intrinsic, so treat it as dead.\n+      if (!Arg->hasUseList())\n+        return true;\n       return llvm::all_of(Arg->uses(), [](Use &Use) {\n         return isa<LifetimeIntrinsic>(Use.getUser());\n       });\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 37993,
+  "output_tokens": 3219,
+  "cached_tokens": 19584,
+  "total_tokens": 41212,
+  "chat_rounds": 6,
+  "total_time_sec": 93.53749513626099,
+  "trans_point": [
+    "llvm/include/llvm/IR/Value.h",
+    "llvm::Value::materialized_use_begin",
+    357
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/Local.cpp",
+      486,
+      491
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs inside InstCombine when checking whether an instruction is trivially dead. Specifically, Value::materialized_use_begin() asserts that hasUseList() is true, but it's being called on a Value that does not maintain a use-list (notably PoisonValue). This happens during analysis of lifetime intrinsics.\n\n2. Analyzing opt's Log:\nThe log shows InstCombine visiting the alloca, then store to %arg, then store to poison. It replaces the alloca with ptr poison and erases the alloca. Immediately after, the pass calls isInstructionTriviallyDead() on subsequent instructions, which triggers wouldInstructionBeTriviallyDead(). That function enters the lifetime intrinsic case and tries to iterate over uses of the pointer argument via Arg->uses(). The backtrace matches Local.cpp:487, which is precisely the lifetime case iterating uses. The crash happens at Value::uses() because the Value (poison) lacks a materialized use-list.\n\n3. Root Cause Analysis:\nwouldInstructionBeTriviallyDead() assumes that the pointer operand to llvm.lifetime.start/end has a materialized use list and iterates Arg->uses() to check if all users are LifetimeIntrinsic. This assumption is false for PoisonValue (and potentially other Values that don't maintain use lists). InstCombine replaced the alloca with ptr poison, making the lifetime.end's pointer argument be poison. Subsequently, wouldInstructionBeTriviallyDead() calls Arg->uses(), which asserts because hasUseList() is false on PoisonValue.\n\n4. Proposed Edit Point(s):\nModify wouldInstructionBeTriviallyDead() lifetime-intrinsic branch to guard against Values without a use-list. If the pointer argument doesn't have a use-list, then its users aren't tracked; in this context, the only known user is the current lifetime intrinsic. That satisfies the \"only uses are lifetime intrinsics\" condition, so we can conservatively treat the intrinsic as dead. Concretely:\n\n- File: llvm/lib/Transforms/Utils/Local.cpp\n- Lines: 486-491\n- Change the block under II->isLifetimeStartOrEnd() to first check Arg->hasUseList(). If false, return true; otherwise iterate Arg->uses() as before.\n\nEdit:\n\nReplace:\n  if (II->isLifetimeStartOrEnd()) {\n    auto *Arg = II->getArgOperand(1);\n    // If the only uses of the alloca are lifetime intrinsics, then the\n    // intrinsics are dead.\n    return llvm::all_of(Arg->uses(), [](Use &Use) {\n      return isa<LifetimeIntrinsic>(Use.getUser());\n    });\n  }\n\nWith:\n  if (II->isLifetimeStartOrEnd()) {\n    auto *Arg = II->getArgOperand(1);\n    // If the only uses of the pointer are lifetime intrinsics, then the\n    // intrinsics are dead. Some Values (e.g. poison) do not maintain a\n    // materialized use-list; in that case, the only known user here is this\n    // intrinsic, so treat it as dead.\n    if (!Arg->hasUseList())\n      return true;\n    return llvm::all_of(Arg->uses(), [](Use &Use) {\n      return isa<LifetimeIntrinsic>(Use.getUser());\n    });\n  }\n\n5. Conclusion:\nBy guarding the uses() iteration with hasUseList() and returning true when the pointer operand lacks a use-list, we avoid the assertion on Values like PoisonValue and correctly treat lifetime intrinsics as dead when their pointer operand has no tracked non-lifetime users. This resolves the crash in InstCombine for the provided reproducer without affecting correctness of dead-code elimination decisions.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/Local.cpp b/llvm/lib/Transforms/Utils/Local.cpp\nindex babd7f6b3a05..65948c7a4411 100644\n--- a/llvm/lib/Transforms/Utils/Local.cpp\n+++ b/llvm/lib/Transforms/Utils/Local.cpp\n@@ -482,8 +482,12 @@ bool llvm::wouldInstructionBeTriviallyDead(const Instruction *I,\n \n     if (II->isLifetimeStartOrEnd()) {\n       auto *Arg = II->getArgOperand(1);\n-      // If the only uses of the alloca are lifetime intrinsics, then the\n-      // intrinsics are dead.\n+      // If the only uses of the pointer are lifetime intrinsics, then the\n+      // intrinsics are dead. Some Values (e.g. poison) do not maintain a\n+      // materialized use-list; in that case, the only known user here is this\n+      // intrinsic, so treat it as dead.\n+      if (!Arg->hasUseList())\n+        return true;\n       return llvm::all_of(Arg->uses(), [](Use &Use) {\n         return isa<LifetimeIntrinsic>(Use.getUser());\n       });\n"
+  ]
+}

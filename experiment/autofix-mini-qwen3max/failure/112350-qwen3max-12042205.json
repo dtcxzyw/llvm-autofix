@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "112350",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/112350-qwen3max-12042205.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ValueError",
+  "errmsg": "Line numbers 8517 and 8536 are out of bounds for file /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 804, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 289, in patch_and_fix\n    code=extract_code_snippet(\n         ^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 240, in extract_code_snippet\n    raise ValueError(\nValueError: Line numbers 8517 and 8536 are out of bounds for file /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n",
+  "input_tokens": 410986,
+  "output_tokens": 1931,
+  "cached_tokens": 249984,
+  "total_tokens": 412917,
+  "chat_rounds": 32,
+  "total_time_sec": 608.2032091617584,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+    "llvm::InstCombinerImpl::visitSelectInst",
+    4158
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+      8517,
+      8536
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\n\nThe issue occurs when InstCombine transforms a select instruction with two icmp operands into an xor operation. The transformation assumes that if `isKnownInversion(FalseVal, TrueVal)` returns true, then `select Cond, !X, X` can be safely replaced with `xor Cond, X`. However, this transformation is incorrect when one of the icmp instructions has the 'samesign' attribute and the other doesn't.\n\nIn the reproducer:\n- `%cmp1 = icmp ult i64 %x, 11` (no samesign attribute)\n- `%cmp2 = icmp samesign ugt i64 %x, 10` (has samesign attribute)\n\nWhen `%x = 0x8000000000000000` (INT64_MIN), `%cmp2` becomes poison because the samesign attribute requires both operands to have the same sign, but comparing INT64_MIN with 10 violates this condition. However, `%cmp1` evaluates to false (0) normally.\n\nThe original select returns 0 when `%cond = true`, but the transformed xor returns poison because it directly uses the poison value from `%cmp2`.\n\n2. Analyzing `opt`'s Log:\n\nThe log shows that InstCombine identifies the select instruction and applies the transformation at line 4158 in InstCombineSelect.cpp: `return BinaryOperator::CreateXor(CondVal, FalseVal);`. This happens because `isKnownInversion(FalseVal, TrueVal)` returns true, incorrectly assuming these icmp instructions are logical inverses.\n\n3. Root Cause Analysis:\n\nThe root cause is in the `isKnownInversion` function (lines 8517-8536 in InstCombineSelect.cpp). This function only checks if the predicates are inverses and if the constant ranges match, but it completely ignores the 'samesign' attribute of icmp instructions.\n\nSpecifically:\n- `%cmp1` uses `ICMP_ULT` with RHS=11\n- `%cmp2` uses `ICMP_UGT` with RHS=10 and hasSameSign()=true\n\nThe function correctly identifies that `ULT` and `UGT` with constants 11 and 10 are inverses in terms of their constant ranges (`[0,11)` vs `[11,2^64)`), but it fails to account for the fact that `%cmp2` can produce poison values due to the samesign attribute, while `%cmp1` cannot.\n\nTwo icmp instructions with different samesign attributes cannot be considered true logical inverses because they have different poison semantics.\n\n4. Proposed Edit Point(s):\n\nThe fix is to modify the `isKnownInversion` function to check that both icmp instructions have the same samesign attribute before considering them as inverses. If one has samesign and the other doesn't, they cannot be treated as logical inverses due to their different poison behavior.\n\nEdit point: llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp, lines 8517-8536 (the entire isKnownInversion function)\n\nThe function should be updated to include a check that both icmp instructions either have samesign or both don't have samesign.\n\n5. Conclusion:\n\nBy adding a check for matching samesign attributes in `isKnownInversion`, we prevent the incorrect transformation of select instructions where the two icmp operands have different poison semantics. This ensures that the transformation only applies when the two icmp instructions are truly equivalent in all aspects, including their poison behavior.",
+  "test_traj": []
+}

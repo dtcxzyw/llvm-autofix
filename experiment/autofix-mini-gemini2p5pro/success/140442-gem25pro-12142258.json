@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "140442",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/140442-gem25pro-12142258.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Utils/LoopPeel.cpp b/llvm/lib/Transforms/Utils/LoopPeel.cpp\nindex c5c637ab6e20..a3786e06ec08 100644\n--- a/llvm/lib/Transforms/Utils/LoopPeel.cpp\n+++ b/llvm/lib/Transforms/Utils/LoopPeel.cpp\n@@ -1077,8 +1077,14 @@ bool llvm::peelLoop(Loop *L, unsigned PeelCount, bool PeelLast, LoopInfo *LI,\n     // Exit:\n     // ...\n     BasicBlock *Exit = L->getExitBlock();\n-    for (PHINode &P : Exit->phis())\n-      ExitValues[&P] = P.getIncomingValueForBlock(Latch);\n+    for (PHINode &P : Exit->phis()) {\n+      Value *E = P.getIncomingValueForBlock(Latch);\n+      if (isa<Constant>(E)) {\n+        P.replaceAllUsesWith(E);\n+        continue;\n+      }\n+      ExitValues[&P] = E;\n+    }\n \n     InsertTop = SplitEdge(Latch, Exit, &DT, LI);\n     InsertBot = SplitBlock(InsertTop, InsertTop->getTerminator(), &DT, LI);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 53479,
+  "output_tokens": 3777,
+  "cached_tokens": 32512,
+  "total_tokens": 63529,
+  "chat_rounds": 8,
+  "total_time_sec": 149.2991602420807,
+  "trans_point": [
+    "llvm/lib/IR/Value.cpp",
+    "llvm::Value::doRAUW",
+    516
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/LoopPeel.cpp",
+      1080,
+      1080
+    ]
+  ],
+  "reason_thou": "The root cause is that `peelLoop` tries to find a peeled-iteration equivalent for a loop-exit value that has been constant-folded. The fix is to not consider constant values as 'exit values' that need remapping in the first place.\n\n1. **Understanding the Issue**: A `replaceAllUsesWith(nullptr)` call inside `peelLoop` causes a crash.\n\n2. **Analyzing `opt`'s Log**: The crash happens when peeling the outer loop, after the inner loop has been unrolled.\n\n3. **Root Cause Analysis**: The inner loop's unrolling leads to constant folding of a value (`%1`). This constant value is still considered a loop-exit value by `peelLoop`. However, since it's a constant, it's not cloned during peeling and thus not present in the `VMap`. The lookup for it returns `nullptr`, leading to the crash.\n\n4. **Proposed Edit Point(s)**: The fix is to modify the loop that populates `ExitValues` in `peelLoop` to skip over constant values. This is a simple and direct fix to the identified problem.\n\nFile: `llvm/lib/Transforms/Utils/LoopPeel.cpp`\n```cpp\n// Original code at line 1080:\nif (L->contains(I->getParent()))\n\n// Proposed change:\nif (L->contains(I->getParent()) && !isa<Constant>(I))\n```\nThis change ensures that only non-constant instructions defined within the loop are added to the `ExitValues` map, preventing the crash.\n\n5. **Conclusion**: This small change correctly handles cases where loop-exit values are constants, making the `peelLoop` utility more robust, especially after other optimizations like constant folding have run.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/LoopPeel.cpp b/llvm/lib/Transforms/Utils/LoopPeel.cpp\nindex c5c637ab6e20..a3786e06ec08 100644\n--- a/llvm/lib/Transforms/Utils/LoopPeel.cpp\n+++ b/llvm/lib/Transforms/Utils/LoopPeel.cpp\n@@ -1077,8 +1077,14 @@ bool llvm::peelLoop(Loop *L, unsigned PeelCount, bool PeelLast, LoopInfo *LI,\n     // Exit:\n     // ...\n     BasicBlock *Exit = L->getExitBlock();\n-    for (PHINode &P : Exit->phis())\n-      ExitValues[&P] = P.getIncomingValueForBlock(Latch);\n+    for (PHINode &P : Exit->phis()) {\n+      Value *E = P.getIncomingValueForBlock(Latch);\n+      if (isa<Constant>(E)) {\n+        P.replaceAllUsesWith(E);\n+        continue;\n+      }\n+      ExitValues[&P] = E;\n+    }\n \n     InsertTop = SplitEdge(Latch, Exit, &DT, LI);\n     InsertBot = SplitBlock(InsertTop, InsertTop->getTerminator(), &DT, LI);\n"
+  ]
+}

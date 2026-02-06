@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "155183",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/155183-qwen3max-12061123.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex dad0d1e9ef55..e23d90c96574 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -21065,9 +21065,13 @@ bool BoUpSLP::BlockScheduling::extendSchedulingRegion(\n          \"lower end.\");\n   assert(I->getParent() == ScheduleEnd->getParent() &&\n          \"Instruction is in wrong basic block.\");\n-  initScheduleData(ScheduleEnd, I->getNextNode(), LastLoadStoreInRegion,\n+  Instruction *NextI = I->getNextNode();\n+  // Don't try to extend scheduling region beyond terminators.\n+  if (!NextI)\n+    return false;\n+  initScheduleData(ScheduleEnd, NextI, LastLoadStoreInRegion,\n                    nullptr);\n-  ScheduleEnd = I->getNextNode();\n+  ScheduleEnd = NextI;\n   assert(ScheduleEnd && \"tried to vectorize a terminator?\");\n   LLVM_DEBUG(dbgs() << \"SLP:  extend schedule region end to \" << *I << \"\\n\");\n   return true;\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 1043728,
+  "output_tokens": 4231,
+  "cached_tokens": 532480,
+  "total_tokens": 1047959,
+  "chat_rounds": 46,
+  "total_time_sec": 365.51452827453613,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::BlockScheduling::extendSchedulingRegion",
+    21071
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      21070,
+      21071
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The SLP vectorizer is crashing with an assertion failure in `extendSchedulingRegion` at line 21071: `assert(ScheduleEnd && \"tried to vectorize a terminator?\")`. This happens when trying to extend the scheduling region for an instruction that appears to be at the end of a basic block, where `I->getNextNode()` returns null (indicating a terminator instruction).\n\n2. Analyzing `opt`'s Log: The debug log shows that the SLP vectorizer is attempting to vectorize a bundle containing PHI nodes from block `bb4`. The PHI nodes have incoming values from block `bb2`, including `%add3 = add i32 %invoke, 0`. When processing this add instruction, the code tries to extend the scheduling region and calls `I->getNextNode()`, which returns the branch instruction (`br label %bb4`) that terminates block `bb2`. However, the branch instruction is a terminator, and when the scheduling region extension logic processes it, `I->getNextNode()` on the branch returns null.\n\n3. Root Cause Analysis: The issue occurs because the SLP vectorizer's scheduling region extension logic doesn't properly handle the case where an instruction being processed is the last non-terminator instruction in a basic block. When `extendSchedulingRegion` is called with the add instruction `%add3` from block `bb2`, it correctly identifies that the scheduling region needs to be extended to include this instruction. However, when it calls `initScheduleData(ScheduleEnd, I->getNextNode(), ...)` where `I` is the add instruction, `I->getNextNode()` returns the branch terminator. The `initScheduleData` function iterates from `FromI` to `ToI`, but since `ToI` is the branch instruction, the loop includes the branch. Later, when `ScheduleEnd` is set to `I->getNextNode()` (which is the branch), and then if another extension is needed, calling `getNextNode()` on the branch returns null, triggering the assertion.\n\nHowever, looking more carefully at the specific crash scenario: the debug log shows \"SLP: initialize schedule region to   %add = add i32 0, 0\" which is in block `bb`. This add instruction is followed by an `invoke` instruction, which is also a terminator-like instruction (it can transfer control to two different destinations). The `invoke` instruction's `getNextNode()` would be null within its basic block, causing the assertion to fail.\n\nThe real issue is that the SLP vectorizer should not attempt to include terminator instructions (including `invoke`) in scheduling regions, as they cannot be reordered or vectorized like regular instructions.\n\n4. Proposed Edit Point(s): The fix should be to check if `I->getNextNode()` is null before setting `ScheduleEnd` and asserting. If it is null, we should not extend the scheduling region beyond the current instruction, as terminators cannot be scheduled.\n\n5. Conclusion: The assertion failure occurs because the SLP vectorizer attempts to extend the scheduling region to include instructions that are followed by terminators, where `getNextNode()` returns null. The fix is to add a check to ensure we don't try to schedule terminators by verifying that `I->getNextNode()` is not null before proceeding with the scheduling region extension.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex dad0d1e9ef55..e23d90c96574 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -21065,9 +21065,13 @@ bool BoUpSLP::BlockScheduling::extendSchedulingRegion(\n          \"lower end.\");\n   assert(I->getParent() == ScheduleEnd->getParent() &&\n          \"Instruction is in wrong basic block.\");\n-  initScheduleData(ScheduleEnd, I->getNextNode(), LastLoadStoreInRegion,\n+  Instruction *NextI = I->getNextNode();\n+  // Don't try to extend scheduling region beyond terminators.\n+  if (!NextI)\n+    return false;\n+  initScheduleData(ScheduleEnd, NextI, LastLoadStoreInRegion,\n                    nullptr);\n-  ScheduleEnd = I->getNextNode();\n+  ScheduleEnd = NextI;\n   assert(ScheduleEnd && \"tried to vectorize a terminator?\");\n   LLVM_DEBUG(dbgs() << \"SLP:  extend schedule region end to \" << *I << \"\\n\");\n   return true;\n"
+  ]
+}

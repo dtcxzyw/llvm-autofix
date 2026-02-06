@@ -1,0 +1,39 @@
+{
+  "command": {
+    "issue": "109333",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/109333-gem25pro-12112246.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 618964,
+  "output_tokens": 22693,
+  "cached_tokens": 477429,
+  "total_tokens": 674521,
+  "chat_rounds": 51,
+  "total_time_sec": 689.7122309207916,
+  "trans_point": [
+    "llvm/lib/IR/Verifier.cpp",
+    "llvm::VerifierPass::run",
+    7591
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp",
+      189,
+      189
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe verifier crashes because the `loop-unroll` pass, via `SCEVExpander`, generates malformed LLVM IR. When creating code to compute a symbolic trip count for `loop.2`, it needs to use a value (`%load`) from an outer loop (`loop.1`). It correctly creates an LCSSA PHI for this (`%load.lcssa`). However, it then inserts the new computational instructions (like a `shl`) at the very beginning of the basic block, *before* all PHI nodes, including the one it depends on. This violates the IR rule that all PHIs must precede non-PHI instructions in a block, leading to a dominance error.\n\n### 2. Analyzing `opt`'s Log\n\nThe log clearly shows SCEV computing a trip count for `loop.2` that depends on `%load`. The subsequent crash in the verifier on an instruction using `%load.lcssa` pinpoints the problem to the code generation phase for this trip count, which is handled by `SCEVExpander`.\n\n### 3. Root Cause Analysis\n\nThe root of the problem is in `SCEVExpander::GetOptimalInsertionPointForCastOf`. This function uses `BB->getFirstInsertionPt()` to find a place to insert new instructions. This method returns an iterator to the first non-PHI instruction, which is the *start* of the block if it only contains PHIs. When `SCEVExpander` later adds non-PHI instructions at this point, they end up before the PHIs, corrupting the IR. The correct method to use is `BB->getFirstNonPHI()`, which returns an iterator to the position *after* all PHI nodes, which is the valid insertion point for new computational instructions.\n\n### 4. Proposed Edit Point(s)\n\nTo fix this, the incorrect method call must be replaced.\n\n*   **File**: `llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp`\n*   **Line**: 189\n*   **Change**: Replace `.getFirstInsertionPt()` with `.getFirstNonPHI()`.\n\n```cpp\n// Before:\n      .getFirstInsertionPt();\n\n// After:\n      .getFirstNonPHI();\n```\n\n### 5. Conclusion\n\nThis change ensures that `SCEVExpander` always inserts new non-PHI instructions at a valid point in the basic block, after any existing PHI nodes. This prevents the generation of malformed IR and resolves the verifier crash, making loop unrolling with symbolic, cross-loop dependencies more robust.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\nindex 0927a3015818..1d4696c83143 100644\n--- a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n+++ b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n@@ -186,7 +186,7 @@ SCEVExpander::GetOptimalInsertionPointForCastOf(Value *V) const {\n   return Builder.GetInsertBlock()\n       ->getParent()\n       ->getEntryBlock()\n-      .getFirstInsertionPt();\n+      .getFirstNonPHI();\n }\n \n /// InsertNoopCastOfTo - Insert a cast of V to the specified type,\n",
+    "diff --git a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\nindex 0927a3015818..446d809b2684 100644\n--- a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n+++ b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n@@ -186,7 +186,7 @@ SCEVExpander::GetOptimalInsertionPointForCastOf(Value *V) const {\n   return Builder.GetInsertBlock()\n       ->getParent()\n       ->getEntryBlock()\n-      .getFirstInsertionPt();\n+      .getFirstNonPHIOrEnd();\n }\n \n /// InsertNoopCastOfTo - Insert a cast of V to the specified type,\n",
+    "diff --git a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\nindex 0927a3015818..2bd372622100 100644\n--- a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n+++ b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n@@ -186,7 +186,7 @@ SCEVExpander::GetOptimalInsertionPointForCastOf(Value *V) const {\n   return Builder.GetInsertBlock()\n       ->getParent()\n       ->getEntryBlock()\n-      .getFirstInsertionPt();\n+      .getFirstNonPHI()->getIterator();\n }\n \n /// InsertNoopCastOfTo - Insert a cast of V to the specified type,\n",
+    "diff --git a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\nindex 0927a3015818..17dcb048620a 100644\n--- a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n+++ b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n@@ -186,7 +186,8 @@ SCEVExpander::GetOptimalInsertionPointForCastOf(Value *V) const {\n   return Builder.GetInsertBlock()\n       ->getParent()\n       ->getEntryBlock()\n-      .getFirstInsertionPt();\n+      .getFirstNonPHI()\n+      ->getIterator();\n }\n \n /// InsertNoopCastOfTo - Insert a cast of V to the specified type,\n",
+    "diff --git a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\nindex 0927a3015818..2bd372622100 100644\n--- a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n+++ b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n@@ -186,7 +186,7 @@ SCEVExpander::GetOptimalInsertionPointForCastOf(Value *V) const {\n   return Builder.GetInsertBlock()\n       ->getParent()\n       ->getEntryBlock()\n-      .getFirstInsertionPt();\n+      .getFirstNonPHI()->getIterator();\n }\n \n /// InsertNoopCastOfTo - Insert a cast of V to the specified type,\n"
+  ]
+}

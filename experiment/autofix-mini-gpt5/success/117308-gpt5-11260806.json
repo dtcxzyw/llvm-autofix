@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "117308",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/117308-gpt5-11260806.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex 56bfc8432cbb..eec21526983f 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -122,6 +122,13 @@ static void addLocAccess(MemoryEffects &ME, const MemoryLocation &Loc,\n     return;\n \n   const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n+  // getUnderlyingObjectAggressive may return null (e.g., due to poison/undef\n+  // or cyclic PHIs). Conservatively treat as non-identified/unknown.\n+  if (!UO) {\n+    ME |= MemoryEffects::argMemOnly(MR);\n+    ME |= MemoryEffects(IRMemLocation::Other, MR);\n+    return;\n+  }\n   if (isa<AllocaInst>(UO))\n     return;\n   if (isa<Argument>(UO)) {\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 25349,
+  "output_tokens": 1413,
+  "cached_tokens": 10880,
+  "total_tokens": 26762,
+  "chat_rounds": 4,
+  "total_time_sec": 66.4759910106659,
+  "trans_point": [
+    "llvm/lib/Transforms/IPO/FunctionAttrs.cpp",
+    "addLocAccess",
+    125
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/FunctionAttrs.cpp",
+      124,
+      136
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs in addLocAccess() when calling isa<AllocaInst>(UO) on a null pointer. The underlying object UO is obtained via getUnderlyingObjectAggressive(Loc.Ptr), which can return null for certain poison/undef/phi-cycle patterns. The code assumes UO is always non-null, triggering an assertion in isa<> when it's actually null.\n\n2. Analyzing opt's Log:\nThe first transformation point is addLocAccess(). The stack trace shows the assertion failure at isa<AllocaInst>(UO) in FunctionAttrs.cpp:125. This indicates that addLocAccess() did not account for a null UO. The reproducer uses poison and cyclic phis leading to a situation where getUnderlyingObjectAggressive returns null, as hinted by the comment in the IR about a null-returning bug.\n\n3. Root Cause Analysis:\naddLocAccess() relies on getUnderlyingObjectAggressive() to categorize memory effects into local (alloca), argument (Argument or non-identified objects potentially being arguments), and other. However, it does not handle the case where getUnderlyingObjectAggressive returns null. With UO == nullptr, the subsequent isa<AllocaInst>(UO) and isIdentifiedObject(UO) calls are invalid and hit assertions. Therefore, the root cause is missing a null check before using UO.\n\n4. Proposed Edit Points(s):\nInsert a null check immediately after obtaining UO in addLocAccess(). Treat a null underlying object as a non-identified object: we cannot prove it is local or a function Argument, so conservatively mark argmem-only (like the existing non-identified path) and 'other' as accessed. Concretely, edit lines 124-136 to:\n\n--- Begin Patch ---\nconst Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n// getUnderlyingObjectAggressive may return null (e.g., due to poison/undef or\n// complex cycles). Conservatively treat as non-identified/unknown.\nif (!UO) {\n  ME |= MemoryEffects::argMemOnly(MR);\n  ME |= MemoryEffects(IRMemLocation::Other, MR);\n  return;\n}\nif (isa<AllocaInst>(UO))\n  return;\nif (isa<Argument>(UO)) {\n  ME |= MemoryEffects::argMemOnly(MR);\n  return;\n}\n\n// If it's not an identified object, it might be an argument.\nif (!isIdentifiedObject(UO))\n  ME |= MemoryEffects::argMemOnly(MR);\nME |= MemoryEffects(IRMemLocation::Other, MR);\n--- End Patch ---\n\nThis preserves the original behavior while adding a safe handling path for null UO.\n\n5. Conclusion:\nThe crash stems from assuming getUnderlyingObjectAggressive never returns null. By adding a null check in addLocAccess() and conservatively classifying memory effects when UO is null, we avoid the assertion and maintain correct, conservative attribute inference. This fix prevents the abort in function-attrs on the provided reproducer and similar IR patterns.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex 56bfc8432cbb..eec21526983f 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -122,6 +122,13 @@ static void addLocAccess(MemoryEffects &ME, const MemoryLocation &Loc,\n     return;\n \n   const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n+  // getUnderlyingObjectAggressive may return null (e.g., due to poison/undef\n+  // or cyclic PHIs). Conservatively treat as non-identified/unknown.\n+  if (!UO) {\n+    ME |= MemoryEffects::argMemOnly(MR);\n+    ME |= MemoryEffects(IRMemLocation::Other, MR);\n+    return;\n+  }\n   if (isa<AllocaInst>(UO))\n     return;\n   if (isa<Argument>(UO)) {\n"
+  ]
+}

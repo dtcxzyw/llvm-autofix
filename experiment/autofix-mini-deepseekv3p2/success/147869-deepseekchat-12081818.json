@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "147869",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/147869-deepseekchat-12081818.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Scalar/LoopSimplifyCFG.cpp b/llvm/lib/Transforms/Scalar/LoopSimplifyCFG.cpp\nindex 221094f170ac..3e5012fd5ad4 100644\n--- a/llvm/lib/Transforms/Scalar/LoopSimplifyCFG.cpp\n+++ b/llvm/lib/Transforms/Scalar/LoopSimplifyCFG.cpp\n@@ -597,6 +597,10 @@ public:\n     if (!DeadLoopBlocks.empty())\n       SE.forgetBlockAndLoopDispositions();\n \n+    // Dead exit handling requires a preheader to create the dummy switch.\n+    if (!DeadExitBlocks.empty() && !L.getLoopPreheader())\n+      return false;\n+\n     // Make the actual transforms.\n     handleDeadExits();\n     foldTerminators();\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 356502,
+  "output_tokens": 6548,
+  "cached_tokens": 325696,
+  "total_tokens": 363050,
+  "chat_rounds": 32,
+  "total_time_sec": 329.77793169021606,
+  "trans_point": [
+    "llvm/include/llvm/IR/BasicBlock.h",
+    "llvm::BasicBlock::getTerminator",
+    234
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/LoopSimplifyCFG.cpp",
+      590,
+      590
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The crash occurs in `ConstantTerminatorFoldingImpl::handleDeadExits()` when trying to split a non-existent loop preheader. The loop in the reproducer has an `indirectbr` as the function entry, which jumps directly to the loop header or an exit block, so there is no dedicated preheader block. The function assumes a preheader exists and attempts to split it, causing a null pointer dereference.\n\n2. **Analyzing `opt`'s Log**: The debug log shows that dead exit block `C.loopexit` is identified, and the transformation proceeds to constant-fold terminators. The log indicates \"After terminator constant-folding, the loop will not be destroyed\" and \"Constant-folding 2 terminators in loop A\". However, it doesn't warn about the missing preheader.\n\n3. **Root Cause Analysis**: The `ConstantTerminatorFoldingImpl::run()` method calls `handleDeadExits()` when `DeadExitBlocks` is not empty (line 601). The `handleDeadExits()` function assumes `L.getLoopPreheader()` returns a valid block (line 351) and attempts to split it. When the preheader is null, the call to `Preheader->getTerminator()` crashes. The transformation should be skipped when dead exits exist but there is no preheader to use for the dummy switch construction.\n\n4. **Proposed Edit Point(s)**: Add a check in `run()` to skip the transformation when dead exits exist but there is no preheader. The edit should be placed after the existing LCSSA check (lines 581-587) and before the call to `handleDeadExits()` (line 601). Specifically, add:\n```cpp\n   // Dead exit handling requires a preheader to create the dummy switch.\n   if (!DeadExitBlocks.empty() && !L.getLoopPreheader())\n     return false;\n```\nThis ensures we only proceed with dead exit handling when a preheader is available.\n\n5. **Conclusion**: The fix prevents the null pointer dereference by bailing out early when dead exits need processing but the loop lacks a preheader. This maintains safety while preserving the transformation for loops with a preheader. The change is minimal and aligns with existing checks for LCSSA form.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Scalar/LoopSimplifyCFG.cpp b/llvm/lib/Transforms/Scalar/LoopSimplifyCFG.cpp\nindex 221094f170ac..3e5012fd5ad4 100644\n--- a/llvm/lib/Transforms/Scalar/LoopSimplifyCFG.cpp\n+++ b/llvm/lib/Transforms/Scalar/LoopSimplifyCFG.cpp\n@@ -597,6 +597,10 @@ public:\n     if (!DeadLoopBlocks.empty())\n       SE.forgetBlockAndLoopDispositions();\n \n+    // Dead exit handling requires a preheader to create the dummy switch.\n+    if (!DeadExitBlocks.empty() && !L.getLoopPreheader())\n+      return false;\n+\n     // Make the actual transforms.\n     handleDeadExits();\n     foldTerminators();\n"
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "111874",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/111874-gpt5-11251725.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 05dc58a42249..a6153fbdfdc2 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -7230,7 +7230,10 @@ LoopVectorizationPlanner::precomputeCosts(VPlan &Plan, ElementCount VF,\n           RedPhi->users(), [](User *U) { return isa<SelectInst>(U); }));\n       assert(!CostCtx.SkipCostComputation.contains(Select) &&\n              \"reduction op visited multiple times\");\n-      CostCtx.SkipCostComputation.insert(Select);\n+      // Do not mark the select as skipped: VPlan codegen may remove it and we\n+      // want planContainsAdditionalSimplifications() to recognize its absence\n+      // as a legitimate simplification justifying VF differences between the\n+      // legacy and VPlan-based cost models.\n       auto ReductionCost = CostCtx.getLegacyCost(Select, VF);\n       LLVM_DEBUG(dbgs() << \"Cost of \" << ReductionCost << \" for VF \" << VF\n                         << \":\\n any-of reduction \" << *Select << \"\\n\");\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 128833,
+  "output_tokens": 6426,
+  "cached_tokens": 89472,
+  "total_tokens": 135259,
+  "chat_rounds": 14,
+  "total_time_sec": 153.42595148086548,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+    "llvm::LoopVectorizationPlanner::computeBestVF",
+    7435
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+      7227,
+      7234
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe assertion in LoopVectorizationPlanner::computeBestVF() fires because the VPlan-based cost model and the legacy cost model select different vectorization factors (VFs), and the fallback justification (planContainsAdditionalSimplifications) returns false. This means the code believes there were no extra simplifications in the chosen VPlan to justify the VF mismatch, so it asserts. In the reproducer, the loop models an AnyOf reduction that the VPlan codegen optimizes by removing a select instruction used in the legacy cost model's pattern recognition/costing.\n\n2. Analyzing opt's Log:\nThe crash occurs immediately at the assertion verifying cost model agreement. No other transformations are performed beforehand. The disagreement is between BestFactor.Width (from VPlan-based costing) and LegacyVF.Width (from selectVectorizationFactor using the legacy cost model). The assertion condition depends on planContainsAdditionalSimplifications(BestPlan, CostCtx, OrigLoop). For AnyOf reductions, the select instruction is removed in VPlan codegen, but earlier in precomputeCosts the select is both costed and marked as skipped (SkipCostComputation). Because it is skipped, planContainsAdditionalSimplifications does not consider its absence a simplification.\n\n3. Root Cause Analysis:\nIn precomputeCosts (lines ~7212\u20137234), for AnyOf reductions, the legacy cost model pre-costs the select instruction and then inserts it into CostCtx.SkipCostComputation. Later, planContainsAdditionalSimplifications determines whether missing IR instructions correspond to additional simplifications only if they are not skipped. By marking the select as skipped, the mechanism that should recognize the eliminated select as an additional simplification is disabled. Consequently, the assertion sees a VF mismatch without permitted justification and triggers. This is a logic interaction specific to AnyOf reduction handling.\n\nTherefore, the root cause is: The AnyOf reduction select instruction, which is intentionally removed by VPlan codegen, is incorrectly added to SkipCostComputation, preventing planContainsAdditionalSimplifications from recognizing its removal as a valid simplification to justify VF divergence.\n\n4. Proposed Edit Point(s):\nEdit lines 7227\u20137234 in llvm/lib/Transforms/Vectorize/LoopVectorize.cpp inside the AnyOf reduction handling block. Remove the insertion of the select into CostCtx.SkipCostComputation and add a clarifying comment.\nOriginal snippet:\n  assert(!CostCtx.SkipCostComputation.contains(Select) && \"reduction op visited multiple times\");\n  CostCtx.SkipCostComputation.insert(Select);\n  auto ReductionCost = CostCtx.getLegacyCost(Select, VF);\n\nProposed change:\n  assert(!CostCtx.SkipCostComputation.contains(Select) && \"reduction op visited multiple times\");\n  // Do NOT mark the AnyOf select as skipped: VPlan codegen may remove it.\n  // Leaving it unskipped allows planContainsAdditionalSimplifications() to\n  // treat its absence as a simplification, avoiding false assertion failures\n  // when the VPlan-based and legacy cost models legitimately diverge.\n  auto ReductionCost = CostCtx.getLegacyCost(Select, VF);\n\nThis preserves correct costing (the legacy cost of the select is still added once) and enables detection of its elimination as an additional simplification.\n\nWhy safe:\n- The select is not represented by a VPlan recipe when eliminated, so Plan.cost(VF, CostCtx) will not double-count it.\n- The second precomputeCosts call in computeBestVF uses a fresh CostCtx, so the cost is recomputed consistently.\n- The assertion's justification path now returns true when the select is absent, preventing the crash.\n\n5. Conclusion:\nBy not inserting the AnyOf select into SkipCostComputation, we allow planContainsAdditionalSimplifications to recognize its removal and justify VF discrepancies between the VPlan and legacy cost models. This resolves the assertion failure without altering underlying VF selection logic or cost semantics, and maintains correctness for other reduction kinds.\n",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 05dc58a42249..a6153fbdfdc2 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -7230,7 +7230,10 @@ LoopVectorizationPlanner::precomputeCosts(VPlan &Plan, ElementCount VF,\n           RedPhi->users(), [](User *U) { return isa<SelectInst>(U); }));\n       assert(!CostCtx.SkipCostComputation.contains(Select) &&\n              \"reduction op visited multiple times\");\n-      CostCtx.SkipCostComputation.insert(Select);\n+      // Do not mark the select as skipped: VPlan codegen may remove it and we\n+      // want planContainsAdditionalSimplifications() to recognize its absence\n+      // as a legitimate simplification justifying VF differences between the\n+      // legacy and VPlan-based cost models.\n       auto ReductionCost = CostCtx.getLegacyCost(Select, VF);\n       LLVM_DEBUG(dbgs() << \"Cost of \" << ReductionCost << \" for VF \" << VF\n                         << \":\\n any-of reduction \" << *Select << \"\\n\");\n"
+  ]
+}

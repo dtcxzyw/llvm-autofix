@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "142522",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/142522-gpt5-12070711.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\nindex 245d0c4f073d..38f6e8b94762 100644\n--- a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n+++ b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n@@ -8223,9 +8223,15 @@ static bool passingValueIsAlwaysUndefined(Value *V, Instruction *I, bool PtrValu\n       if (CB->isArgOperand(&Use)) {\n         unsigned ArgIdx = CB->getArgOperandNo(&Use);\n         // Passing null to a nonnnull+noundef argument is undefined.\n-        if (isa<ConstantPointerNull>(C) &&\n-            CB->paramHasNonNullAttr(ArgIdx, /*AllowUndefOrPoison=*/false))\n-          return !PtrValueMayBeModified;\n+        // Only query NonNull for scalar pointer-typed arguments; vector arguments\n+        // (e.g., <N x ptr>) are not handled by paramHasNonNullAttr and would\n+        // violate its precondition.\n+        if (isa<ConstantPointerNull>(C)) {\n+          Type *ArgTy = CB->getArgOperand(ArgIdx)->getType();\n+          if (ArgTy->isPointerTy() &&\n+              CB->paramHasNonNullAttr(ArgIdx, /*AllowUndefOrPoison=*/false))\n+            return !PtrValueMayBeModified;\n+        }\n         // Passing undef to a noundef argument is undefined.\n         if (isa<UndefValue>(C) && CB->isPassingUndefUB(ArgIdx))\n           return true;\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 34938,
+  "output_tokens": 1658,
+  "cached_tokens": 18048,
+  "total_tokens": 36596,
+  "chat_rounds": 5,
+  "total_time_sec": 77.6303973197937,
+  "trans_point": [
+    "llvm/lib/IR/Instructions.cpp",
+    "llvm::CallBase::paramHasNonNullAttr",
+    446
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/SimplifyCFG.cpp",
+      8223,
+      8229
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs due to an assertion failure inside CallBase::paramHasNonNullAttr, which requires the queried argument to be a pointer-typed operand. In the provided IR, a call is made with a <2 x ptr> argument (vector of pointers). SimplifyCFG's passingValueIsAlwaysUndefined calls paramHasNonNullAttr on the argument operand without ensuring it is a pointer type, thus violating the precondition when the operand is a vector of pointers.\n\n2. Analyzing opt's Log:\nThe stack trace shows the failure at CallBase::paramHasNonNullAttr, invoked from passingValueIsAlwaysUndefined (SimplifyCFG.cpp:8226/8227). The reproducer demonstrates a vector GEP producing a <2 x ptr> that is passed to a function. SimplifyCFG tries to reason about undefined behavior when passing null to a nonnull+noundef argument. However, the code assumes pointer type and doesn't guard for vector types, leading to the assertion.\n\n3. Root Cause Analysis:\nWithin passingValueIsAlwaysUndefined, the code does:\n  if (isa<ConstantPointerNull>(C) && CB->paramHasNonNullAttr(ArgIdx, false))\nThis assumes the argument is a pointer operand. When the operand is a vector of pointers, getArgOperand(ArgNo)->getType()->isPointerTy() is false, triggering the assert in paramHasNonNullAttr. The logic should only apply this pointer-specific check when the argument operand is actually a pointer. Currently there is no type guard.\n\n4. Proposed Edit Point(s):\nAdd a type check before calling paramHasNonNullAttr to ensure the argument operand is pointer-typed. If it is not a pointer (e.g., vector of pointers), skip the pointer-specific nonnull handling path. Specifically, change:\n  if (isa<ConstantPointerNull>(C) &&\n      CB->paramHasNonNullAttr(ArgIdx, /*AllowUndefOrPoison=*/false))\n    return !PtrValueMayBeModified;\ninto:\n  if (isa<ConstantPointerNull>(C)) {\n    Type *ArgTy = CB->getArgOperand(ArgIdx)->getType();\n    if (ArgTy->isPointerTy() &&\n        CB->paramHasNonNullAttr(ArgIdx, /*AllowUndefOrPoison=*/false))\n      return !PtrValueMayBeModified;\n  }\nThis preserves existing semantics for pointer-typed arguments and avoids calling paramHasNonNullAttr for non-pointer types, preventing the assert.\n\nEdit point:\n- File: llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n- Lines: 8223-8229\n- Change as described above.\n\n5. Conclusion:\nThe fix adds a type guard around the use of paramHasNonNullAttr, ensuring it is only called for pointer-typed arguments. This resolves the crash when encountering vector-of-pointers arguments, while maintaining the intended UB reasoning for pointer arguments. The expected effect is that simplifycfg no longer aborts on the provided reproducer and continues analysis safely.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\nindex 245d0c4f073d..38f6e8b94762 100644\n--- a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n+++ b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n@@ -8223,9 +8223,15 @@ static bool passingValueIsAlwaysUndefined(Value *V, Instruction *I, bool PtrValu\n       if (CB->isArgOperand(&Use)) {\n         unsigned ArgIdx = CB->getArgOperandNo(&Use);\n         // Passing null to a nonnnull+noundef argument is undefined.\n-        if (isa<ConstantPointerNull>(C) &&\n-            CB->paramHasNonNullAttr(ArgIdx, /*AllowUndefOrPoison=*/false))\n-          return !PtrValueMayBeModified;\n+        // Only query NonNull for scalar pointer-typed arguments; vector arguments\n+        // (e.g., <N x ptr>) are not handled by paramHasNonNullAttr and would\n+        // violate its precondition.\n+        if (isa<ConstantPointerNull>(C)) {\n+          Type *ArgTy = CB->getArgOperand(ArgIdx)->getType();\n+          if (ArgTy->isPointerTy() &&\n+              CB->paramHasNonNullAttr(ArgIdx, /*AllowUndefOrPoison=*/false))\n+            return !PtrValueMayBeModified;\n+        }\n         // Passing undef to a noundef argument is undefined.\n         if (isa<UndefValue>(C) && CB->isPassingUndefUB(ArgIdx))\n           return true;\n"
+  ]
+}

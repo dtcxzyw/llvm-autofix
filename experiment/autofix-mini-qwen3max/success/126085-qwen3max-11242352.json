@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "126085",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/126085-qwen3max-11242352.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 4f46b621c8a7..746742e14d08 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -3210,7 +3210,7 @@ bool VectorCombine::foldInsExtVectorToShuffle(Instruction &I) {\n       ExtToVecMask[0] = ExtIdx;\n     // Add cost for expanding or narrowing\n     NewCost = TTI.getShuffleCost(TargetTransformInfo::SK_PermuteSingleSrc,\n-                                 DstVecTy, ExtToVecMask, CostKind);\n+                                 SrcVecTy, ExtToVecMask, CostKind);\n     NewCost += TTI.getShuffleCost(SK, DstVecTy, Mask, CostKind);\n   }\n \n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 482113,
+  "output_tokens": 8794,
+  "cached_tokens": 189696,
+  "total_tokens": 490907,
+  "chat_rounds": 40,
+  "total_time_sec": 357.9615957736969,
+  "trans_point": [
+    "llvm/lib/IR/Instructions.cpp",
+    "isSingleSourceMaskImpl",
+    1890
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+      3206,
+      3210
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs in `isSingleSourceMaskImpl` when validating a shuffle mask element. The assertion fails because mask element 11 is out of bounds for a vector with 4 elements (valid range should be [0, 7] since NumOpElts*2 = 8). This happens during cost calculation in `foldInsExtVectorToShuffle` when creating an `ExtToVecMask` for length-changing vectors.\n\n2. Analyzing `opt`'s Log: The log shows the pass visiting instructions in order and crashing when processing the insertelement instruction `%ins`. The debugger reveals that `ExtToVecMask` is being created as {11, -1, -1, -1} where 11 is the extracted index from the original 16-element vector, but this mask is being passed to `getShuffleCost` for a 4-element destination vector type.\n\n3. Root Cause Analysis: In `foldInsExtVectorToShuffle`, when `NeedExpOrNarrow` is true (source and destination vectors have different lengths) and `IsExtIdxInBounds` is false (extract index >= destination vector length), the code creates `ExtToVecMask` with `ExtToVecMask[0] = ExtIdx` (line 3210). However, `ExtIdx` (11) is an index into the source vector (16 elements), but the mask is being used for a shuffle operation on the destination vector type (4 elements). The shuffle cost calculation expects mask indices to be within [0, NumDstElts*2), but 11 exceeds this bound (4*2=8).\n\n4. Proposed Edit Point(s): The issue is in lines 3206-3210 of VectorCombine.cpp. When creating `ExtToVecMask` for length-changing vectors, we cannot directly use `ExtIdx` as a mask element if it's out of bounds for the destination vector. Instead, we should create a proper single-source shuffle mask that extracts the desired element. Since we're creating a new vector of `NumDstElts` elements where only one position contains the extracted value, we should set that position to 0 (since we'll be shuffling from a single-element vector containing just the extracted value) or handle this case differently.\n\nLooking at the logic more carefully: When `IsExtIdxInBounds` is false, we cannot place the extracted element at its original index position in the destination vector (since it's out of bounds). The current code tries to put it at index 0, but uses the original `ExtIdx` value (11) as the mask element, which is incorrect. Instead, we should create a mask that represents extracting from a vector that contains only the desired element.\n\nThe fix is to change line 3210 to use 0 instead of `ExtIdx`, since when `IsExtIdxInBounds` is false, we're effectively creating a new vector where the extracted element becomes the first (and possibly only relevant) element.\n\n5. Conclusion: The fix changes `ExtToVecMask[0] = ExtIdx` to `ExtToVecMask[0] = 0` in the else clause. This ensures that the shuffle mask element is within valid bounds for the destination vector type, preventing the assertion failure in `isSingleSourceMaskImpl`. This makes sense because when the extract index is out of bounds for the destination vector, we're creating a new vector where the extracted element is placed at position 0, so the shuffle should reference index 0 of the source.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 4f46b621c8a7..7facb4a71e4b 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -3207,7 +3207,7 @@ bool VectorCombine::foldInsExtVectorToShuffle(Instruction &I) {\n     if (IsExtIdxInBounds)\n       ExtToVecMask[ExtIdx] = ExtIdx;\n     else\n-      ExtToVecMask[0] = ExtIdx;\n+      ExtToVecMask[0] = 0;\n     // Add cost for expanding or narrowing\n     NewCost = TTI.getShuffleCost(TargetTransformInfo::SK_PermuteSingleSrc,\n                                  DstVecTy, ExtToVecMask, CostKind);\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 4f46b621c8a7..746742e14d08 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -3210,7 +3210,7 @@ bool VectorCombine::foldInsExtVectorToShuffle(Instruction &I) {\n       ExtToVecMask[0] = ExtIdx;\n     // Add cost for expanding or narrowing\n     NewCost = TTI.getShuffleCost(TargetTransformInfo::SK_PermuteSingleSrc,\n-                                 DstVecTy, ExtToVecMask, CostKind);\n+                                 SrcVecTy, ExtToVecMask, CostKind);\n     NewCost += TTI.getShuffleCost(SK, DstVecTy, Mask, CostKind);\n   }\n \n"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "117518",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/117518-gem25pro-12130827.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 1622542,
+  "output_tokens": 14119,
+  "cached_tokens": 1355879,
+  "total_tokens": 1654867,
+  "chat_rounds": 60,
+  "total_time_sec": 374.334223985672,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::ShuffleCostEstimator::finalize(llvm::ArrayRef<int>, llvm::ArrayRef<std::pair<llvm::slpvectorizer::BoUpSLP::TreeEntry const*, unsigned int> >, llvm::ArrayRef<int>, unsigned int, llvm::function_ref<void (llvm::Value*&, llvm::SmallVectorImpl<int>&)>)",
+    10878
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      10875,
+      10875
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe `slp-vectorizer` is crashing with an assertion failure: `SubVectorsMask.size() == CommonMask.size()`. This assertion is in `BoUpSLP::ShuffleCostEstimator::finalize`, a function responsible for calculating the cost of shuffling vector elements. The assertion indicates that two internal masks used to describe how sub-vectors are combined have different sizes, which should not happen in a well-formed operation.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log is quite revealing. The vectorizer identifies a set of 16 `icmp` instructions as candidates for vectorization. It then works its way up the data dependency graph, building a \"tree\" of instructions to vectorize together.\n\n- It successfully bundles the `icmp`, `freeze`, and `or` instructions.\n- It then reaches the `trunc` instructions. The operands for these `trunc`s are a mix of different `lshr` and `xor` instructions.\n- The log shows `SLP: Shuffle for reused scalars.` This is a key moment. The vectorizer has identified that some of the scalar inputs to the `trunc` instructions are identical (e.g., multiple lanes use the same constant `0`). It's trying to be clever and build a smaller vector of unique scalars, then shuffle them into the correct lanes.\n- It attempts to build a bundle of 13 unique scalar inputs. However, it then logs `SLP: We are not able to schedule this bundle!`. This is the first sign of trouble. The scheduling logic rejected this plan.\n- The vectorizer then falls back to a different strategy: `SLP: Gathering due to C,S,B,O, small shuffle.`. This is where it tries to form smaller groups of scalars.\n- The crash occurs shortly after, when calculating the cost of this new, more complex gathering strategy. The log shows it's in the middle of calculating the cost for the `trunc` bundle (bundle `Idx: 3`) when the assertion hits.\n\n### 3. Root Cause Analysis\n\nThe core of the problem lies in how the SLP vectorizer handles the fallback from a failed \"reused scalars\" shuffle.\n\n1.  The vectorizer first optimistically tries to form a single vector from all unique scalar inputs (`%xor108.i.i.i`, `%cond.i1002.2.i.i.i`, and `lshr i64 0, 0`). This plan is rejected by the scheduler (`isLegalToSchedule`), likely due to the complexity of the dependencies.\n\n2.  It then enters a fallback path where it tries to group the scalars into smaller, more manageable sub-vectors. It identifies two main groups: one for the constant `0` (`lshr i64 0, 0`) and another for the non-constant values.\n\n3.  When it processes the non-constant group, it correctly identifies that `%xor108.i.i.i` and `%cond.i1002.2.i.i.i` are actually the same value (since `lshr val, 0` is a no-op). It decides to create a sub-vector containing just this single unique value.\n\n4.  Here's the bug: When creating the shuffle mask for this single-element sub-vector, the code in `ShuffleCostEstimator::finalize` incorrectly uses the size of the *original* full group of non-constant scalars (which was 5) to initialize the `SubVectorsMask`. However, the `CommonMask` for this operation is correctly sized to 1, as it's building a vector with one element.\n\n5.  This leads to the assertion failure: `SubVectorsMask` has a size of 5, while `CommonMask` has a size of 1. The code that builds the shuffle for the sub-vector did not correctly account for the fact that the number of unique scalars within that sub-group could be smaller than the number of lanes it feeds.\n\nThe fix is to ensure that when we are building the shuffle mask for a sub-vector, we use the size of the *final, unique* set of scalars for that sub-vector, not the size of the initial group of lanes.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is a one-line change in `SLPVectorizer.cpp`. We need to adjust the size of the `SubVectorsMask` to match the actual number of unique scalars being shuffled in the sub-vector.\n\n```cpp\n// llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n\n10874:    // Build a shuffle for the subvector.\n10875:    SmallVector<int> SubVectorsMask(SubVector.size(), PoisonMaskElem);\n10876:    for (const auto &It : SubVector)\n10877:      SubVectorsMask[It.second] = It.first;\n```\n\nThe line `10875` should be changed to use `UniqueScalars.size()` instead of `SubVector.size()`.",
+  "test_traj": []
+}

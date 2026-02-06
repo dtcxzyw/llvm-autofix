@@ -1,0 +1,38 @@
+{
+  "command": {
+    "issue": "113869",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/113869-gem25pro-12121833.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 1057759,
+  "output_tokens": 19637,
+  "cached_tokens": 945013,
+  "total_tokens": 1098315,
+  "chat_rounds": 40,
+  "total_time_sec": 901.0580911636353,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+    "llvm::InstCombinerImpl::foldSelectInstWithICmp",
+    1987
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Analysis/ValueTracking.cpp",
+      1009,
+      1010
+    ],
+    [
+      "llvm/lib/Analysis/ValueTracking.cpp",
+      1016,
+      1017
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe core of the issue is an incorrect transformation in `InstCombine` that simplifies a `select` instruction into a `uadd.sat` intrinsic. The transformation is:\n`select (icmp ugt Y, X), -1, (add nuw Y, ~X)` -> `uadd.sat Y, ~X`\n\nThis transformation is valid for non-poison values. However, it becomes incorrect when poison values are involved, as demonstrated by the reproducer. The Alive2 output shows that when one of the inputs to the `add nuw` instruction is `poison`, the original code can produce a non-poison result, while the transformed code produces `poison`. This makes the transformation illegal as it increases the amount of poison in the program.\n\nLet's trace the second lane of the vector from the Alive2 counterexample: `%x = 0`, `%yp = 1`.\n*   `%notx` = `xor <..., 0>`, `<..., poison>` -> `<..., poison>`\n*   `%a` = `add nuw <..., 1>`, `<..., poison>` -> `<..., poison>` (The result of an operation with a poison operand is poison, unless the operation itself has UB for all concrete values of the poison operand).\n*   `%c` = `icmp ugt <..., 1>`, `<..., 0>` -> `<..., true>`\n*   `%r` (Source) = `select <..., true>`, `<..., -1>`, `<..., poison>` -> `<..., -1>`\n\nThe transformed code computes:\n*   `%r` (Target) = `uadd.sat <..., 1>`, `<..., poison>` -> `<..., poison>`\n\nThe source produces a concrete value (`-1`), while the target produces `poison`. This is a miscompilation.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log confirms that `InstCombine` is performing this transformation. The backtrace points to `foldSelectInstWithICmp` in `InstCombineSelect.cpp`. This function attempts to match patterns like the one above and replace them with more efficient intrinsics. The decision to perform this transformation is based on analysis of the instruction properties, including whether the result of the `add nuw` can be poison.\n\n### 3. Root Cause Analysis\n\nThe transformation is guarded by a series of checks. One of these checks, intended to ensure the `add nuw` operation does not produce poison in a way that would invalidate the transform, is faulty. The check is performed by `isGuaranteedNotToBePoison`, located in `llvm/lib/Analysis/ValueTracking.cpp`.\n\nThe logic for `add nuw` inside `isGuaranteedNotToBePoison` is:\n```cpp\nif (auto *BO = dyn_cast<BinaryOperator>(V)) {\n  if (BO->getOpcode() == Instruction::Add && BO->hasNoUnsignedWrap()) {\n    // ...\n    return !valueMightBePoison(BO->getOperand(0)) ||\n           !valueMightBePoison(BO->getOperand(1));\n  }\n}\n```\nThis code incorrectly assumes that an `add nuw` operation is guaranteed not to be poison if *at least one* of its operands is not poison. This is false. If one operand is poison and the other is not, the result of the addition is also poison (barring complex UB scenarios not handled here).\n\nThe correct conservative check is to ensure that *both* operands are guaranteed not to be poison. Therefore, the logical OR (`||`) should be a logical AND (`&&`). This will correctly report that the `add nuw` in the reproducer might be poison, preventing the incorrect transformation. A similar bug exists for `sub nuw`.\n\n### 4. Proposed Edit Point(s)\n\n#### Edit Point 1\n*   **File**: `llvm/lib/Analysis/ValueTracking.cpp`\n*   **Lines**: 1009-1010\n*   **Change**: Replace `||` with `&&` for the `add nuw` check.\n\n```cpp\n// From:\n      return !valueMightBePoison(BO->getOperand(0)) ||\n             !valueMightBePoison(BO->getOperand(1));\n// To:\n      return !valueMightBePoison(BO->getOperand(0)) &&\n             !valueMightBePoison(BO->getOperand(1));\n```\n\n#### Edit Point 2\n*   **File**: `llvm/lib/Analysis/ValueTracking.cpp`\n*   **Lines**: 1016-1017\n*   **Change**: Replace `||` with `&&` for the `sub nuw` check.\n\n```cpp\n// From:\n      return !valueMightBePoison(BO->getOperand(0)) ||\n             !valueMightBePoison(BO->getOperand(1));\n// To:\n      return !valueMightBePoison(BO->getOperand(0)) &&\n             !valueMightBePoison(BO->getOperand(1));\n```\n\n### 5. Conclusion\n\nBy correcting the logic in `isGuaranteedNotToBePoison`, we prevent `InstCombine` from performing an illegal transformation that increases poison. The corrected check will accurately reflect that an `add nuw` or `sub nuw` with a potentially poison operand can yield a poison result, thus preserving the correctness of the program.",
+  "test_traj": []
+}

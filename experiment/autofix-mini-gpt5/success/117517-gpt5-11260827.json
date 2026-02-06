@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "117517",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/117517-gpt5-11260827.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex d033b7c2ef4a..dbc583d8e342 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -10921,7 +10921,7 @@ public:\n       }\n     }\n \n-    ::addMask(CommonMask, ExtMask, /*ExtendingManyInputs=*/true);\n+    ::addMask(CommonMask, ExtMask, /*ExtendingManyInputs=*/InVectors.size() == 2);\n     if (CommonMask.empty()) {\n       assert(InVectors.size() == 1 && \"Expected only one vector with no mask\");\n       return Cost;\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 105915,
+  "output_tokens": 1423,
+  "cached_tokens": 71168,
+  "total_tokens": 107338,
+  "chat_rounds": 7,
+  "total_time_sec": 91.84623122215271,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "addMask",
+    1143
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      10924,
+      10924
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash originates from an assertion in addMask() that enforces a constraint when ExtendingManyInputs is true: the SubMask must be larger than the current mask or, if equal, the second half of the existing mask must be poison elements. This check ensures the logic for reshuffling with two input vectors remains consistent.\n\nIn the provided reproducer, the SLP vectorizer is building shuffle costs for a horizontal reduction and eventually calls ShuffleCostEstimator::finalize(), which unconditionally calls addMask(CommonMask, ExtMask, /*ExtendingManyInputs=*/true). If there is only one input vector, ExtMask can be the same size as CommonMask and CommonMask's second half may not be poison, violating the assertion.\n\n2. Analyzing opt's Log:\nThe debug log shows the vectorizer analyzing a large bundle of zext operations, and later the ShuffleCostEstimator finalization path is taken. The stack trace pinpoints addMask being invoked with ExtendingManyInputs=true from ShuffleCostEstimator::finalize(). There's no guarantee that InVectors.size() == 2 at that moment. If InVectors.size() == 1, the assertion condition \"SubMask with many inputs support must be larger than the mask\" can be false, triggering the abort.\n\n3. Root Cause Analysis:\nThe unconditional use of ExtendingManyInputs=true in ShuffleCostEstimator::finalize() is incorrect. ExtendingManyInputs is a special mode that should only be enabled when reshuffling across two input vectors. In this reproducer, CommonMask and ExtMask are likely of the same size and CommonMask's second half is not poison, but ExtendingManyInputs is set to true even though only a single input vector is involved. This violates the invariant checked in addMask.\n\n4. Proposed Edit Point(s):\nWe need to change the call to addMask in ShuffleCostEstimator::finalize() to set ExtendingManyInputs based on whether there are actually two input vectors, i.e., InVectors.size() == 2.\n\nEdit Point:\n- File: llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n- Line: 10924\n- Change:\n  From:\n    ::addMask(CommonMask, ExtMask, /*ExtendingManyInputs=*/true);\n  To:\n    ::addMask(CommonMask, ExtMask, /*ExtendingManyInputs=*/InVectors.size() == 2);\n\nThis ensures the assertion in addMask is only applied when handling masks for two-input shuffles.\n\n5. Conclusion:\nBy gating the ExtendingManyInputs flag on the actual number of input vectors, we respect addMask's invariants and avoid the assertion failure. This fix aligns the mask reshuffling logic with the intended usage and should prevent the crash for the provided reproducer and analogous cases where finalize() operates with a single input vector.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex d033b7c2ef4a..dbc583d8e342 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -10921,7 +10921,7 @@ public:\n       }\n     }\n \n-    ::addMask(CommonMask, ExtMask, /*ExtendingManyInputs=*/true);\n+    ::addMask(CommonMask, ExtMask, /*ExtendingManyInputs=*/InVectors.size() == 2);\n     if (CommonMask.empty()) {\n       assert(InVectors.size() == 1 && \"Expected only one vector with no mask\");\n       return Cost;\n"
+  ]
+}

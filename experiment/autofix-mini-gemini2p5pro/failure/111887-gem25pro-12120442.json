@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "111887",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/111887-gem25pro-12120442.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 488562,
+  "output_tokens": 16133,
+  "cached_tokens": 419187,
+  "total_tokens": 521018,
+  "chat_rounds": 34,
+  "total_time_sec": 338.47650146484375,
+  "trans_point": [
+    "llvm/include/llvm/IR/Value.h",
+    "llvm::Value::getType",
+    255
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      19889,
+      19894
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe crash is a segmentation fault (SIGSEGV) which typically indicates a null or invalid pointer dereference. The backtrace points to `llvm::Value::getType()`, which is a very basic operation. For this to crash, the `Value*` object it's being called on must be invalid. This usually happens when an instruction or value has been deleted from the IR, but some part of the compiler still holds a pointer to it and tries to use it.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log with `-debug-only=SLP` is the key. It shows the vectorizer's thought process:\n\n1.  It identifies a horizontal reduction opportunity: `SLP: Vectorizing horizontal reduction at cost:-4. (HorRdx)`.\n2.  It then proceeds to `schedule` and `vectorize` the tree. This involves creating new vector instructions and, crucially, erasing the old scalar instructions. The log explicitly shows this:\n    ```\n    SLP: \tErasing scalar:  %10 = xor i16 %4, 0.\n    ...\n    SLP: \tErasing scalar:  %5 = load i16, ptr null, align 2.\n    ...\n    ```\n    The original `load` instructions that form the leaves of the reduction tree are deleted here.\n\nThe crash happens *after* these erasures. The backtrace shows the crash is inside `HorizontalReduction::matchAssociativeReduction`. This function's job is to find reduction patterns. The fact that it's being called after the original scalar instructions have been erased is highly suspicious. It's likely trying to analyze the original (now-deleted) reduction chain.\n\n### 3. Root Cause Analysis\n\nBy examining the code and the debugger state, we can pinpoint the exact cause.\n\n1.  The main entry point for this logic is `SLPVectorizerPass::vectorizeHorReduction`.\n2.  Inside this function, it first calls `HorizontalReduction::matchAssociativeReduction` to identify the reduction pattern. This is successful.\n3.  It then calls `BoUpSLP::vectorizeTree()`, which is responsible for the actual vector code generation and the deletion of the old scalar instructions. This is where the `load` instructions from the reproducer are erased.\n4.  **Here is the bug:** After `vectorizeTree()` completes, `vectorizeHorReduction` *again* calls `HorizontalReduction::matchAssociativeReduction`. The comment says, `\"Match the reduction again, on the newly created reduction tree.\"`\n5.  However, the `RdxStart` value passed to this second call is a pointer to an instruction in the *original*, now partially-deleted, reduction chain.\n6.  This second `matchAssociativeReduction` call then traverses the operands of this stale instruction. It finds a `Value*` that points to one of the erased `load` instructions.\n7.  This dangling pointer is passed down to `generateKeySubkey` and then to `getUnderlyingObject`, which tries to call `getType()` on it. Since the memory has been freed, this results in a segmentation fault.\n\nThe fundamental flaw is re-analyzing a data structure (`RdxStart` and its operands) that has just been invalidated. The second call to `matchAssociativeReduction` is operating on stale data.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to remove the incorrect second call to `matchAssociativeReduction` and the subsequent vectorization attempt within `vectorizeHorReduction`. The vectorization has already been handled by the `BoUpSLP::vectorizeTree()` call.\n\n**File**: `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp`\n\n```cpp\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -19886,12 +19886,6 @@\n     return true;\n   }\n \n-  // Match the reduction again, on the newly created reduction tree.\n-  if (isa<PHINode>(RdxStart) ||\n-      HorizontalReduction::matchAssociativeReduction(\n-          Builder, cast<Instruction>(RdxStart), *SE, DL, *TLI))\n-    Changed |= Builder.vectorizeHorReduction(RdxStart);\n-\n   return Changed;\n }\n```\n\n### 5. Conclusion\n\nThe crash was caused by a classic use-after-free error within the SLP vectorizer's horizontal reduction logic. The code was attempting to re-analyze a part of the instruction stream that it had just deleted. By removing the redundant and incorrect analysis step, we eliminate the access to freed memory, thereby fixing the crash. The initial vectorization of the reduction is sufficient, and the second pass was both unnecessary and dangerous.",
+  "test_traj": []
+}

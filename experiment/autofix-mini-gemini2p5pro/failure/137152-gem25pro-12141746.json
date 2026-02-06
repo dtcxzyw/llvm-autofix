@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "137152",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/137152-gem25pro-12141746.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 4961514,
+  "output_tokens": 86600,
+  "cached_tokens": 4440267,
+  "total_tokens": 5088744,
+  "chat_rounds": 77,
+  "total_time_sec": 1255.3426806926727,
+  "trans_point": [
+    "llvm/lib/IR/Verifier.cpp",
+    "llvm::VerifierPass::run",
+    7804
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/GlobalOpt.cpp",
+      1104,
+      1104
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe core of the problem is that the `globalopt` pass is performing an optimization that is not valid for atomic variables. Specifically, it's attempting to \"shrink\" a global pointer variable to a boolean (`i1`). This optimization is designed for cases where a global is only ever checked for being null or non-null.\n\nThe transformation is as follows:\n1. It identifies that the global pointer `@g` is only used in comparisons against `null`.\n2. It decides to replace `@g` with a new boolean global, let's call it `@g.is_non_null`.\n3. It replaces stores to `@g` with stores to `@g.is_non_null`. A store of a non-null pointer becomes `store i1 true`, and a store of `null` becomes `store i1 false`.\n4. It replaces loads from `@g` followed by a `icmp ne ptr, ..., null` with a direct load from `@g.is_non_null`.\n\nThe bug occurs because this transformation does not account for the atomicity of the original loads and stores. It creates new atomic `load` and `store` instructions on the `i1` boolean variable. However, atomic operations on `i1` are not legal in LLVM IR, as they are not byte-sized and don't correspond to hardware-supported atomic operations on any architecture. This invalid IR is then caught by the Verifier pass, leading to the crash you observed.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log and the verifier error message are key:\n\n```\natomic memory access' size must be byte-sized\n i1  store atomic i1 true, ptr @g.init seq_cst, align 1\natomic memory access' size must be byte-sized\n i1  %g.init.val = load atomic i1, ptr @g.init seq_cst, align 1\nLLVM ERROR: Broken module found, compilation aborted!\n```\n\nThis tells us two things:\n- An illegal `i1` atomic `store` was created.\n- An illegal `i1` atomic `load` was created.\n\nThe backtrace confirms the crash happens in the `VerifierPass`, which runs by default after other passes in `opt` to ensure they produce valid IR. The fact that it's `globalopt` that is being run points directly to a transformation within that pass.\n\n### 3. Root Cause Analysis\n\nBy examining the `globalopt` source code (`llvm/lib/Transforms/IPO/GlobalOpt.cpp`), we can pinpoint the faulty logic in the `OptimizeGlobalVariable` function. This function contains a section that attempts to shrink pointer-type globals to booleans if they are only used in null-comparisons.\n\nThe relevant code snippet is around line 1100:\n\n```cpp\n// If this is a pointer type, and all users are load/store and icmp\n// with null, then we can shrink it to a boolean.\nif (GV->getValueType()->isPointerTy() &&\n    !GV->isExternallyInitialized() &&\n    !GV->hasComdat() &&\n    !GV->hasAppendingLinkage() &&\n    !GV->isInterposable() &&\n    !GV->hasAvailableExternallyLinkage()) {\n  if (OptimizeGlobalAddressOfMalloc(GV)) {\n    // ...\n  }\n}\n```\n\nThe function `OptimizeGlobalAddressOfMalloc` proceeds to perform the transformation. Crucially, the initial check `if (GV->getValueType()->isPointerTy() ...)` does **not** check if the global is atomic. The `GlobalStatus` analysis it relies on also doesn't seem to differentiate based on atomicity for this specific optimization path.\n\nThe fix is to prevent this optimization from running on atomic global variables. The simplest way to do this is to add a check for atomicity before attempting the transformation.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to add a check `!GV->isAtomic()` to the condition that guards the pointer-to-boolean shrinking optimization.\n\n**File**: `llvm/lib/Transforms/IPO/GlobalOpt.cpp`\n\n```cpp\n// If this is a pointer type, and all users are load/store and icmp\n// with null, then we can shrink it to a boolean.\nif (GV->getValueType()->isPointerTy() &&\n    !GV->isExternallyInitialized() &&\n    !GV->hasComdat() &&\n    !GV->hasAppendingLinkage() &&\n    !GV->isInterposable() &&\n    !GV->hasAvailableExternallyLinkage()) {\n  if (OptimizeGlobalAddressOfMalloc(GV)) {\n```\n\nThis should be changed to:\n\n```cpp\n// If this is a pointer type, and all users are load/store and icmp\n// with null, then we can shrink it to a boolean.\nif (GV->getValueType()->isPointerTy() &&\n    !GV->isExternallyInitialized() &&\n    !GV->hasComdat() &&\n    !GV->hasAppendingLinkage() &&\n    !GV->isInterposable() &&\n    !GV->isAtomic() && // This is the fix\n    !GV->hasAvailableExternallyLinkage()) {\n  if (OptimizeGlobalAddressOfMalloc(GV)) {\n```\n\nI will now provide the edit point for this change.\n\n### 5. Conclusion\n\nBy adding the `!GV->isAtomic()` check, we ensure that the pointer-to-boolean shrinking optimization is only applied to non-atomic globals, for which it is safe. This prevents the creation of invalid atomic operations on `i1` types and resolves the verifier crash. The fix is simple, targeted, and correctly addresses the root cause of the issue.",
+  "test_traj": [
+    "",
+    "diff --git a/llvm/lib/Transforms/IPO/GlobalOpt.cpp b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\nindex cfba8dcc05b2..341dc4dafbf3 100644\n--- a/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n+++ b/llvm/lib/Transforms/IPO/GlobalOpt.cpp\n@@ -1620,7 +1620,8 @@ processInternalGlobal(GlobalVariable *GV, const GlobalStatus &GS,\n     if (SOVConstant && GS.Ordering == AtomicOrdering::NotAtomic &&\n         (!isa<UndefValue>(GV->getInitializer()) ||\n          CanHaveNonUndefGlobalInitializer)) {\n-      if (TryToShrinkGlobalToBoolean(GV, SOVConstant)) {\n+      if (GS.Ordering == AtomicOrdering::NotAtomic &&\n+          TryToShrinkGlobalToBoolean(GV, SOVConstant)) {\n         ++NumShrunkToBool;\n         return true;\n       }\n"
+  ]
+}

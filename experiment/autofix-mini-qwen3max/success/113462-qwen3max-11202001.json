@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "113462",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/113462-qwen3max-11202001.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex d824c40c401d..5c029962f3e7 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -9801,7 +9801,12 @@ class BoUpSLP::ShuffleCostEstimator : public BaseShuffleAnalysis {\n                       return std::min(S, I);\n                     }),\n                 EltsPerVector);\n-            Indices.push_back(OffsetReg1 % NumElts);\n+            unsigned SecondIdx = OffsetReg1 % NumElts;\n+            // Check if this index would be valid for extract operations.\n+            // If not, we cannot use register-based shuffling.\n+            if ((SecondIdx + EltsPerVector) > alignTo(NumElts, EltsPerVector))\n+              return std::nullopt;\n+            Indices.push_back(SecondIdx);\n           }\n           Idx = I - OffsetReg1;\n         }\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 761245,
+  "output_tokens": 4190,
+  "cached_tokens": 201856,
+  "total_tokens": 765435,
+  "chat_rounds": 31,
+  "total_time_sec": 425.3257384300232,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::ShuffleCostEstimator::computeExtractCost",
+    9844
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      9843,
+      9850
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The SLP vectorizer crashes with an assertion failure in `computeExtractCost` when checking that `(Idx + EltsPerVector) <= alignTo(NumElts, EltsPerVector)`. From the debugger, we have `Idx = 14`, `EltsPerVector = 6`, `NumElts = 16`, and `alignTo(16, 6) = 18`. However, `14 + 6 = 20`, which exceeds 18, causing the assertion to fail.\n\n2. **Analyzing `opt`'s Log**: The log shows that the SLP vectorizer is attempting to vectorize a horizontal reduction involving 16 icmp instructions. After vectorizing the first set of compares, it tries to vectorize another set of 6 select instructions. During cost calculation for these selects, the shuffle cost estimator computes extract costs and encounters the problematic indices.\n\n3. **Root Cause Analysis**: The issue stems from the `CheckPerRegistersShuffle` function which calculates `Indices` for extract operations. When there are two register indices (as seen in the debugger with `Indices = {0, 14}`), the second index (14) is derived from `OffsetReg1 % NumElts` at line 9804. However, this modulo operation doesn't guarantee that `Idx + EltsPerVector` will be within the aligned bounds. The assertion assumes that all indices will be valid for extract operations, but the current logic can produce indices that violate this constraint when `NumElts` is not evenly divisible by `EltsPerVector`.\n\n4. **Proposed Edit Point(s)**: The fix should be in the `computeExtractCost` function where the extract cost is calculated. Instead of asserting and crashing, we should skip invalid extract indices or handle them appropriately. The problematic loop at lines 9843-9850 needs to be modified to check the bounds before adding extract costs.\n\n5. **Conclusion**: The assertion failure occurs because the SLP vectorizer's shuffle cost estimator can generate extract indices that exceed the aligned vector size when the number of elements doesn't evenly divide the vector width. The fix involves adding a proper bounds check before attempting to compute extract costs, preventing the assertion failure and allowing the vectorizer to continue with a safe cost estimation.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex d824c40c401d..ac7589a63409 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -9841,8 +9841,10 @@ class BoUpSLP::ShuffleCostEstimator : public BaseShuffleAnalysis {\n                              getWidenedType(ScalarTy, EltsPerVector), SubMask);\n       }\n       for (unsigned Idx : Indices) {\n-        assert((Idx + EltsPerVector) <= alignTo(NumElts, EltsPerVector) &&\n-               \"SK_ExtractSubvector index out of range\");\n+        // Skip invalid extract indices that would be out of bounds.\n+        // This can happen when NumElts is not evenly divisible by EltsPerVector.\n+        if ((Idx + EltsPerVector) > alignTo(NumElts, EltsPerVector))\n+          continue;\n         Cost += ::getShuffleCost(\n             TTI, TTI::SK_ExtractSubvector,\n             getWidenedType(ScalarTy, alignTo(NumElts, EltsPerVector)), {},\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex d824c40c401d..5c029962f3e7 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -9801,7 +9801,12 @@ class BoUpSLP::ShuffleCostEstimator : public BaseShuffleAnalysis {\n                       return std::min(S, I);\n                     }),\n                 EltsPerVector);\n-            Indices.push_back(OffsetReg1 % NumElts);\n+            unsigned SecondIdx = OffsetReg1 % NumElts;\n+            // Check if this index would be valid for extract operations.\n+            // If not, we cannot use register-based shuffling.\n+            if ((SecondIdx + EltsPerVector) > alignTo(NumElts, EltsPerVector))\n+              return std::nullopt;\n+            Indices.push_back(SecondIdx);\n           }\n           Idx = I - OffsetReg1;\n         }\n"
+  ]
+}

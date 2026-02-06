@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "150338",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/150338-qwen3max-11260027.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Utils/Local.cpp b/llvm/lib/Transforms/Utils/Local.cpp\nindex babd7f6b3a05..d6a53a8349f9 100644\n--- a/llvm/lib/Transforms/Utils/Local.cpp\n+++ b/llvm/lib/Transforms/Utils/Local.cpp\n@@ -484,6 +484,10 @@ bool llvm::wouldInstructionBeTriviallyDead(const Instruction *I,\n       auto *Arg = II->getArgOperand(1);\n       // If the only uses of the alloca are lifetime intrinsics, then the\n       // intrinsics are dead.\n+      // For constants like poison/undef that don't have use lists, they\n+      // effectively have no non-lifetime-intrinsic uses.\n+      if (!Arg->hasUseList())\n+        return true;\n       return llvm::all_of(Arg->uses(), [](Use &Use) {\n         return isa<LifetimeIntrinsic>(Use.getUser());\n       });\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 241502,
+  "output_tokens": 2301,
+  "cached_tokens": 44544,
+  "total_tokens": 243803,
+  "chat_rounds": 22,
+  "total_time_sec": 222.84043645858765,
+  "trans_point": [
+    "llvm/include/llvm/IR/Value.h",
+    "llvm::Value::materialized_use_begin",
+    357
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/Local.cpp",
+      487,
+      489
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The crash occurs when `wouldInstructionBeTriviallyDead` tries to iterate over the uses of a `poison` value in a lifetime.end intrinsic. The `poison` value doesn't have a use list (since it's a constant with no tracked uses), so calling `uses()` on it triggers the assertion `hasUseList()` in `Value::materialized_use_begin()`.\n\n2. **Analyzing `opt`'s Log**: The log shows that instcombine first erases the store instruction `store ptr %a, ptr %arg`, then replaces the alloca `%a` with `poison`. This creates a lifetime.end call with `ptr poison` as its argument. When checking if this lifetime.end is trivially dead, the code calls `Arg->uses()` where `Arg` is `poison`, which lacks a use list.\n\n3. **Root Cause Analysis**: In `wouldInstructionBeTriviallyDead`, when handling lifetime intrinsics (lines 483-489), the code assumes that `Arg->uses()` can be safely called. However, for constant values like `poison`, `undef`, or other constants that don't maintain a use list, this assumption fails. The check should first verify that the argument has a use list before attempting to iterate over its uses.\n\n4. **Proposed Edit Point(s)**:\n   + The issue is in `llvm/lib/Transforms/Utils/Local.cpp` at lines 487-489. We need to add a guard to check if the argument has a use list before calling `uses()`. If the argument doesn't have a use list, we should check if it's a constant and handle accordingly.\n\n5. **Conclusion**: The fix involves modifying the lifetime intrinsic dead code check to handle constant arguments properly. Since constants like `poison` don't maintain use lists, we should treat them as having no non-lifetime-intrinsic uses, making the lifetime intrinsic trivially dead in this context.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/Local.cpp b/llvm/lib/Transforms/Utils/Local.cpp\nindex babd7f6b3a05..d6a53a8349f9 100644\n--- a/llvm/lib/Transforms/Utils/Local.cpp\n+++ b/llvm/lib/Transforms/Utils/Local.cpp\n@@ -484,6 +484,10 @@ bool llvm::wouldInstructionBeTriviallyDead(const Instruction *I,\n       auto *Arg = II->getArgOperand(1);\n       // If the only uses of the alloca are lifetime intrinsics, then the\n       // intrinsics are dead.\n+      // For constants like poison/undef that don't have use lists, they\n+      // effectively have no non-lifetime-intrinsic uses.\n+      if (!Arg->hasUseList())\n+        return true;\n       return llvm::all_of(Arg->uses(), [](Use &Use) {\n         return isa<LifetimeIntrinsic>(Use.getUser());\n       });\n"
+  ]
+}

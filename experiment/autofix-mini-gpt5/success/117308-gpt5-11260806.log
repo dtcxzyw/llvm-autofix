@@ -1,0 +1,1888 @@
+Issue ID: 117308
+Issue Type: crash
+Issue Commit: 6655c53ff02f0ffca0fcaa3261e14c2a6417d3da
+Issue Title: Crash on wasm-ld (failed Received SIGSEGV (-11))
+Issue Labels: ['crash', 'llvm:analysis']
+Checking out the issue's environment ...
+Building LLVM and try reproducing the issue ...
+Issue reproduced successfully.
+╭─ Reproducer [MainThread@3742650] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                                                                 │
+│ ; Regression test for a null-returning bug of getUnderlyingObjectAggressive().                                                                                  │
+│ ; This should not crash.                                                                                                                                        │
+│ define void @phi_cycle() {                                                                                                                                      │
+│ bb:                                                                                                                                                             │
+│   unreachable                                                                                                                                                   │
+│                                                                                                                                                                 │
+│ bb1:                                              ; preds = %bb17                                                                                               │
+│   br label %bb2                                                                                                                                                 │
+│                                                                                                                                                                 │
+│ bb2:                                              ; preds = %bb5, %bb1                                                                                          │
+│   %phi = phi ptr [ %phi6, %bb1 ], [ %phi6, %bb5 ]                                                                                                               │
+│   br i1 poison, label %bb4, label %bb3                                                                                                                          │
+│                                                                                                                                                                 │
+│ bb3:                                              ; preds = %bb2                                                                                                │
+│   %getelementptr = getelementptr inbounds i8, ptr %phi, i32 poison                                                                                              │
+│   br label %bb5                                                                                                                                                 │
+│                                                                                                                                                                 │
+│ bb4:                                              ; preds = %bb2                                                                                                │
+│   br label %bb7                                                                                                                                                 │
+│                                                                                                                                                                 │
+│ bb5:                                              ; preds = %bb15, %bb3                                                                                         │
+│   %phi6 = phi ptr [ %getelementptr, %bb3 ], [ %phi16, %bb15 ]                                                                                                   │
+│   br i1 poison, label %bb17, label %bb2                                                                                                                         │
+│                                                                                                                                                                 │
+│ bb7:                                              ; preds = %bb15, %bb4                                                                                         │
+│   %phi8 = phi ptr [ %phi, %bb4 ], [ %phi16, %bb15 ]                                                                                                             │
+│   br i1 poison, label %bb11, label %bb9                                                                                                                         │
+│                                                                                                                                                                 │
+│ bb9:                                              ; preds = %bb7                                                                                                │
+│   %getelementptr10 = getelementptr inbounds i8, ptr %phi8, i32 1                                                                                                │
+│   store i8 poison, ptr %phi8, align 1                                                                                                                           │
+│   br label %bb15                                                                                                                                                │
+│                                                                                                                                                                 │
+│ bb11:                                             ; preds = %bb7                                                                                                │
+│   br i1 poison, label %bb13, label %bb12                                                                                                                        │
+│                                                                                                                                                                 │
+│ bb12:                                             ; preds = %bb11                                                                                               │
+│   br label %bb13                                                                                                                                                │
+│                                                                                                                                                                 │
+│ bb13:                                             ; preds = %bb12, %bb11                                                                                        │
+│   %getelementptr14 = getelementptr inbounds i8, ptr %phi8, i32 poison                                                                                           │
+│   br label %bb15                                                                                                                                                │
+│                                                                                                                                                                 │
+│ bb15:                                             ; preds = %bb13, %bb9                                                                                         │
+│   %phi16 = phi ptr [ %getelementptr14, %bb13 ], [ %getelementptr10, %bb9 ]                                                                                      │
+│   br i1 poison, label %bb5, label %bb7                                                                                                                          │
+│                                                                                                                                                                 │
+│ bb17:                                             ; preds = %bb5                                                                                                │
+│   br label %bb1                                                                                                                                                 │
+│ }                                                                                                                                                               │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Reproducing Log [MainThread@3742650] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ $ opt -passes=function-attrs -S < %s                                                                                                                            │
+│ Command '['bin/opt', '-passes=function-attrs', '-S', '-']' died with <Signals.SIGABRT: 6>.                                                                      │
+│                                                                                                                                                                 │
+│ opt: llvm/include/llvm/Support/Casting.h:109: static bool llvm::isa_impl_cl<To, const From*>::doit(const From*) [with To = llvm::AllocaInst; From =             │
+│ llvm::Value]: Assertion `Val && "isa<> used on a null pointer"' failed.                                                                                         │
+│ PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/ and include the crash backtrace.                                                     │
+│ Stack dump:                                                                                                                                                     │
+│ 0.      Program arguments: bin/opt -passes=function-attrs -S -                                                                                                  │
+│ 1.      Running pass "cgscc(function-attrs)" on module "<stdin>"                                                                                                │
+│  #0 0x00007f30a2921314 llvm::sys::PrintStackTrace(llvm::raw_ostream&, int) llvm/lib/Support/Unix/Signals.inc:798:22                                             │
+│  #1 0x00007f30a292172b PrintStackTraceSignalHandler(void*) llvm/lib/Support/Unix/Signals.inc:874:1                                                              │
+│  #2 0x00007f30a291e11b llvm::sys::RunSignalHandlers() llvm/lib/Support/Signals.cpp:105:20                                                                       │
+│  #3 0x00007f30a2920405 SignalHandler(int) llvm/lib/Support/Unix/Signals.inc:415:1                                                                               │
+│  #4 0x00007f30a2471330 (/usr/lib/x86_64-linux-gnu/libc.so.6+0x45330)                                                                                            │
+│  #5 0x00007f30a24cab2c pthread_kill (/usr/lib/x86_64-linux-gnu/libc.so.6+0x9eb2c)                                                                               │
+│  #6 0x00007f30a247127e raise (/usr/lib/x86_64-linux-gnu/libc.so.6+0x4527e)                                                                                      │
+│  #7 0x00007f30a24548ff abort (/usr/lib/x86_64-linux-gnu/libc.so.6+0x288ff)                                                                                      │
+│  #8 0x00007f30a245481b (/usr/lib/x86_64-linux-gnu/libc.so.6+0x2881b)                                                                                            │
+│  #9 0x00007f30a2467517 (/usr/lib/x86_64-linux-gnu/libc.so.6+0x3b517)                                                                                            │
+│ #10 0x00007f309b3ebf1e llvm::isa_impl_cl<llvm::AllocaInst, llvm::Value const*>::doit(llvm::Value const*) llvm/include/llvm/Support/Casting.h:110:36             │
+│ #11 0x00007f309b3e75f9 llvm::isa_impl_wrap<llvm::AllocaInst, llvm::Value const*, llvm::Value const*>::doit(llvm::Value const* const&)                           │
+│ llvm/include/llvm/Support/Casting.h:138:3                                                                                                                       │
+│ #12 0x00007f309b3defb2 llvm::isa_impl_wrap<llvm::AllocaInst, llvm::Value const* const, llvm::Value const*>::doit(llvm::Value const* const&)                     │
+│ llvm/include/llvm/Support/Casting.h:130:3                                                                                                                       │
+│ #13 0x00007f309b3d045c llvm::CastIsPossible<llvm::AllocaInst, llvm::Value const*, void>::isPossible(llvm::Value const* const&)                                  │
+│ llvm/include/llvm/Support/Casting.h:258:3                                                                                                                       │
+│ #14 0x00007f309b52416c llvm::CastInfo<llvm::AllocaInst, llvm::Value const* const, void>::isPossible(llvm::Value const* const&)                                  │
+│ llvm/include/llvm/Support/Casting.h:511:3                                                                                                                       │
+│ #15 0x00007f309b51c7ac bool llvm::isa<llvm::AllocaInst, llvm::Value const*>(llvm::Value const* const&) llvm/include/llvm/Support/Casting.h:550:1                │
+│ #16 0x00007f309b50eaa8 addLocAccess(llvm::MemoryEffectsBase<llvm::IRMemLocation>&, llvm::MemoryLocation const&, llvm::ModRefInfo, llvm::AAResults&)             │
+│ llvm/lib/Transforms/IPO/FunctionAttrs.cpp:125:3                                                                                                                 │
+│ #17 0x00007f309b50f15d checkFunctionMemoryAccess(llvm::Function&, bool, llvm::AAResults&, llvm::SmallSetVector<llvm::Function*, 8u> const&)                     │
+│ llvm/lib/Transforms/IPO/FunctionAttrs.cpp:249:17                                                                                                                │
+│ #18 0x00007f309b52a19d void addMemoryAttrs<llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC&, llvm::AnalysisManager<llvm::LazyCallGraph::SCC,     │
+│ llvm::LazyCallGraph&>&, llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)::'lambda'(llvm::Function&)&>(llvm::SmallSetVector<llvm::Function*, 8u> const&,          │
+│ llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC&, llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&, llvm::LazyCallGraph&,  │
+│ llvm::CGSCCUpdateResult&)::'lambda'(llvm::Function&)&, llvm::SmallSet<llvm::Function*, 8u, std::less<llvm::Function*>>&)                                        │
+│ llvm/lib/Transforms/IPO/FunctionAttrs.cpp:273:34                                                                                                                │
+│ #19 0x00007f309b520453 llvm::SmallSet<llvm::Function*, 8u, std::less<llvm::Function*>>                                                                          │
+│ deriveAttrsInPostOrder<llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC&, llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&, │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)::'lambda'(llvm::Function&)&>(llvm::ArrayRef<llvm::Function*>,                                                   │
+│ llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC&, llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&, llvm::LazyCallGraph&,  │
+│ llvm::CGSCCUpdateResult&)::'lambda'(llvm::Function&)&, bool) llvm/lib/Transforms/IPO/FunctionAttrs.cpp:2242:19                                                  │
+│ #20 0x00007f309b5181ca llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC&, llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&, │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&) llvm/lib/Transforms/IPO/FunctionAttrs.cpp:2300:29                                                               │
+│ #21 0x00007f309d8e0585 llvm::detail::PassModel<llvm::LazyCallGraph::SCC, llvm::PostOrderFunctionAttrsPass, llvm::AnalysisManager<llvm::LazyCallGraph::SCC,      │
+│ llvm::LazyCallGraph&>, llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&>::run(llvm::LazyCallGraph::SCC&, llvm::AnalysisManager<llvm::LazyCallGraph::SCC,          │
+│ llvm::LazyCallGraph&>&, llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&) llvm/include/llvm/IR/PassManagerInternal.h:91:3                                         │
+│ #22 0x00007f309841ff8a llvm::PassManager<llvm::LazyCallGraph::SCC, llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>, llvm::LazyCallGraph&, │
+│ llvm::CGSCCUpdateResult&>::run(llvm::LazyCallGraph::SCC&, llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&, llvm::LazyCallGraph&,         │
+│ llvm::CGSCCUpdateResult&) llvm/lib/Analysis/CGSCCPassManager.cpp:88:12                                                                                          │
+│ #23 0x00007f309d8e86ab llvm::detail::PassModel<llvm::LazyCallGraph::SCC, llvm::PassManager<llvm::LazyCallGraph::SCC,                                            │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>, llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&>,                                         │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>, llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&>::run(llvm::LazyCallGraph::SCC&,          │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&, llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)                                         │
+│ llvm/include/llvm/IR/PassManagerInternal.h:91:3                                                                                                                 │
+│ #24 0x00007f3098420d3b llvm::ModuleToPostOrderCGSCCPassAdaptor::run(llvm::Module&, llvm::AnalysisManager<llvm::Module>&)                                        │
+│ llvm/lib/Analysis/CGSCCPassManager.cpp:275:18                                                                                                                   │
+│ #25 0x00007f309d8e85c5 llvm::detail::PassModel<llvm::Module, llvm::ModuleToPostOrderCGSCCPassAdaptor, llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&,  │
+│ llvm::AnalysisManager<llvm::Module>&) llvm/include/llvm/IR/PassManagerInternal.h:91:3                                                                           │
+│ #26 0x00007f3097ab700b llvm::PassManager<llvm::Module, llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&, llvm::AnalysisManager<llvm::Module>&)           │
+│ llvm/include/llvm/IR/PassManagerImpl.h:85:18                                                                                                                    │
+│ #27 0x00007f30a2ade6b5 llvm::runPassPipeline(llvm::StringRef, llvm::Module&, llvm::TargetMachine*, llvm::TargetLibraryInfoImpl*, llvm::ToolOutputFile*,         │
+│ llvm::ToolOutputFile*, llvm::ToolOutputFile*, llvm::StringRef, llvm::ArrayRef<llvm::PassPlugin>, llvm::ArrayRef<std::function<void (llvm::PassBuilder&)>>,      │
+│ llvm::opt_tool::OutputKind, llvm::opt_tool::VerifierKind, bool, bool, bool, bool, bool, bool, bool) llvm/tools/opt/NewPMDriver.cpp:541:10                       │
+│ #28 0x00007f30a2b1567e optMain llvm/tools/opt/optdriver.cpp:739:27                                                                                              │
+│ #29 0x000055888faf61e8 main llvm/tools/opt/opt.cpp:25:64                                                                                                        │
+│ #30 0x00007f30a24561ca (/usr/lib/x86_64-linux-gnu/libc.so.6+0x2a1ca)                                                                                            │
+│ #31 0x00007f30a245628b __libc_start_main (/usr/lib/x86_64-linux-gnu/libc.so.6+0x2a28b)                                                                          │
+│ #32 0x000055888faf60a5 _start (bin/opt+0x10a5)                                                                                                                  │
+│                                                                                                                                                                 │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Debugging process with ASLR disabled
+Tmux detected.
+GDB Python path: /usr/share/gdb/python:/llvm-autofix:/llvm-autofix-deps/py3_venv/lib/python3.12/site-packages:/usr/lib/python312.zip:/usr/lib/python3.12:/usr/lib/python3.12/lib-dynload:/usr/local/lib/python3.12/dist-packages:/usr/lib/python3/dist-packages
+GDB Python version: 3.12.3
+Expected Python version: 3.12.3
+Reproducing the issue with debugger...
+Adding breakpoints
+Setting breakpoint at __assert_fail ... succeeded
+Setting breakpoint at __GI___assert_fail ... failed (skip): Function "__GI___assert_fail" not defined.
+
+========= Remote Traceback (1) =========
+Traceback (most recent call last):
+  File "/llvm-autofix-deps/py3_venv/lib/python3.12/site-packages/rpyc/core/protocol.py", line 369, in _dispatch_request
+    res = self._HANDLERS[handler](self, *args)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/llvm-autofix-deps/py3_venv/lib/python3.12/site-packages/rpyc/core/protocol.py", line 863, in _handle_call
+    return obj(*args, **dict(kwargs))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gdb.error: Function "__GI___assert_fail" not defined.
+
+Setting breakpoint at llvm::llvm_unreachable_internal ... succeeded
+Setting breakpoint at llvm::report_fatal_error ... succeeded
+Number of breakpoints: 4
+Time used in setting up breakpoints: 0.10s
+Parsing frames and their symbols ...
+(frame 7) llvm/lib/Transforms/IPO/FunctionAttrs.cpp:125 in addLocAccess
+(frame 8) llvm/lib/Transforms/IPO/FunctionAttrs.cpp:249 in checkFunctionMemoryAccess
+(frame 9) llvm/lib/Transforms/IPO/FunctionAttrs.cpp:273 in addMemoryAttrs<llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC&, llvm::CGSCCAnalysisManager&, llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)::<lambda(llvm::Function&)>&>(const (anonymous namespace)::SCCNodeSet &, struct {...} &, llvm::SmallSet<llvm::Function*, 8, std::less<llvm::Function*> > &)
+The cached breakpoint function: __assert_fail
+Transform pass: function-attrs
+Analysis passes:
+Running opt with the reproducer to collect verbose log ...
+Options: ['--passes=function-attrs', '-S', '--debug-only=function-attrs']
+╭─ Opt Verbose Log [MainThread@3742650] ────────────────────────────────────────╮
+│ $ /llvm-autofix/build/llvm-build/117308/bin/opt --passes=function-attrs -S    │
+│ --debug-only=function-attrs /tmp/reprod_sbdwnsd2.ll                           │
+│ opt: llvm/include/llvm/Support/Casting.h:109: static bool                     │
+│ llvm::isa_impl_cl<To, const From*>::doit(const From*) [with To =              │
+│ llvm::AllocaInst; From = llvm::Value]: Assertion `Val && "isa<> used on a     │
+│ null pointer"' failed.                                                        │
+│                                                                               │
+╰───────────────────────────────────────────────────────────────────────────────╯
+Registering tool: find250 (budget=250)
+Registering tool: grep250 (budget=250)
+Registering tool: list250 (budget=250)
+Registering tool: read250 (budget=250)
+Registering tool: edit (budget=25)
+Registering tool: code (budget=250)
+Registering tool: docs (budget=250)
+Registering tool: langref (budget=250)
+Registering tool: reset (budget=25)
+Registering tool: preview (budget=25)
+Registering tool: test (budget=25)
+Registering tool: debug (budget=250)
+Registering tool: eval (budget=250)
+Registering tool: stop (budget=250)
+Analyzing the issue to gather required information ...
+╭─ User [MainThread@3742650] ───────────────────────────────────────────────────╮
+│ You are a senior LLVM maintainer, responsible for the `function-attrs`        │
+│ module. I'm encountering an issue in this module that I haven't been able to  │
+│ diagnose or fix, and I need your assistance.                                  │
+│                                                                               │
+│ ## Reproducer ##                                                              │
+│                                                                               │
+│ ```llvm                                                                       │
+│                                                                               │
+│ ; Regression test for a null-returning bug of                                 │
+│ getUnderlyingObjectAggressive().                                              │
+│ ; This should not crash.                                                      │
+│ define void @phi_cycle() {                                                    │
+│ bb:                                                                           │
+│   unreachable                                                                 │
+│                                                                               │
+│ bb1:                                              ; preds = %bb17             │
+│   br label %bb2                                                               │
+│                                                                               │
+│ bb2:                                              ; preds = %bb5, %bb1        │
+│   %phi = phi ptr [ %phi6, %bb1 ], [ %phi6, %bb5 ]                             │
+│   br i1 poison, label %bb4, label %bb3                                        │
+│                                                                               │
+│ bb3:                                              ; preds = %bb2              │
+│   %getelementptr = getelementptr inbounds i8, ptr %phi, i32 poison            │
+│   br label %bb5                                                               │
+│                                                                               │
+│ bb4:                                              ; preds = %bb2              │
+│   br label %bb7                                                               │
+│                                                                               │
+│ bb5:                                              ; preds = %bb15, %bb3       │
+│   %phi6 = phi ptr [ %getelementptr, %bb3 ], [ %phi16, %bb15 ]                 │
+│   br i1 poison, label %bb17, label %bb2                                       │
+│                                                                               │
+│ bb7:                                              ; preds = %bb15, %bb4       │
+│   %phi8 = phi ptr [ %phi, %bb4 ], [ %phi16, %bb15 ]                           │
+│   br i1 poison, label %bb11, label %bb9                                       │
+│                                                                               │
+│ bb9:                                              ; preds = %bb7              │
+│   %getelementptr10 = getelementptr inbounds i8, ptr %phi8, i32 1              │
+│   store i8 poison, ptr %phi8, align 1                                         │
+│   br label %bb15                                                              │
+│                                                                               │
+│ bb11:                                             ; preds = %bb7              │
+│   br i1 poison, label %bb13, label %bb12                                      │
+│                                                                               │
+│ bb12:                                             ; preds = %bb11             │
+│   br label %bb13                                                              │
+│                                                                               │
+│ bb13:                                             ; preds = %bb12, %bb11      │
+│   %getelementptr14 = getelementptr inbounds i8, ptr %phi8, i32 poison         │
+│   br label %bb15                                                              │
+│                                                                               │
+│ bb15:                                             ; preds = %bb13, %bb9       │
+│   %phi16 = phi ptr [ %getelementptr14, %bb13 ], [ %getelementptr10, %bb9 ]    │
+│   br i1 poison, label %bb5, label %bb7                                        │
+│                                                                               │
+│ bb17:                                             ; preds = %bb5              │
+│   br label %bb1                                                               │
+│ }                                                                             │
+│ ```                                                                           │
+│                                                                               │
+│ ## Symptom ##                                                                 │
+│                                                                               │
+│ ```                                                                           │
+│ Command '['bin/opt', '-passes=function-attrs', '-S', '-']' died with          │
+│ <Signals.SIGABRT: 6>.                                                         │
+│                                                                               │
+│ opt: llvm/include/llvm/Support/Casting.h:109: static bool                     │
+│ llvm::isa_impl_cl<To, const From*>::doit(const From*) [with To =              │
+│ llvm::AllocaInst; From = llvm::Value]: Assertion `Val && "isa<> used on a     │
+│ null pointer"' failed.                                                        │
+│ PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/    │
+│ and include the crash backtrace.                                              │
+│ Stack dump:                                                                   │
+│ 0.      Program arguments: bin/opt -passes=function-attrs -S -                │
+│ 1.      Running pass "cgscc(function-attrs)" on module "<stdin>"              │
+│  #0 0x00007f30a2921314 llvm::sys::PrintStackTrace(llvm::raw_ostream&, int)    │
+│ llvm/lib/Support/Unix/Signals.inc:798:22                                      │
+│  #1 0x00007f30a292172b PrintStackTraceSignalHandler(void*)                    │
+│ llvm/lib/Support/Unix/Signals.inc:874:1                                       │
+│  #2 0x00007f30a291e11b llvm::sys::RunSignalHandlers()                         │
+│ llvm/lib/Support/Signals.cpp:105:20                                           │
+│  #3 0x00007f30a2920405 SignalHandler(int)                                     │
+│ llvm/lib/Support/Unix/Signals.inc:415:1                                       │
+│  #4 0x00007f30a2471330 (/usr/lib/x86_64-linux-gnu/libc.so.6+0x45330)          │
+│  #5 0x00007f30a24cab2c pthread_kill                                           │
+│ (/usr/lib/x86_64-linux-gnu/libc.so.6+0x9eb2c)                                 │
+│  #6 0x00007f30a247127e raise (/usr/lib/x86_64-linux-gnu/libc.so.6+0x4527e)    │
+│  #7 0x00007f30a24548ff abort (/usr/lib/x86_64-linux-gnu/libc.so.6+0x288ff)    │
+│  #8 0x00007f30a245481b (/usr/lib/x86_64-linux-gnu/libc.so.6+0x2881b)          │
+│  #9 0x00007f30a2467517 (/usr/lib/x86_64-linux-gnu/libc.so.6+0x3b517)          │
+│ #10 0x00007f309b3ebf1e llvm::isa_impl_cl<llvm::AllocaInst, llvm::Value        │
+│ const*>::doit(llvm::Value const*) llvm/include/llvm/Support/Casting.h:110:36  │
+│ #11 0x00007f309b3e75f9 llvm::isa_impl_wrap<llvm::AllocaInst, llvm::Value      │
+│ const*, llvm::Value const*>::doit(llvm::Value const* const&)                  │
+│ llvm/include/llvm/Support/Casting.h:138:3                                     │
+│ #12 0x00007f309b3defb2 llvm::isa_impl_wrap<llvm::AllocaInst, llvm::Value      │
+│ const* const, llvm::Value const*>::doit(llvm::Value const* const&)            │
+│ llvm/include/llvm/Support/Casting.h:130:3                                     │
+│ #13 0x00007f309b3d045c llvm::CastIsPossible<llvm::AllocaInst, llvm::Value     │
+│ const*, void>::isPossible(llvm::Value const* const&)                          │
+│ llvm/include/llvm/Support/Casting.h:258:3                                     │
+│ #14 0x00007f309b52416c llvm::CastInfo<llvm::AllocaInst, llvm::Value const*    │
+│ const, void>::isPossible(llvm::Value const* const&)                           │
+│ llvm/include/llvm/Support/Casting.h:511:3                                     │
+│ #15 0x00007f309b51c7ac bool llvm::isa<llvm::AllocaInst, llvm::Value           │
+│ const*>(llvm::Value const* const&) llvm/include/llvm/Support/Casting.h:550:1  │
+│ #16 0x00007f309b50eaa8                                                        │
+│ addLocAccess(llvm::MemoryEffectsBase<llvm::IRMemLocation>&,                   │
+│ llvm::MemoryLocation const&, llvm::ModRefInfo, llvm::AAResults&)              │
+│ llvm/lib/Transforms/IPO/FunctionAttrs.cpp:125:3                               │
+│ #17 0x00007f309b50f15d checkFunctionMemoryAccess(llvm::Function&, bool,       │
+│ llvm::AAResults&, llvm::SmallSetVector<llvm::Function*, 8u> const&)           │
+│ llvm/lib/Transforms/IPO/FunctionAttrs.cpp:249:17                              │
+│ #18 0x00007f309b52a19d void                                                   │
+│ addMemoryAttrs<llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC │
+│ &, llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,    │
+│ llvm::LazyCallGraph&,                                                         │
+│ llvm::CGSCCUpdateResult&)::'lambda'(llvm::Function&)&>(llvm::SmallSetVector<l │
+│ lvm::Function*, 8u> const&,                                                   │
+│ llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC&,              │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,       │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)::'lambda'(llvm::Function&)&,  │
+│ llvm::SmallSet<llvm::Function*, 8u, std::less<llvm::Function*>>&)             │
+│ llvm/lib/Transforms/IPO/FunctionAttrs.cpp:273:34                              │
+│ #19 0x00007f309b520453 llvm::SmallSet<llvm::Function*, 8u,                    │
+│ std::less<llvm::Function*>>                                                   │
+│ deriveAttrsInPostOrder<llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGr │
+│ aph::SCC&, llvm::AnalysisManager<llvm::LazyCallGraph::SCC,                    │
+│ llvm::LazyCallGraph&>&, llvm::LazyCallGraph&,                                 │
+│ llvm::CGSCCUpdateResult&)::'lambda'(llvm::Function&)&>(llvm::ArrayRef<llvm::F │
+│ unction*>, llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC&,   │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,       │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)::'lambda'(llvm::Function&)&,  │
+│ bool) llvm/lib/Transforms/IPO/FunctionAttrs.cpp:2242:19                       │
+│ #20 0x00007f309b5181ca                                                        │
+│ llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC&,              │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,       │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)                               │
+│ llvm/lib/Transforms/IPO/FunctionAttrs.cpp:2300:29                             │
+│ #21 0x00007f309d8e0585 llvm::detail::PassModel<llvm::LazyCallGraph::SCC,      │
+│ llvm::PostOrderFunctionAttrsPass,                                             │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>,        │
+│ llvm::LazyCallGraph&,                                                         │
+│ llvm::CGSCCUpdateResult&>::run(llvm::LazyCallGraph::SCC&,                     │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,       │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)                               │
+│ llvm/include/llvm/IR/PassManagerInternal.h:91:3                               │
+│ #22 0x00007f309841ff8a llvm::PassManager<llvm::LazyCallGraph::SCC,            │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>,        │
+│ llvm::LazyCallGraph&,                                                         │
+│ llvm::CGSCCUpdateResult&>::run(llvm::LazyCallGraph::SCC&,                     │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,       │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)                               │
+│ llvm/lib/Analysis/CGSCCPassManager.cpp:88:12                                  │
+│ #23 0x00007f309d8e86ab llvm::detail::PassModel<llvm::LazyCallGraph::SCC,      │
+│ llvm::PassManager<llvm::LazyCallGraph::SCC,                                   │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>,        │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&>,                              │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>,        │
+│ llvm::LazyCallGraph&,                                                         │
+│ llvm::CGSCCUpdateResult&>::run(llvm::LazyCallGraph::SCC&,                     │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,       │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)                               │
+│ llvm/include/llvm/IR/PassManagerInternal.h:91:3                               │
+│ #24 0x00007f3098420d3b                                                        │
+│ llvm::ModuleToPostOrderCGSCCPassAdaptor::run(llvm::Module&,                   │
+│ llvm::AnalysisManager<llvm::Module>&)                                         │
+│ llvm/lib/Analysis/CGSCCPassManager.cpp:275:18                                 │
+│ #25 0x00007f309d8e85c5 llvm::detail::PassModel<llvm::Module,                  │
+│ llvm::ModuleToPostOrderCGSCCPassAdaptor,                                      │
+│ llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&,                      │
+│ llvm::AnalysisManager<llvm::Module>&)                                         │
+│ llvm/include/llvm/IR/PassManagerInternal.h:91:3                               │
+│ #26 0x00007f3097ab700b llvm::PassManager<llvm::Module,                        │
+│ llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&,                      │
+│ llvm::AnalysisManager<llvm::Module>&)                                         │
+│ llvm/include/llvm/IR/PassManagerImpl.h:85:18                                  │
+│ #27 0x00007f30a2ade6b5 llvm::runPassPipeline(llvm::StringRef, llvm::Module&,  │
+│ llvm::TargetMachine*, llvm::TargetLibraryInfoImpl*, llvm::ToolOutputFile*,    │
+│ llvm::ToolOutputFile*, llvm::ToolOutputFile*, llvm::StringRef,                │
+│ llvm::ArrayRef<llvm::PassPlugin>, llvm::ArrayRef<std::function<void           │
+│ (llvm::PassBuilder&)>>, llvm::opt_tool::OutputKind,                           │
+│ llvm::opt_tool::VerifierKind, bool, bool, bool, bool, bool, bool, bool)       │
+│ llvm/tools/opt/NewPMDriver.cpp:541:10                                         │
+│ #28 0x00007f30a2b1567e optMain llvm/tools/opt/optdriver.cpp:739:27            │
+│ #29 0x000055888faf61e8 main llvm/tools/opt/opt.cpp:25:64                      │
+│ #30 0x00007f30a24561ca (/usr/lib/x86_64-linux-gnu/libc.so.6+0x2a1ca)          │
+│ #31 0x00007f30a245628b __libc_start_main                                      │
+│ (/usr/lib/x86_64-linux-gnu/libc.so.6+0x2a28b)                                 │
+│ #32 0x000055888faf60a5 _start (bin/opt+0x10a5)                                │
+│                                                                               │
+│ ```                                                                           │
+│                                                                               │
+│ ## Initial Observations ##                                                    │
+│                                                                               │
+│ The reproducer is already minimized. Based on my experience in debugging      │
+│ these bugs, the issue is likely introduced by the *first transformation*, or  │
+│ due to incorrect analysis information feeding into it.                        │
+│ Here, the *first transformation* means the *first transformation point* that  │
+│ modifies the IR in the pass regardless of whether it's in the                 │
+│ `function-attrs` module or other modules.                                     │
+│ #### Opt Information ####                                                     │
+│                                                                               │
+│ To gather more insight, I ran `opt` to inspect both the transformations and   │
+│ the analysis results. Below are the command and the resulting log:            │
+│                                                                               │
+│ ```bash                                                                       │
+│ $ bin/opt --passes=function-attrs -S --debug-only=function-attrs              │
+│ /tmp/reprod_sbdwnsd2.ll                                                       │
+│ opt: llvm/include/llvm/Support/Casting.h:109: static bool                     │
+│ llvm::isa_impl_cl<To, const From*>::doit(const From*) [with To =              │
+│ llvm::AllocaInst; From = llvm::Value]: Assertion `Val && "isa<> used on a     │
+│ null pointer"' failed.                                                        │
+│                                                                               │
+│ ```                                                                           │
+│                                                                               │
+│ From this log, I identified the first transformation point as:                │
+│                                                                               │
+│ ```                                                                           │
+│ llvm/lib/Transforms/IPO/FunctionAttrs.cpp::addLocAccess()                     │
+│ ```                                                                           │
+│                                                                               │
+│ Here is the relevant backtrace at the moment of the transformation:           │
+│                                                                               │
+│ ```stack                                                                      │
+│ (frame 7) llvm/lib/Transforms/IPO/FunctionAttrs.cpp:125 in addLocAccess       │
+│ (frame 8) llvm/lib/Transforms/IPO/FunctionAttrs.cpp:249 in                    │
+│ checkFunctionMemoryAccess                                                     │
+│ (frame 9) llvm/lib/Transforms/IPO/FunctionAttrs.cpp:273 in                    │
+│ addMemoryAttrs<llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC │
+│ &, llvm::CGSCCAnalysisManager&, llvm::LazyCallGraph&,                         │
+│ llvm::CGSCCUpdateResult&)::<lambda(llvm::Function&)>&>(const (anonymous       │
+│ namespace)::SCCNodeSet &, struct {...} &, llvm::SmallSet<llvm::Function*, 8,  │
+│ std::less<llvm::Function*> > &)                                               │
+│ ```                                                                           │
+│                                                                               │
+│ #### Debugger Information ####                                                │
+│                                                                               │
+│ I also attached a debugger (it's gdb) so you can inspect the program state at │
+│ the transformation point.                                                     │
+│ For convenience, I started the debugger and paused execution at that point.   │
+│                                                                               │
+│ To use debugger, call the tool `debug` or `eval`. Call `eval` to evaluate     │
+│ expressions in the context of the paused frame. Call `debug` to execute       │
+│ debugger commands. Note, you should call `eval` as long as it suffices, as it │
+│ provides a more controlled interface.                                         │
+│                                                                               │
+│ ## Instructions for Analysis ##                                               │
+│                                                                               │
+│ Please help me determine the root cause of the issue based on the information │
+│ provided above.                                                               │
+│ You may use the logs supplied, and you may request or infer any additional    │
+│ context you find necessary using the available tools.                         │
+│                                                                               │
+│ Once you identify the issue and the corresponding fix,use the `stop` tool to  │
+│ specify the *edit point(s)* along with detailed reasoning. Follow this        │
+│ structure:                                                                    │
+│                                                                               │
+│ 1. **Understanding the Issue**: Explain what the problem is and why it        │
+│ manifests.                                                                    │
+│ 2. **Analyzing `opt`'s Log**: Highlight any relevant transformations,         │
+│ analysis results, or unexpected behavior observed in the `opt` output.        │
+│ 3. **Root Cause Analysis**: Connect the observations to the underlying cause  │
+│ in the code.                                                                  │
+│ 4. **Proposed Edit Point(s)**                                                 │
+│    + Each edit point should be at least 1 lines long                          │
+│    + NOTICE (on assertion failure): Assertion failures typically indicate     │
+│ earlier errors in execution. Assume all assertions are correct and            │
+│ investigate preceding code or conditions. Edit points can contain but cannot  │
+│ be limited to assertion statements.                                           │
+│ 5. **Conclusion**: Summarize the fix and its expected effect.                 │
+│                                                                               │
+╰───────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: ['find250[250]', 'grep250[250]', 'list250[250]', 'read250[250]',
+'code[250]', 'docs[250]', 'langref[250]', 'debug[250]', 'eval[250]', 'stop[250]']
+╭─ User [MainThread@3742650] ───────────────────────────────────────────────────╮
+│ ## Available Tools ##                                                         │
+│                                                                               │
+│ You have access to the following 10 tools to help you complete your task:     │
+│                                                                               │
+│ [                                                                             │
+│   {                                                                           │
+│     "name": "find250",                                                        │
+│     "description": "Find all files following a specified pattern (e.g.,       │
+│ `src/**/*.cpp`, `**/*.h`) in the specified directory. The results will be     │
+│ sorted alphabetically and only 250 results will be returned starting from a   │
+│ given index.",                                                                │
+│     "parameters": {                                                           │
+│       "k": {                                                                  │
+│         "type": "integer",                                                    │
+│         "required": true,                                                     │
+│         "description": "The index to start returning the results from         │
+│ (1-based index). For example, when k=10, it will return the 10th result and   │
+│ the next 249 results."                                                        │
+│       },                                                                      │
+│       "pattern": {                                                            │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The pattern of the files."                            │
+│       },                                                                      │
+│       "directory": {                                                          │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "Find files in this directory (a relative path         │
+│ starting with llvm/)."                                                        │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "grep250",                                                        │
+│     "description": "Print lines that match a specified pattern in the llvm/   │
+│ directory. This is exactly the same `grep` command in Linux, but with results │
+│ being sorted alphabetically, and only returns 250 results starting from a     │
+│ given index.",                                                                │
+│     "parameters": {                                                           │
+│       "k": {                                                                  │
+│         "type": "integer",                                                    │
+│         "required": true,                                                     │
+│         "description": "The index to start returning the results from         │
+│ (1-based index). For example, when k=10, it will return the 10th result and   │
+│ the next 249 results."                                                        │
+│       },                                                                      │
+│       "args": {                                                               │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The arguments including options, patterns, and files. │
+│ NOTICE: ensure the pattern to search is wrapped in single quotes (i.e.,       │
+│ '...'), e.g., `-nRI 'test-pattern'`."                                         │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "list250",                                                        │
+│     "description": "List up to 250 contents of a directory. All contents of   │
+│ the directory will be sorted alphabetically and only up to 250 of them are    │
+│ returned starting from a given index.",                                       │
+│     "parameters": {                                                           │
+│       "directory": {                                                          │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The relative path (starting with llvm/) to the        │
+│ directory to list."                                                           │
+│       },                                                                      │
+│       "k": {                                                                  │
+│         "type": "integer",                                                    │
+│         "required": true,                                                     │
+│         "description": "The index to start returning the contents from        │
+│ (1-based index). For example, when k=10, it will return the 10th content and  │
+│ the next 249 results."                                                        │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "read250",                                                        │
+│     "description": "Read the next 250 lines of content of a file starting a   │
+│ specific line.",                                                              │
+│     "parameters": {                                                           │
+│       "file": {                                                               │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The relative path to the file to read. The path       │
+│ should start with llvm/."                                                     │
+│       },                                                                      │
+│       "position": {                                                           │
+│         "type": "integer",                                                    │
+│         "required": true,                                                     │
+│         "description": "The line number to start reading from (1-based        │
+│ index)."                                                                      │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "code",                                                           │
+│     "description": "Obtain the source code of a function in LLVM. You should  │
+│ assume that all functions called by the function to obtain source code are    │
+│ correctly implemented",                                                       │
+│     "parameters": {                                                           │
+│       "func": {                                                               │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "Name of the function"                                 │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "docs",                                                           │
+│     "description": "Obtain the documentation of a function in LLVM",          │
+│     "parameters": {                                                           │
+│       "func": {                                                               │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "Name of the function"                                 │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "langref",                                                        │
+│     "description": "Get the detailed description of an LLVM                   │
+│ instruction/intrinsic from the LLVM Language Reference Manual.",              │
+│     "parameters": {                                                           │
+│       "inst": {                                                               │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The instruction/intrinsic that you'd like to get the  │
+│ description for.\nFor instructions, please provide the instruction name       │
+│ (e.g., `add`, `mul`, etc.).\nFor intrinsics, please provide the intrinsic     │
+│ name (e.g., `llvm.sadd.with.overflow`, `llvm.memcpy`, etc.).\nDo not include  │
+│ type mangling suffix or operands in the name."                                │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "debug",                                                          │
+│     "description": "Execute a GDB command and obtain the results from gdb,    │
+│ stdout, and stderr.\nInitially the debugger is stopped at the first           │
+│ transformation/crash breakpoint.\nNote that you are not allowed to start a    │
+│ new session or close the current session (i.e., executing                     │
+│ run/start/quit/exit).\nShell commands (shell/make/pipe) are also forbidden    │
+│ due to security reasons.",                                                    │
+│     "parameters": {                                                           │
+│       "cmd": {                                                                │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The GDB command"                                      │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "eval",                                                           │
+│     "description": "Evaluate an expression in the debugger and obtain its     │
+│ value. Please make sure that you have set the correct frame in the debugger   │
+│ before using this tool.",                                                     │
+│     "parameters": {                                                           │
+│       "expr": {                                                               │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The expression that you'd like to evaluate and obtain │
+│ its value"                                                                    │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "stop",                                                           │
+│     "description": "Stop process and return the found edit points for fixing  │
+│ the issue",                                                                   │
+│     "parameters": {                                                           │
+│       "edit_points": {                                                        │
+│         "type": "list[tuple[int,int,string]]",                                │
+│         "required": true,                                                     │
+│         "description": "A list of edit points with each being a tuple of the  │
+│ one-indexed starting line number (included), the ending line number           │
+│ (included), and the relative path of the file to edit (starting with llvm/)." │
+│       },                                                                      │
+│       "thoughts": {                                                           │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The detailed thoughts for diagnosing the issue        │
+│ including step-by-step \"1. Understanding the Issue\", 2. \"Analyzing `opt`'s │
+│ Log\", 3. \"Root Cause Analysis\", 4. \"Proposed Edit Points(s)\", and 5.     │
+│ \"Conclusion\"."                                                              │
+│       }                                                                       │
+│     }                                                                         │
+│   }                                                                           │
+│ ]                                                                             │
+│                                                                               │
+│ ### Tool Call Format ###                                                      │
+│                                                                               │
+│ When using a tool, return a JSON object strictly following below format:      │
+│                                                                               │
+│ <tool_call>                                                                   │
+│ {                                                                             │
+│   "name": <tool_name>,                                                        │
+│   "args": <tool_args>                                                         │
+│ }                                                                             │
+│ </tool_call>                                                                  │
+│                                                                               │
+│ For example:                                                                  │
+│                                                                               │
+│ <tool_call>                                                                   │
+│ {                                                                             │
+│   "name": "get_weather",                                                      │
+│   "args": {                                                                   │
+│     "location": "New York",                                                   │
+│     "date": "2023-10-01",                                                     │
+│     "celsius": true                                                           │
+│   }                                                                           │
+│ }                                                                             │
+│ </tool_call>                                                                  │
+│                                                                               │
+│ ### Key Requirements ###                                                      │
+│                                                                               │
+│ 1. ALWAYS wrap your response with "<tool_call>" and "</tool_call>" as shown   │
+│ above so that I know you are calling a tool.                                  │
+│ 2. Content inside "<tool_call>" and "</tool_call>" MUST be a valid JSON       │
+│ object. Put all other content outside of these tags.                          │
+│ 3. The "args" field MUST also be a valid JSON object. It is NOT a string that │
+│ represents a JSON object.                                                     │
+│ 4. Only call ONE tool in each of your response. Do NOT call multiple tools at │
+│ the same time.                                                                │
+│                                                                               │
+╰───────────────────────────────────────────────────────────────────────────────╯
+Executing round #0, chat statistics so far: {'chat_rounds': 1, 'input_tokens': 0,
+'cached_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}
+Remaining tools: ['find250[250]', 'grep250[250]', 'list250[250]', 'read250[250]',
+'code[250]', 'docs[250]', 'langref[250]', 'debug[250]', 'eval[250]', 'stop[250]']
+╭─ Function Call (id = <no-id>) [MainThread@3742650] ───────────────────────────╮
+│ read250({"file": "llvm/lib/Transforms/IPO/FunctionAttrs.cpp", "position": 1}) │
+╰───────────────────────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@3742650] ────────────────────╮
+│ file: llvm/lib/Transforms/IPO/FunctionAttrs.cpp:1-251                         │
+│ -----------------------------------------------------                         │
+│   1 //===- FunctionAttrs.cpp - Pass which marks functions attributes          │
+│ ----------===//                                                               │
+│   2 //                                                                        │
+│   3 // Part of the LLVM Project, under the Apache License v2.0 with LLVM      │
+│ Exceptions.                                                                   │
+│   4 // See https://llvm.org/LICENSE.txt for license information.              │
+│   5 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception                │
+│   6 //                                                                        │
+│   7                                                                           │
+│ //===----------------------------------------------------------------------== │
+│ =//                                                                           │
+│   8 //                                                                        │
+│   9 /// \file                                                                 │
+│  10 /// This file implements interprocedural passes which walk the            │
+│  11 /// call-graph deducing and/or propagating function attributes.           │
+│  12 //                                                                        │
+│  13                                                                           │
+│ //===----------------------------------------------------------------------== │
+│ =//                                                                           │
+│  14                                                                           │
+│  15 #include "llvm/Transforms/IPO/FunctionAttrs.h"                            │
+│  16 #include "llvm/ADT/ArrayRef.h"                                            │
+│  17 #include "llvm/ADT/DenseMap.h"                                            │
+│  18 #include "llvm/ADT/PostOrderIterator.h"                                   │
+│  19 #include "llvm/ADT/SCCIterator.h"                                         │
+│  20 #include "llvm/ADT/STLExtras.h"                                           │
+│  21 #include "llvm/ADT/SetVector.h"                                           │
+│  22 #include "llvm/ADT/SmallPtrSet.h"                                         │
+│  23 #include "llvm/ADT/SmallSet.h"                                            │
+│  24 #include "llvm/ADT/SmallVector.h"                                         │
+│  25 #include "llvm/ADT/Statistic.h"                                           │
+│  26 #include "llvm/Analysis/AssumptionCache.h"                                │
+│  27 #include "llvm/Analysis/BasicAliasAnalysis.h"                             │
+│  28 #include "llvm/Analysis/CFG.h"                                            │
+│  29 #include "llvm/Analysis/CGSCCPassManager.h"                               │
+│  30 #include "llvm/Analysis/CallGraph.h"                                      │
+│  31 #include "llvm/Analysis/CallGraphSCCPass.h"                               │
+│  32 #include "llvm/Analysis/CaptureTracking.h"                                │
+│  33 #include "llvm/Analysis/LazyCallGraph.h"                                  │
+│  34 #include "llvm/Analysis/MemoryLocation.h"                                 │
+│  35 #include "llvm/Analysis/ValueTracking.h"                                  │
+│  36 #include "llvm/IR/Argument.h"                                             │
+│  37 #include "llvm/IR/Attributes.h"                                           │
+│  38 #include "llvm/IR/BasicBlock.h"                                           │
+│  39 #include "llvm/IR/Constant.h"                                             │
+│  40 #include "llvm/IR/ConstantRangeList.h"                                    │
+│  41 #include "llvm/IR/Constants.h"                                            │
+│  42 #include "llvm/IR/Function.h"                                             │
+│  43 #include "llvm/IR/InstIterator.h"                                         │
+│  44 #include "llvm/IR/InstrTypes.h"                                           │
+│  45 #include "llvm/IR/Instruction.h"                                          │
+│  46 #include "llvm/IR/Instructions.h"                                         │
+│  47 #include "llvm/IR/IntrinsicInst.h"                                        │
+│  48 #include "llvm/IR/Metadata.h"                                             │
+│  49 #include "llvm/IR/ModuleSummaryIndex.h"                                   │
+│  50 #include "llvm/IR/PassManager.h"                                          │
+│  51 #include "llvm/IR/Type.h"                                                 │
+│  52 #include "llvm/IR/Use.h"                                                  │
+│  53 #include "llvm/IR/User.h"                                                 │
+│  54 #include "llvm/IR/Value.h"                                                │
+│  55 #include "llvm/Support/Casting.h"                                         │
+│  56 #include "llvm/Support/CommandLine.h"                                     │
+│  57 #include "llvm/Support/Compiler.h"                                        │
+│  58 #include "llvm/Support/Debug.h"                                           │
+│  59 #include "llvm/Support/ErrorHandling.h"                                   │
+│  60 #include "llvm/Support/raw_ostream.h"                                     │
+│  61 #include "llvm/Transforms/IPO.h"                                          │
+│  62 #include "llvm/Transforms/Utils/Local.h"                                  │
+│  63 #include <cassert>                                                        │
+│  64 #include <iterator>                                                       │
+│  65 #include <map>                                                            │
+│  66 #include <optional>                                                       │
+│  67 #include <vector>                                                         │
+│  68                                                                           │
+│  69 using namespace llvm;                                                     │
+│  70                                                                           │
+│  71 #define DEBUG_TYPE "function-attrs"                                       │
+│  72                                                                           │
+│  73 STATISTIC(NumMemoryAttr, "Number of functions with improved memory        │
+│ attribute");                                                                  │
+│  74 STATISTIC(NumNoCapture, "Number of arguments marked nocapture");          │
+│  75 STATISTIC(NumReturned, "Number of arguments marked returned");            │
+│  76 STATISTIC(NumReadNoneArg, "Number of arguments marked readnone");         │
+│  77 STATISTIC(NumReadOnlyArg, "Number of arguments marked readonly");         │
+│  78 STATISTIC(NumWriteOnlyArg, "Number of arguments marked writeonly");       │
+│  79 STATISTIC(NumNoAlias, "Number of function returns marked noalias");       │
+│  80 STATISTIC(NumNonNullReturn, "Number of function returns marked nonnull"); │
+│  81 STATISTIC(NumNoUndefReturn, "Number of function returns marked noundef"); │
+│  82 STATISTIC(NumNoRecurse, "Number of functions marked as norecurse");       │
+│  83 STATISTIC(NumNoUnwind, "Number of functions marked as nounwind");         │
+│  84 STATISTIC(NumNoFree, "Number of functions marked as nofree");             │
+│  85 STATISTIC(NumWillReturn, "Number of functions marked as willreturn");     │
+│  86 STATISTIC(NumNoSync, "Number of functions marked as nosync");             │
+│  87 STATISTIC(NumCold, "Number of functions marked as cold");                 │
+│  88                                                                           │
+│  89 STATISTIC(NumThinLinkNoRecurse,                                           │
+│  90           "Number of functions marked as norecurse during thinlink");     │
+│  91 STATISTIC(NumThinLinkNoUnwind,                                            │
+│  92           "Number of functions marked as nounwind during thinlink");      │
+│  93                                                                           │
+│  94 static cl::opt<bool> EnableNonnullArgPropagation(                         │
+│  95     "enable-nonnull-arg-prop", cl::init(true), cl::Hidden,                │
+│  96     cl::desc("Try to propagate nonnull argument attributes from callsites │
+│ to "                                                                          │
+│  97              "caller functions."));                                       │
+│  98                                                                           │
+│  99 static cl::opt<bool> DisableNoUnwindInference(                            │
+│ 100     "disable-nounwind-inference", cl::Hidden,                             │
+│ 101     cl::desc("Stop inferring nounwind attribute during function-attrs     │
+│ pass"));                                                                      │
+│ 102                                                                           │
+│ 103 static cl::opt<bool> DisableNoFreeInference(                              │
+│ 104     "disable-nofree-inference", cl::Hidden,                               │
+│ 105     cl::desc("Stop inferring nofree attribute during function-attrs       │
+│ pass"));                                                                      │
+│ 106                                                                           │
+│ 107 static cl::opt<bool> DisableThinLTOPropagation(                           │
+│ 108     "disable-thinlto-funcattrs", cl::init(true), cl::Hidden,              │
+│ 109     cl::desc("Don't propagate function-attrs in thinLTO"));               │
+│ 110                                                                           │
+│ 111 namespace {                                                               │
+│ 112                                                                           │
+│ 113 using SCCNodeSet = SmallSetVector<Function *, 8>;                         │
+│ 114                                                                           │
+│ 115 } // end anonymous namespace                                              │
+│ 116                                                                           │
+│ 117 static void addLocAccess(MemoryEffects &ME, const MemoryLocation &Loc,    │
+│ 118                          ModRefInfo MR, AAResults &AAR) {                 │
+│ 119   // Ignore accesses to known-invariant or local memory.                  │
+│ 120   MR &= AAR.getModRefInfoMask(Loc, /*IgnoreLocal=*/true);                 │
+│ 121   if (isNoModRef(MR))                                                     │
+│ 122     return;                                                               │
+│ 123                                                                           │
+│ 124   const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);               │
+│ 125   if (isa<AllocaInst>(UO))                                                │
+│ 126     return;                                                               │
+│ 127   if (isa<Argument>(UO)) {                                                │
+│ 128     ME |= MemoryEffects::argMemOnly(MR);                                  │
+│ 129     return;                                                               │
+│ 130   }                                                                       │
+│ 131                                                                           │
+│ 132   // If it's not an identified object, it might be an argument.           │
+│ 133   if (!isIdentifiedObject(UO))                                            │
+│ 134     ME |= MemoryEffects::argMemOnly(MR);                                  │
+│ 135   ME |= MemoryEffects(IRMemLocation::Other, MR);                          │
+│ 136 }                                                                         │
+│ 137                                                                           │
+│ 138 static void addArgLocs(MemoryEffects &ME, const CallBase *Call,           │
+│ 139                        ModRefInfo ArgMR, AAResults &AAR) {                │
+│ 140   for (const Value *Arg : Call->args()) {                                 │
+│ 141     if (!Arg->getType()->isPtrOrPtrVectorTy())                            │
+│ 142       continue;                                                           │
+│ 143                                                                           │
+│ 144     addLocAccess(ME,                                                      │
+│ 145                  MemoryLocation::getBeforeOrAfter(Arg,                    │
+│ Call->getAAMetadata()),                                                       │
+│ 146                  ArgMR, AAR);                                             │
+│ 147   }                                                                       │
+│ 148 }                                                                         │
+│ 149                                                                           │
+│ 150 /// Returns the memory access attribute for function F using AAR for AA   │
+│ results,                                                                      │
+│ 151 /// where SCCNodes is the current SCC.                                    │
+│ 152 ///                                                                       │
+│ 153 /// If ThisBody is true, this function may examine the function body and  │
+│ will                                                                          │
+│ 154 /// return a result pertaining to this copy of the function. If it is     │
+│ false, the                                                                    │
+│ 155 /// result will be based only on AA results for the function declaration; │
+│ it                                                                            │
+│ 156 /// will be assumed that some other (perhaps less optimized) version of   │
+│ the                                                                           │
+│ 157 /// function may be selected at link time.                                │
+│ 158 ///                                                                       │
+│ 159 /// The return value is split into two parts: Memory effects that always  │
+│ apply,                                                                        │
+│ 160 /// and additional memory effects that apply if any of the functions in   │
+│ the SCC                                                                       │
+│ 161 /// can access argmem.                                                    │
+│ 162 static std::pair<MemoryEffects, MemoryEffects>                            │
+│ 163 checkFunctionMemoryAccess(Function &F, bool ThisBody, AAResults &AAR,     │
+│ 164                           const SCCNodeSet &SCCNodes) {                   │
+│ 165   MemoryEffects OrigME = AAR.getMemoryEffects(&F);                        │
+│ 166   if (OrigME.doesNotAccessMemory())                                       │
+│ 167     // Already perfect!                                                   │
+│ 168     return {OrigME, MemoryEffects::none()};                               │
+│ 169                                                                           │
+│ 170   if (!ThisBody)                                                          │
+│ 171     return {OrigME, MemoryEffects::none()};                               │
+│ 172                                                                           │
+│ 173   MemoryEffects ME = MemoryEffects::none();                               │
+│ 174   // Additional locations accessed if the SCC accesses argmem.            │
+│ 175   MemoryEffects RecursiveArgME = MemoryEffects::none();                   │
+│ 176                                                                           │
+│ 177   // Inalloca and preallocated arguments are always clobbered by the      │
+│ call.                                                                         │
+│ 178   if (F.getAttributes().hasAttrSomewhere(Attribute::InAlloca) ||          │
+│ 179       F.getAttributes().hasAttrSomewhere(Attribute::Preallocated))        │
+│ 180     ME |= MemoryEffects::argMemOnly(ModRefInfo::ModRef);                  │
+│ 181                                                                           │
+│ 182   // Scan the function body for instructions that may read or write       │
+│ memory.                                                                       │
+│ 183   for (Instruction &I : instructions(F)) {                                │
+│ 184     // Some instructions can be ignored even if they read or write        │
+│ memory.                                                                       │
+│ 185     // Detect these now, skipping to the next instruction if one is       │
+│ found.                                                                        │
+│ 186     if (auto *Call = dyn_cast<CallBase>(&I)) {                            │
+│ 187       // We can optimistically ignore calls to functions in the same SCC, │
+│ with                                                                          │
+│ 188       // two caveats:                                                     │
+│ 189       //  * Calls with operand bundles may have additional effects.       │
+│ 190       //  * Argument memory accesses may imply additional effects         │
+│ depending on                                                                  │
+│ 191       //    what the argument location is.                                │
+│ 192       if (!Call->hasOperandBundles() && Call->getCalledFunction() &&      │
+│ 193           SCCNodes.count(Call->getCalledFunction())) {                    │
+│ 194         // Keep track of which additional locations are accessed if the   │
+│ SCC                                                                           │
+│ 195         // turns out to access argmem.                                    │
+│ 196         addArgLocs(RecursiveArgME, Call, ModRefInfo::ModRef, AAR);        │
+│ 197         continue;                                                         │
+│ 198       }                                                                   │
+│ 199                                                                           │
+│ 200       MemoryEffects CallME = AAR.getMemoryEffects(Call);                  │
+│ 201                                                                           │
+│ 202       // If the call doesn't access memory, we're done.                   │
+│ 203       if (CallME.doesNotAccessMemory())                                   │
+│ 204         continue;                                                         │
+│ 205                                                                           │
+│ 206       // A pseudo probe call shouldn't change any function attribute      │
+│ since it                                                                      │
+│ 207       // doesn't translate to a real instruction. It comes with a memory  │
+│ access                                                                        │
+│ 208       // tag to prevent itself being removed by optimizations and not     │
+│ block                                                                         │
+│ 209       // other instructions being optimized.                              │
+│ 210       if (isa<PseudoProbeInst>(I))                                        │
+│ 211         continue;                                                         │
+│ 212                                                                           │
+│ 213       ME |= CallME.getWithoutLoc(IRMemLocation::ArgMem);                  │
+│ 214                                                                           │
+│ 215       // If the call accesses captured memory (currently part of "other") │
+│ and                                                                           │
+│ 216       // an argument is captured (currently not tracked), then it may     │
+│ also                                                                          │
+│ 217       // access argument memory.                                          │
+│ 218       ModRefInfo OtherMR = CallME.getModRef(IRMemLocation::Other);        │
+│ 219       ME |= MemoryEffects::argMemOnly(OtherMR);                           │
+│ 220                                                                           │
+│ 221       // Check whether all pointer arguments point to local memory, and   │
+│ 222       // ignore calls that only access local memory.                      │
+│ 223       ModRefInfo ArgMR = CallME.getModRef(IRMemLocation::ArgMem);         │
+│ 224       if (ArgMR != ModRefInfo::NoModRef)                                  │
+│ 225         addArgLocs(ME, Call, ArgMR, AAR);                                 │
+│ 226       continue;                                                           │
+│ 227     }                                                                     │
+│ 228                                                                           │
+│ 229     ModRefInfo MR = ModRefInfo::NoModRef;                                 │
+│ 230     if (I.mayWriteToMemory())                                             │
+│ 231       MR |= ModRefInfo::Mod;                                              │
+│ 232     if (I.mayReadFromMemory())                                            │
+│ 233       MR |= ModRefInfo::Ref;                                              │
+│ 234     if (MR == ModRefInfo::NoModRef)                                       │
+│ 235       continue;                                                           │
+│ 236                                                                           │
+│ 237     std::optional<MemoryLocation> Loc = MemoryLocation::getOrNone(&I);    │
+│ 238     if (!Loc) {                                                           │
+│ 239       // If no location is known, conservatively assume anything can be   │
+│ 240       // accessed.                                                        │
+│ 241       ME |= MemoryEffects(MR);                                            │
+│ 242       continue;                                                           │
+│ 243     }                                                                     │
+│ 244                                                                           │
+│ 245     // Volatile operations may access inaccessible memory.                │
+│ 246     if (I.isVolatile())                                                   │
+│ 247       ME |= MemoryEffects::inaccessibleMemOnly(MR);                       │
+│ 248                                                                           │
+│ 249     addLocAccess(ME, *Loc, MR, AAR);                                      │
+│ 250   }                                                                       │
+│ -----------------------------------------------------                         │
+╰───────────────────────────────────────────────────────────────────────────────╯
+Executing round #1, chat statistics so far: {'chat_rounds': 2, 'input_tokens':
+5339, 'cached_tokens': 0, 'output_tokens': 58, 'total_tokens': 5397}
+Remaining tools: ['find250[250]', 'grep250[250]', 'list250[250]', 'read250[249]',
+'code[250]', 'docs[250]', 'langref[250]', 'debug[250]', 'eval[250]', 'stop[250]']
+╭─ Function Call (id = <no-id>) [MainThread@3742650] ───────────────────────────╮
+│ stop({"edit_points": [[124, 136,                                              │
+│ "llvm/lib/Transforms/IPO/FunctionAttrs.cpp"]], "thoughts": "1. Understanding  │
+│ the Issue:\nThe crash occurs in addLocAccess() when calling                   │
+│ isa<AllocaInst>(UO) on a null pointer. The underlying object UO is obtained   │
+│ via getUnderlyingObjectAggressive(Loc.Ptr), which can return null for certain │
+│ poison/undef/phi-cycle patterns. The code assumes UO is always non-null,      │
+│ triggering an assertion in isa<> when it's actually null.\n\n2. Analyzing     │
+│ opt's Log:\nThe first transformation point is addLocAccess(). The stack trace │
+│ shows the assertion failure at isa<AllocaInst>(UO) in FunctionAttrs.cpp:125.  │
+│ This indicates that addLocAccess() did not account for a null UO. The         │
+│ reproducer uses poison and cyclic phis leading to a situation where           │
+│ getUnderlyingObjectAggressive returns null, as hinted by the comment in the   │
+│ IR about a null-returning bug.\n\n3. Root Cause Analysis:\naddLocAccess()     │
+│ relies on getUnderlyingObjectAggressive() to categorize memory effects into   │
+│ local (alloca), argument (Argument or non-identified objects potentially      │
+│ being arguments), and other. However, it does not handle the case where       │
+│ getUnderlyingObjectAggressive returns null. With UO == nullptr, the           │
+│ subsequent isa<AllocaInst>(UO) and isIdentifiedObject(UO) calls are invalid   │
+│ and hit assertions. Therefore, the root cause is missing a null check before  │
+│ using UO.\n\n4. Proposed Edit Points(s):\nInsert a null check immediately     │
+│ after obtaining UO in addLocAccess(). Treat a null underlying object as a     │
+│ non-identified object: we cannot prove it is local or a function Argument, so │
+│ conservatively mark argmem-only (like the existing non-identified path) and   │
+│ 'other' as accessed. Concretely, edit lines 124-136 to:\n\n--- Begin Patch    │
+│ ---\nconst Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n//            │
+│ getUnderlyingObjectAggressive may return null (e.g., due to poison/undef      │
+│ or\n// complex cycles). Conservatively treat as non-identified/unknown.\nif   │
+│ (!UO) {\n  ME |= MemoryEffects::argMemOnly(MR);\n  ME |=                      │
+│ MemoryEffects(IRMemLocation::Other, MR);\n  return;\n}\nif                    │
+│ (isa<AllocaInst>(UO))\n  return;\nif (isa<Argument>(UO)) {\n  ME |=           │
+│ MemoryEffects::argMemOnly(MR);\n  return;\n}\n\n// If it's not an identified  │
+│ object, it might be an argument.\nif (!isIdentifiedObject(UO))\n  ME |=       │
+│ MemoryEffects::argMemOnly(MR);\nME |= MemoryEffects(IRMemLocation::Other,     │
+│ MR);\n--- End Patch ---\n\nThis preserves the original behavior while adding  │
+│ a safe handling path for null UO.\n\n5. Conclusion:\nThe crash stems from     │
+│ assuming getUnderlyingObjectAggressive never returns null. By adding a null   │
+│ check in addLocAccess() and conservatively classifying memory effects when UO │
+│ is null, we avoid the assertion and maintain correct, conservative attribute  │
+│ inference. This fix prevents the abort in function-attrs on the provided      │
+│ reproducer and similar IR patterns."})                                        │
+╰───────────────────────────────────────────────────────────────────────────────╯
+╭─ User [MainThread@3742650] ───────────────────────────────────────────────────╮
+│ {                                                                             │
+│   "edit_points": [                                                            │
+│     [                                                                         │
+│       124,                                                                    │
+│       136,                                                                    │
+│       "llvm/lib/Transforms/IPO/FunctionAttrs.cpp"                             │
+│     ]                                                                         │
+│   ],                                                                          │
+│   "thoughts": "1. Understanding the Issue:\nThe crash occurs in               │
+│ addLocAccess() when calling isa<AllocaInst>(UO) on a null pointer. The        │
+│ underlying object UO is obtained via getUnderlyingObjectAggressive(Loc.Ptr),  │
+│ which can return null for certain poison/undef/phi-cycle patterns. The code   │
+│ assumes UO is always non-null, triggering an assertion in isa<> when it's     │
+│ actually null.\n\n2. Analyzing opt's Log:\nThe first transformation point is  │
+│ addLocAccess(). The stack trace shows the assertion failure at                │
+│ isa<AllocaInst>(UO) in FunctionAttrs.cpp:125. This indicates that             │
+│ addLocAccess() did not account for a null UO. The reproducer uses poison and  │
+│ cyclic phis leading to a situation where getUnderlyingObjectAggressive        │
+│ returns null, as hinted by the comment in the IR about a null-returning       │
+│ bug.\n\n3. Root Cause Analysis:\naddLocAccess() relies on                     │
+│ getUnderlyingObjectAggressive() to categorize memory effects into local       │
+│ (alloca), argument (Argument or non-identified objects potentially being      │
+│ arguments), and other. However, it does not handle the case where             │
+│ getUnderlyingObjectAggressive returns null. With UO == nullptr, the           │
+│ subsequent isa<AllocaInst>(UO) and isIdentifiedObject(UO) calls are invalid   │
+│ and hit assertions. Therefore, the root cause is missing a null check before  │
+│ using UO.\n\n4. Proposed Edit Points(s):\nInsert a null check immediately     │
+│ after obtaining UO in addLocAccess(). Treat a null underlying object as a     │
+│ non-identified object: we cannot prove it is local or a function Argument, so │
+│ conservatively mark argmem-only (like the existing non-identified path) and   │
+│ 'other' as accessed. Concretely, edit lines 124-136 to:\n\n--- Begin Patch    │
+│ ---\nconst Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n//            │
+│ getUnderlyingObjectAggressive may return null (e.g., due to poison/undef      │
+│ or\n// complex cycles). Conservatively treat as non-identified/unknown.\nif   │
+│ (!UO) {\n  ME |= MemoryEffects::argMemOnly(MR);\n  ME |=                      │
+│ MemoryEffects(IRMemLocation::Other, MR);\n  return;\n}\nif                    │
+│ (isa<AllocaInst>(UO))\n  return;\nif (isa<Argument>(UO)) {\n  ME |=           │
+│ MemoryEffects::argMemOnly(MR);\n  return;\n}\n\n// If it's not an identified  │
+│ object, it might be an argument.\nif (!isIdentifiedObject(UO))\n  ME |=       │
+│ MemoryEffects::argMemOnly(MR);\nME |= MemoryEffects(IRMemLocation::Other,     │
+│ MR);\n--- End Patch ---\n\nThis preserves the original behavior while adding  │
+│ a safe handling path for null UO.\n\n5. Conclusion:\nThe crash stems from     │
+│ assuming getUnderlyingObjectAggressive never returns null. By adding a null   │
+│ check in addLocAccess() and conservatively classifying memory effects when UO │
+│ is null, we avoid the assertion and maintain correct, conservative attribute  │
+│ inference. This fix prevents the abort in function-attrs on the provided      │
+│ reproducer and similar IR patterns."                                          │
+│ }                                                                             │
+╰───────────────────────────────────────────────────────────────────────────────╯
+Generating patch for edit points:
+llvm/lib/Transforms/IPO/FunctionAttrs.cpp:124-136 ...
+╭─ User [MainThread@3742650] ───────────────────────────────────────────────────╮
+│ You are an expert LLVM developer. I'm encountering an LLVM bug that I haven't │
+│ been able to fix.                                                             │
+│ Your goal is to generate a patch that fixes the LLVM bug based on the         │
+│ information below.                                                            │
+│                                                                               │
+│ ## Bug Information ##                                                         │
+│                                                                               │
+│ ### Reproducer ###                                                            │
+│                                                                               │
+│ ```llvm                                                                       │
+│                                                                               │
+│ ; Regression test for a null-returning bug of                                 │
+│ getUnderlyingObjectAggressive().                                              │
+│ ; This should not crash.                                                      │
+│ define void @phi_cycle() {                                                    │
+│ bb:                                                                           │
+│   unreachable                                                                 │
+│                                                                               │
+│ bb1:                                              ; preds = %bb17             │
+│   br label %bb2                                                               │
+│                                                                               │
+│ bb2:                                              ; preds = %bb5, %bb1        │
+│   %phi = phi ptr [ %phi6, %bb1 ], [ %phi6, %bb5 ]                             │
+│   br i1 poison, label %bb4, label %bb3                                        │
+│                                                                               │
+│ bb3:                                              ; preds = %bb2              │
+│   %getelementptr = getelementptr inbounds i8, ptr %phi, i32 poison            │
+│   br label %bb5                                                               │
+│                                                                               │
+│ bb4:                                              ; preds = %bb2              │
+│   br label %bb7                                                               │
+│                                                                               │
+│ bb5:                                              ; preds = %bb15, %bb3       │
+│   %phi6 = phi ptr [ %getelementptr, %bb3 ], [ %phi16, %bb15 ]                 │
+│   br i1 poison, label %bb17, label %bb2                                       │
+│                                                                               │
+│ bb7:                                              ; preds = %bb15, %bb4       │
+│   %phi8 = phi ptr [ %phi, %bb4 ], [ %phi16, %bb15 ]                           │
+│   br i1 poison, label %bb11, label %bb9                                       │
+│                                                                               │
+│ bb9:                                              ; preds = %bb7              │
+│   %getelementptr10 = getelementptr inbounds i8, ptr %phi8, i32 1              │
+│   store i8 poison, ptr %phi8, align 1                                         │
+│   br label %bb15                                                              │
+│                                                                               │
+│ bb11:                                             ; preds = %bb7              │
+│   br i1 poison, label %bb13, label %bb12                                      │
+│                                                                               │
+│ bb12:                                             ; preds = %bb11             │
+│   br label %bb13                                                              │
+│                                                                               │
+│ bb13:                                             ; preds = %bb12, %bb11      │
+│   %getelementptr14 = getelementptr inbounds i8, ptr %phi8, i32 poison         │
+│   br label %bb15                                                              │
+│                                                                               │
+│ bb15:                                             ; preds = %bb13, %bb9       │
+│   %phi16 = phi ptr [ %getelementptr14, %bb13 ], [ %getelementptr10, %bb9 ]    │
+│   br i1 poison, label %bb5, label %bb7                                        │
+│                                                                               │
+│ bb17:                                             ; preds = %bb5              │
+│   br label %bb1                                                               │
+│ }                                                                             │
+│ ```                                                                           │
+│                                                                               │
+│ ### Symptom ###                                                               │
+│                                                                               │
+│ ```                                                                           │
+│ Command '['bin/opt', '-passes=function-attrs', '-S', '-']' died with          │
+│ <Signals.SIGABRT: 6>.                                                         │
+│                                                                               │
+│ opt: llvm/include/llvm/Support/Casting.h:109: static bool                     │
+│ llvm::isa_impl_cl<To, const From*>::doit(const From*) [with To =              │
+│ llvm::AllocaInst; From = llvm::Value]: Assertion `Val && "isa<> used on a     │
+│ null pointer"' failed.                                                        │
+│ PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/    │
+│ and include the crash backtrace.                                              │
+│ Stack dump:                                                                   │
+│ 0.      Program arguments: bin/opt -passes=function-attrs -S -                │
+│ 1.      Running pass "cgscc(function-attrs)" on module "<stdin>"              │
+│  #0 0x00007f30a2921314 llvm::sys::PrintStackTrace(llvm::raw_ostream&, int)    │
+│ llvm/lib/Support/Unix/Signals.inc:798:22                                      │
+│  #1 0x00007f30a292172b PrintStackTraceSignalHandler(void*)                    │
+│ llvm/lib/Support/Unix/Signals.inc:874:1                                       │
+│  #2 0x00007f30a291e11b llvm::sys::RunSignalHandlers()                         │
+│ llvm/lib/Support/Signals.cpp:105:20                                           │
+│  #3 0x00007f30a2920405 SignalHandler(int)                                     │
+│ llvm/lib/Support/Unix/Signals.inc:415:1                                       │
+│  #4 0x00007f30a2471330 (/usr/lib/x86_64-linux-gnu/libc.so.6+0x45330)          │
+│  #5 0x00007f30a24cab2c pthread_kill                                           │
+│ (/usr/lib/x86_64-linux-gnu/libc.so.6+0x9eb2c)                                 │
+│  #6 0x00007f30a247127e raise (/usr/lib/x86_64-linux-gnu/libc.so.6+0x4527e)    │
+│  #7 0x00007f30a24548ff abort (/usr/lib/x86_64-linux-gnu/libc.so.6+0x288ff)    │
+│  #8 0x00007f30a245481b (/usr/lib/x86_64-linux-gnu/libc.so.6+0x2881b)          │
+│  #9 0x00007f30a2467517 (/usr/lib/x86_64-linux-gnu/libc.so.6+0x3b517)          │
+│ #10 0x00007f309b3ebf1e llvm::isa_impl_cl<llvm::AllocaInst, llvm::Value        │
+│ const*>::doit(llvm::Value const*) llvm/include/llvm/Support/Casting.h:110:36  │
+│ #11 0x00007f309b3e75f9 llvm::isa_impl_wrap<llvm::AllocaInst, llvm::Value      │
+│ const*, llvm::Value const*>::doit(llvm::Value const* const&)                  │
+│ llvm/include/llvm/Support/Casting.h:138:3                                     │
+│ #12 0x00007f309b3defb2 llvm::isa_impl_wrap<llvm::AllocaInst, llvm::Value      │
+│ const* const, llvm::Value const*>::doit(llvm::Value const* const&)            │
+│ llvm/include/llvm/Support/Casting.h:130:3                                     │
+│ #13 0x00007f309b3d045c llvm::CastIsPossible<llvm::AllocaInst, llvm::Value     │
+│ const*, void>::isPossible(llvm::Value const* const&)                          │
+│ llvm/include/llvm/Support/Casting.h:258:3                                     │
+│ #14 0x00007f309b52416c llvm::CastInfo<llvm::AllocaInst, llvm::Value const*    │
+│ const, void>::isPossible(llvm::Value const* const&)                           │
+│ llvm/include/llvm/Support/Casting.h:511:3                                     │
+│ #15 0x00007f309b51c7ac bool llvm::isa<llvm::AllocaInst, llvm::Value           │
+│ const*>(llvm::Value const* const&) llvm/include/llvm/Support/Casting.h:550:1  │
+│ #16 0x00007f309b50eaa8                                                        │
+│ addLocAccess(llvm::MemoryEffectsBase<llvm::IRMemLocation>&,                   │
+│ llvm::MemoryLocation const&, llvm::ModRefInfo, llvm::AAResults&)              │
+│ llvm/lib/Transforms/IPO/FunctionAttrs.cpp:125:3                               │
+│ #17 0x00007f309b50f15d checkFunctionMemoryAccess(llvm::Function&, bool,       │
+│ llvm::AAResults&, llvm::SmallSetVector<llvm::Function*, 8u> const&)           │
+│ llvm/lib/Transforms/IPO/FunctionAttrs.cpp:249:17                              │
+│ #18 0x00007f309b52a19d void                                                   │
+│ addMemoryAttrs<llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC │
+│ &, llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,    │
+│ llvm::LazyCallGraph&,                                                         │
+│ llvm::CGSCCUpdateResult&)::'lambda'(llvm::Function&)&>(llvm::SmallSetVector<l │
+│ lvm::Function*, 8u> const&,                                                   │
+│ llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC&,              │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,       │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)::'lambda'(llvm::Function&)&,  │
+│ llvm::SmallSet<llvm::Function*, 8u, std::less<llvm::Function*>>&)             │
+│ llvm/lib/Transforms/IPO/FunctionAttrs.cpp:273:34                              │
+│ #19 0x00007f309b520453 llvm::SmallSet<llvm::Function*, 8u,                    │
+│ std::less<llvm::Function*>>                                                   │
+│ deriveAttrsInPostOrder<llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGr │
+│ aph::SCC&, llvm::AnalysisManager<llvm::LazyCallGraph::SCC,                    │
+│ llvm::LazyCallGraph&>&, llvm::LazyCallGraph&,                                 │
+│ llvm::CGSCCUpdateResult&)::'lambda'(llvm::Function&)&>(llvm::ArrayRef<llvm::F │
+│ unction*>, llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC&,   │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,       │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)::'lambda'(llvm::Function&)&,  │
+│ bool) llvm/lib/Transforms/IPO/FunctionAttrs.cpp:2242:19                       │
+│ #20 0x00007f309b5181ca                                                        │
+│ llvm::PostOrderFunctionAttrsPass::run(llvm::LazyCallGraph::SCC&,              │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,       │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)                               │
+│ llvm/lib/Transforms/IPO/FunctionAttrs.cpp:2300:29                             │
+│ #21 0x00007f309d8e0585 llvm::detail::PassModel<llvm::LazyCallGraph::SCC,      │
+│ llvm::PostOrderFunctionAttrsPass,                                             │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>,        │
+│ llvm::LazyCallGraph&,                                                         │
+│ llvm::CGSCCUpdateResult&>::run(llvm::LazyCallGraph::SCC&,                     │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,       │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)                               │
+│ llvm/include/llvm/IR/PassManagerInternal.h:91:3                               │
+│ #22 0x00007f309841ff8a llvm::PassManager<llvm::LazyCallGraph::SCC,            │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>,        │
+│ llvm::LazyCallGraph&,                                                         │
+│ llvm::CGSCCUpdateResult&>::run(llvm::LazyCallGraph::SCC&,                     │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,       │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)                               │
+│ llvm/lib/Analysis/CGSCCPassManager.cpp:88:12                                  │
+│ #23 0x00007f309d8e86ab llvm::detail::PassModel<llvm::LazyCallGraph::SCC,      │
+│ llvm::PassManager<llvm::LazyCallGraph::SCC,                                   │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>,        │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&>,                              │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>,        │
+│ llvm::LazyCallGraph&,                                                         │
+│ llvm::CGSCCUpdateResult&>::run(llvm::LazyCallGraph::SCC&,                     │
+│ llvm::AnalysisManager<llvm::LazyCallGraph::SCC, llvm::LazyCallGraph&>&,       │
+│ llvm::LazyCallGraph&, llvm::CGSCCUpdateResult&)                               │
+│ llvm/include/llvm/IR/PassManagerInternal.h:91:3                               │
+│ #24 0x00007f3098420d3b                                                        │
+│ llvm::ModuleToPostOrderCGSCCPassAdaptor::run(llvm::Module&,                   │
+│ llvm::AnalysisManager<llvm::Module>&)                                         │
+│ llvm/lib/Analysis/CGSCCPassManager.cpp:275:18                                 │
+│ #25 0x00007f309d8e85c5 llvm::detail::PassModel<llvm::Module,                  │
+│ llvm::ModuleToPostOrderCGSCCPassAdaptor,                                      │
+│ llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&,                      │
+│ llvm::AnalysisManager<llvm::Module>&)                                         │
+│ llvm/include/llvm/IR/PassManagerInternal.h:91:3                               │
+│ #26 0x00007f3097ab700b llvm::PassManager<llvm::Module,                        │
+│ llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&,                      │
+│ llvm::AnalysisManager<llvm::Module>&)                                         │
+│ llvm/include/llvm/IR/PassManagerImpl.h:85:18                                  │
+│ #27 0x00007f30a2ade6b5 llvm::runPassPipeline(llvm::StringRef, llvm::Module&,  │
+│ llvm::TargetMachine*, llvm::TargetLibraryInfoImpl*, llvm::ToolOutputFile*,    │
+│ llvm::ToolOutputFile*, llvm::ToolOutputFile*, llvm::StringRef,                │
+│ llvm::ArrayRef<llvm::PassPlugin>, llvm::ArrayRef<std::function<void           │
+│ (llvm::PassBuilder&)>>, llvm::opt_tool::OutputKind,                           │
+│ llvm::opt_tool::VerifierKind, bool, bool, bool, bool, bool, bool, bool)       │
+│ llvm/tools/opt/NewPMDriver.cpp:541:10                                         │
+│ #28 0x00007f30a2b1567e optMain llvm/tools/opt/optdriver.cpp:739:27            │
+│ #29 0x000055888faf61e8 main llvm/tools/opt/opt.cpp:25:64                      │
+│ #30 0x00007f30a24561ca (/usr/lib/x86_64-linux-gnu/libc.so.6+0x2a1ca)          │
+│ #31 0x00007f30a245628b __libc_start_main                                      │
+│ (/usr/lib/x86_64-linux-gnu/libc.so.6+0x2a28b)                                 │
+│ #32 0x000055888faf60a5 _start (bin/opt+0x10a5)                                │
+│                                                                               │
+│ ```                                                                           │
+│                                                                               │
+│ ### Root Cause Analysis ###                                                   │
+│                                                                               │
+│ -------------------- BEGIN --------------------                               │
+│ 1. Understanding the Issue:                                                   │
+│ The crash occurs in addLocAccess() when calling isa<AllocaInst>(UO) on a null │
+│ pointer. The underlying object UO is obtained via                             │
+│ getUnderlyingObjectAggressive(Loc.Ptr), which can return null for certain     │
+│ poison/undef/phi-cycle patterns. The code assumes UO is always non-null,      │
+│ triggering an assertion in isa<> when it's actually null.                     │
+│                                                                               │
+│ 2. Analyzing opt's Log:                                                       │
+│ The first transformation point is addLocAccess(). The stack trace shows the   │
+│ assertion failure at isa<AllocaInst>(UO) in FunctionAttrs.cpp:125. This       │
+│ indicates that addLocAccess() did not account for a null UO. The reproducer   │
+│ uses poison and cyclic phis leading to a situation where                      │
+│ getUnderlyingObjectAggressive returns null, as hinted by the comment in the   │
+│ IR about a null-returning bug.                                                │
+│                                                                               │
+│ 3. Root Cause Analysis:                                                       │
+│ addLocAccess() relies on getUnderlyingObjectAggressive() to categorize memory │
+│ effects into local (alloca), argument (Argument or non-identified objects     │
+│ potentially being arguments), and other. However, it does not handle the case │
+│ where getUnderlyingObjectAggressive returns null. With UO == nullptr, the     │
+│ subsequent isa<AllocaInst>(UO) and isIdentifiedObject(UO) calls are invalid   │
+│ and hit assertions. Therefore, the root cause is missing a null check before  │
+│ using UO.                                                                     │
+│                                                                               │
+│ 4. Proposed Edit Points(s):                                                   │
+│ Insert a null check immediately after obtaining UO in addLocAccess(). Treat a │
+│ null underlying object as a non-identified object: we cannot prove it is      │
+│ local or a function Argument, so conservatively mark argmem-only (like the    │
+│ existing non-identified path) and 'other' as accessed. Concretely, edit lines │
+│ 124-136 to:                                                                   │
+│                                                                               │
+│ --- Begin Patch ---                                                           │
+│ const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);                     │
+│ // getUnderlyingObjectAggressive may return null (e.g., due to poison/undef   │
+│ or                                                                            │
+│ // complex cycles). Conservatively treat as non-identified/unknown.           │
+│ if (!UO) {                                                                    │
+│   ME |= MemoryEffects::argMemOnly(MR);                                        │
+│   ME |= MemoryEffects(IRMemLocation::Other, MR);                              │
+│   return;                                                                     │
+│ }                                                                             │
+│ if (isa<AllocaInst>(UO))                                                      │
+│   return;                                                                     │
+│ if (isa<Argument>(UO)) {                                                      │
+│   ME |= MemoryEffects::argMemOnly(MR);                                        │
+│   return;                                                                     │
+│ }                                                                             │
+│                                                                               │
+│ // If it's not an identified object, it might be an argument.                 │
+│ if (!isIdentifiedObject(UO))                                                  │
+│   ME |= MemoryEffects::argMemOnly(MR);                                        │
+│ ME |= MemoryEffects(IRMemLocation::Other, MR);                                │
+│ --- End Patch ---                                                             │
+│                                                                               │
+│ This preserves the original behavior while adding a safe handling path for    │
+│ null UO.                                                                      │
+│                                                                               │
+│ 5. Conclusion:                                                                │
+│ The crash stems from assuming getUnderlyingObjectAggressive never returns     │
+│ null. By adding a null check in addLocAccess() and conservatively classifying │
+│ memory effects when UO is null, we avoid the assertion and maintain correct,  │
+│ conservative attribute inference. This fix prevents the abort in              │
+│ function-attrs on the provided reproducer and similar IR patterns.            │
+│ --------------------  END  --------------------                               │
+│                                                                               │
+│ ## Suspected Code Locations ##                                                │
+│                                                                               │
+│ Code shown below (including their files and line numbers) are the *likely*    │
+│ source of the bug. However, the actual fix may involve other parts of the     │
+│ codebase as well.                                                             │
+│ You should use the provided tools to explore the codebase for more context    │
+│ and edit the codebase as needed to fix the bug.                               │
+│                                                                               │
+│ -------------------- BEGIN --------------------                               │
+│ ```cpp                                                                        │
+│ // llvm/lib/Transforms/IPO/FunctionAttrs.cpp:124-136                          │
+│ 119   // Ignore accesses to known-invariant or local memory.                  │
+│ 120   MR &= AAR.getModRefInfoMask(Loc, /*IgnoreLocal=*/true);                 │
+│ 121   if (isNoModRef(MR))                                                     │
+│ 122     return;                                                               │
+│ 123                                                                           │
+│ 124   const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);               │
+│ 125   if (isa<AllocaInst>(UO))                                                │
+│ 126     return;                                                               │
+│ 127   if (isa<Argument>(UO)) {                                                │
+│ 128     ME |= MemoryEffects::argMemOnly(MR);                                  │
+│ 129     return;                                                               │
+│ 130   }                                                                       │
+│ 131                                                                           │
+│ 132   // If it's not an identified object, it might be an argument.           │
+│ 133   if (!isIdentifiedObject(UO))                                            │
+│ 134     ME |= MemoryEffects::argMemOnly(MR);                                  │
+│ 135   ME |= MemoryEffects(IRMemLocation::Other, MR);                          │
+│ 136 }                                                                         │
+│ 137                                                                           │
+│ 138 static void addArgLocs(MemoryEffects &ME, const CallBase *Call,           │
+│ 139                        ModRefInfo ArgMR, AAResults &AAR) {                │
+│ 140   for (const Value *Arg : Call->args()) {                                 │
+│ 141     if (!Arg->getType()->isPtrOrPtrVectorTy())                            │
+│                                                                               │
+│ ```                                                                           │
+│ --------------------  END  --------------------                               │
+│                                                                               │
+│ ## Instructions for Fixing ##                                                 │
+│                                                                               │
+│ You should create a clean, minimal patch that properly addresses the root     │
+│ cause while maintaining LLVM's code quality standards. Follow these steps:    │
+│                                                                               │
+│ 1. **Analyze**: Analyze the provided information to fully understand the      │
+│ bug's cause and effect. You may use provided tools to explore the codebase    │
+│ for more context.                                                             │
+│ 2. **Propose a Fix**: Outline your proposed solution. Explain your reasoning  │
+│ and the specific changes you intend to make.                                  │
+│ 3. **Implement**: Use the `edit` tool to apply your proposed changes to the   │
+│ code.                                                                         │
+│ 4. **Verify**: Use the `test` tool to confirm that your patch:                │
+│      + Is syntactically correct and does not introduce new syntax errors.     │
+│      + Is valid and does not modify any assertions in the code.               │
+│      + Fixes the original issue shown in the reproducer.                      │
+│      + Does not introduce any new regressions.                                │
+│ 5. **Iterate**: If verification fails, analyze the failure, revise your       │
+│ proposal, and repeat the implementation and verification steps until all      │
+│ tests pass.                                                                   │
+│ 6. **Submit**: Provide the final, clean patch for review.                     │
+│                                                                               │
+╰───────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: ['find250[250]', 'grep250[250]', 'list250[250]', 'read250[249]',
+'edit[25]', 'code[250]', 'docs[250]', 'langref[250]', 'reset[25]', 'preview[25]',
+'test[25]']
+╭─ User [MainThread@3742650] ───────────────────────────────────────────────────╮
+│ ## Available Tools ##                                                         │
+│                                                                               │
+│ You have access to the following 11 tools to help you complete your task:     │
+│                                                                               │
+│ [                                                                             │
+│   {                                                                           │
+│     "name": "find250",                                                        │
+│     "description": "Find all files following a specified pattern (e.g.,       │
+│ `src/**/*.cpp`, `**/*.h`) in the specified directory. The results will be     │
+│ sorted alphabetically and only 250 results will be returned starting from a   │
+│ given index.",                                                                │
+│     "parameters": {                                                           │
+│       "k": {                                                                  │
+│         "type": "integer",                                                    │
+│         "required": true,                                                     │
+│         "description": "The index to start returning the results from         │
+│ (1-based index). For example, when k=10, it will return the 10th result and   │
+│ the next 249 results."                                                        │
+│       },                                                                      │
+│       "pattern": {                                                            │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The pattern of the files."                            │
+│       },                                                                      │
+│       "directory": {                                                          │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "Find files in this directory (a relative path         │
+│ starting with llvm/)."                                                        │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "grep250",                                                        │
+│     "description": "Print lines that match a specified pattern in the llvm/   │
+│ directory. This is exactly the same `grep` command in Linux, but with results │
+│ being sorted alphabetically, and only returns 250 results starting from a     │
+│ given index.",                                                                │
+│     "parameters": {                                                           │
+│       "k": {                                                                  │
+│         "type": "integer",                                                    │
+│         "required": true,                                                     │
+│         "description": "The index to start returning the results from         │
+│ (1-based index). For example, when k=10, it will return the 10th result and   │
+│ the next 249 results."                                                        │
+│       },                                                                      │
+│       "args": {                                                               │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The arguments including options, patterns, and files. │
+│ NOTICE: ensure the pattern to search is wrapped in single quotes (i.e.,       │
+│ '...'), e.g., `-nRI 'test-pattern'`."                                         │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "list250",                                                        │
+│     "description": "List up to 250 contents of a directory. All contents of   │
+│ the directory will be sorted alphabetically and only up to 250 of them are    │
+│ returned starting from a given index.",                                       │
+│     "parameters": {                                                           │
+│       "directory": {                                                          │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The relative path (starting with llvm/) to the        │
+│ directory to list."                                                           │
+│       },                                                                      │
+│       "k": {                                                                  │
+│         "type": "integer",                                                    │
+│         "required": true,                                                     │
+│         "description": "The index to start returning the contents from        │
+│ (1-based index). For example, when k=10, it will return the 10th content and  │
+│ the next 249 results."                                                        │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "read250",                                                        │
+│     "description": "Read the next 250 lines of content of a file starting a   │
+│ specific line.",                                                              │
+│     "parameters": {                                                           │
+│       "file": {                                                               │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The relative path to the file to read. The path       │
+│ should start with llvm/."                                                     │
+│       },                                                                      │
+│       "position": {                                                           │
+│         "type": "integer",                                                    │
+│         "required": true,                                                     │
+│         "description": "The line number to start reading from (1-based        │
+│ index)."                                                                      │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "edit",                                                           │
+│     "description": "Edit a file to replace text within a file with new        │
+│ text.",                                                                       │
+│     "parameters": {                                                           │
+│       "file": {                                                               │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The relative path of the file to edit (starting with  │
+│ llvm/)."                                                                      │
+│       },                                                                      │
+│       "old": {                                                                │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The *exact* code snippet to be replaced in the file." │
+│       },                                                                      │
+│       "new": {                                                                │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The new code snippet."                                │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "code",                                                           │
+│     "description": "Obtain the source code of a function in LLVM. You should  │
+│ assume that all functions called by the function to obtain source code are    │
+│ correctly implemented",                                                       │
+│     "parameters": {                                                           │
+│       "func": {                                                               │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "Name of the function"                                 │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "docs",                                                           │
+│     "description": "Obtain the documentation of a function in LLVM",          │
+│     "parameters": {                                                           │
+│       "func": {                                                               │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "Name of the function"                                 │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "langref",                                                        │
+│     "description": "Get the detailed description of an LLVM                   │
+│ instruction/intrinsic from the LLVM Language Reference Manual.",              │
+│     "parameters": {                                                           │
+│       "inst": {                                                               │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The instruction/intrinsic that you'd like to get the  │
+│ description for.\nFor instructions, please provide the instruction name       │
+│ (e.g., `add`, `mul`, etc.).\nFor intrinsics, please provide the intrinsic     │
+│ name (e.g., `llvm.sadd.with.overflow`, `llvm.memcpy`, etc.).\nDo not include  │
+│ type mangling suffix or operands in the name."                                │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "reset",                                                          │
+│     "description": "Checkout the original file from the repository.",         │
+│     "parameters": {                                                           │
+│       "file": {                                                               │
+│         "type": "string",                                                     │
+│         "required": true,                                                     │
+│         "description": "The relative path of the file to edit (starting with  │
+│ llvm/)."                                                                      │
+│       }                                                                       │
+│     }                                                                         │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "preview",                                                        │
+│     "description": "Preview the changes made by the current patch.",          │
+│     "parameters": {}                                                          │
+│   },                                                                          │
+│   {                                                                           │
+│     "name": "test",                                                           │
+│     "description": "Check if the patch fixes the original issue and passes    │
+│ all regression tests.\nThis tool is very expensive. Please use it if you are  │
+│ ready.",                                                                      │
+│     "parameters": {}                                                          │
+│   }                                                                           │
+│ ]                                                                             │
+│                                                                               │
+│ ### Tool Call Format ###                                                      │
+│                                                                               │
+│ When using a tool, return a JSON object strictly following below format:      │
+│                                                                               │
+│ <tool_call>                                                                   │
+│ {                                                                             │
+│   "name": <tool_name>,                                                        │
+│   "args": <tool_args>                                                         │
+│ }                                                                             │
+│ </tool_call>                                                                  │
+│                                                                               │
+│ For example:                                                                  │
+│                                                                               │
+│ <tool_call>                                                                   │
+│ {                                                                             │
+│   "name": "get_weather",                                                      │
+│   "args": {                                                                   │
+│     "location": "New York",                                                   │
+│     "date": "2023-10-01",                                                     │
+│     "celsius": true                                                           │
+│   }                                                                           │
+│ }                                                                             │
+│ </tool_call>                                                                  │
+│                                                                               │
+│ ### Key Requirements ###                                                      │
+│                                                                               │
+│ 1. ALWAYS wrap your response with "<tool_call>" and "</tool_call>" as shown   │
+│ above so that I know you are calling a tool.                                  │
+│ 2. Content inside "<tool_call>" and "</tool_call>" MUST be a valid JSON       │
+│ object. Put all other content outside of these tags.                          │
+│ 3. The "args" field MUST also be a valid JSON object. It is NOT a string that │
+│ represents a JSON object.                                                     │
+│ 4. Only call ONE tool in each of your response. Do NOT call multiple tools at │
+│ the same time.                                                                │
+│                                                                               │
+╰───────────────────────────────────────────────────────────────────────────────╯
+Executing round #0, chat statistics so far: {'chat_rounds': 3, 'input_tokens':
+13567, 'cached_tokens': 5248, 'output_tokens': 996, 'total_tokens': 14563}
+Remaining tools: ['find250[250]', 'grep250[250]', 'list250[250]', 'read250[249]',
+'edit[25]', 'code[250]', 'docs[250]', 'langref[250]', 'reset[25]', 'preview[25]',
+'test[25]']
+╭─ Function Call (id = <no-id>) [MainThread@3742650] ───────────────────────────╮
+│ edit({"file": "llvm/lib/Transforms/IPO/FunctionAttrs.cpp", "old": "  const    │
+│ Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n  if                     │
+│ (isa<AllocaInst>(UO))\n    return;\n  if (isa<Argument>(UO)) {\n    ME |=     │
+│ MemoryEffects::argMemOnly(MR);\n    return;\n  }\n\n  // If it's not an       │
+│ identified object, it might be an argument.\n  if (!isIdentifiedObject(UO))\n │
+│ ME |= MemoryEffects::argMemOnly(MR);\n  ME |=                                 │
+│ MemoryEffects(IRMemLocation::Other, MR);\n}", "new": "  const Value *UO =     │
+│ getUnderlyingObjectAggressive(Loc.Ptr);\n  // getUnderlyingObjectAggressive   │
+│ may return null (e.g., due to poison/undef\n  // or cyclic PHIs).             │
+│ Conservatively treat as non-identified/unknown.\n  if (!UO) {\n    ME |=      │
+│ MemoryEffects::argMemOnly(MR);\n    ME |= MemoryEffects(IRMemLocation::Other, │
+│ MR);\n    return;\n  }\n  if (isa<AllocaInst>(UO))\n    return;\n  if         │
+│ (isa<Argument>(UO)) {\n    ME |= MemoryEffects::argMemOnly(MR);\n             │
+│ return;\n  }\n\n  // If it's not an identified object, it might be an         │
+│ argument.\n  if (!isIdentifiedObject(UO))\n    ME |=                          │
+│ MemoryEffects::argMemOnly(MR);\n  ME |= MemoryEffects(IRMemLocation::Other,   │
+│ MR);\n}"})                                                                    │
+╰───────────────────────────────────────────────────────────────────────────────╯
+╭─ Function Call Output (id = <no-id>) [MainThread@3742650] ────────────────────╮
+│ Replaced successfully.                                                        │
+╰───────────────────────────────────────────────────────────────────────────────╯
+Executing round #1, chat statistics so far: {'chat_rounds': 4, 'input_tokens':
+19265, 'cached_tokens': 5248, 'output_tokens': 1386, 'total_tokens': 20651}
+Remaining tools: ['find250[250]', 'grep250[250]', 'list250[250]', 'read250[249]',
+'edit[24]', 'code[250]', 'docs[250]', 'langref[250]', 'reset[25]', 'preview[25]',
+'test[25]']
+╭─ Function Call (id = <no-id>) [MainThread@3742650] ───────────────────────────╮
+│ test({})                                                                      │
+╰───────────────────────────────────────────────────────────────────────────────╯
+╭─ User [MainThread@3742650] ───────────────────────────────────────────────────╮
+│ diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp                        │
+│ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp                                   │
+│ index 56bfc8432cbb..eec21526983f 100644                                       │
+│ --- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp                               │
+│ +++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp                               │
+│ @@ -122,6 +122,13 @@ static void addLocAccess(MemoryEffects &ME, const        │
+│ MemoryLocation &Loc,                                                          │
+│      return;                                                                  │
+│                                                                               │
+│    const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);                  │
+│ +  // getUnderlyingObjectAggressive may return null (e.g., due to             │
+│ poison/undef                                                                  │
+│ +  // or cyclic PHIs). Conservatively treat as non-identified/unknown.        │
+│ +  if (!UO) {                                                                 │
+│ +    ME |= MemoryEffects::argMemOnly(MR);                                     │
+│ +    ME |= MemoryEffects(IRMemLocation::Other, MR);                           │
+│ +    return;                                                                  │
+│ +  }                                                                          │
+│    if (isa<AllocaInst>(UO))                                                   │
+│      return;                                                                  │
+│    if (isa<Argument>(UO)) {                                                   │
+│                                                                               │
+╰───────────────────────────────────────────────────────────────────────────────╯
+Generation statistics saved to /tmp/117308-gpt5-11260806.json.
+Final Patch
+-----------
+diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp
+b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp
+index 56bfc8432cbb..eec21526983f 100644
+--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp
++++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp
+@@ -122,6 +122,13 @@ static void addLocAccess(MemoryEffects &ME, const
+MemoryLocation &Loc,
+     return;
+
+   const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);
++  // getUnderlyingObjectAggressive may return null (e.g., due to poison/undef
++  // or cyclic PHIs). Conservatively treat as non-identified/unknown.
++  if (!UO) {
++    ME |= MemoryEffects::argMemOnly(MR);
++    ME |= MemoryEffects(IRMemLocation::Other, MR);
++    return;
++  }
+   if (isa<AllocaInst>(UO))
+     return;
+   if (isa<Argument>(UO)) {
+
+Reference Patch
+---------------
+commit 5a90168fa34e15b544d7749ca4d247a16d360119
+Author: Heejin Ahn <aheejin@gmail.com>
+Date:   Wed Jan 15 11:53:51 2025 -0800
+
+    [ValueTracking] Provide getUnderlyingObjectAggressive fallback (#123019)
+
+    This callsite assumes `getUnderlyingObjectAggressive` returns a non-null
+    pointer:
+
+    https://github.com/llvm/llvm-project/blob/273a94b3d5a78cd9122c7b3bbb5d5a87147
+735d2/llvm/lib/Transforms/IPO/FunctionAttrs.cpp#L124
+
+    But it can return null when there are cycles in the value chain so there
+    is no more `Worklist` item anymore to explore, in which case it just
+    returns `Object` at the end of the function without ever setting it:
+    https://github.com/llvm/llvm-project/blob/9b5857a68381652dbea2a0c9efa734b6c4c
+f38c9/llvm/lib/Analysis/ValueTracking.cpp#L6866-L6867
+    https://github.com/llvm/llvm-project/blob/9b5857a68381652dbea2a0c9efa734b6c4c
+f38c9/llvm/lib/Analysis/ValueTracking.cpp#L6889
+
+    `getUnderlyingObject` does not seem to return null either judging by
+    looking at its code and its callsites, so I think it is not likely to be
+    the author's intention that `getUnderlyingObjectAggressive` returns
+    null.
+
+    So this checks whether `Object` is null at the end, and if so, falls
+    back to the original first value.
+
+    ---
+
+    The test case here was reduced by bugpoint and further reduced manually,
+    but I find it hard to reduce it further.
+
+    To trigger this bug, the memory operation should not be reachable from
+    the entry BB, because the `phi`s should form a cycle without introducing
+    another value from the entry. I tried a minimal `phi` cycle with three
+    BBs (entry BB + two BBs in a cycle), but it was skipped here:
+    https://github.com/llvm/llvm-project/blob/273a94b3d5a78cd9122c7b3bbb5d5a87147
+735d2/llvm/lib/Transforms/IPO/FunctionAttrs.cpp#L121-L122
+    To get the result that's not `ModRefInfo::NoModRef`, the length of `phi`
+    chain needed to be greater than the `MaxLookup` value set in this
+    function:
+
+    https://github.com/llvm/llvm-project/blob/02403f4e450b86d93197dd34045ff40a34b
+21494/llvm/lib/Analysis/BasicAliasAnalysis.cpp#L744
+
+    But just lengthening the `phi` chain to 8 didn't trigger the same error
+    in `getUnderlyingObjectAggressive` because `getUnderlyingObject` here
+    passes through a single-chain `phi`s so not all `phi`s end up in
+    `Visited`:
+
+    https://github.com/llvm/llvm-project/blob/9b5857a68381652dbea2a0c9efa734b6c4c
+f38c9/llvm/lib/Analysis/ValueTracking.cpp#L6863
+
+    So I just submit here the smallest test case I managed to create.
+
+    ---
+
+    Fixes #117308 and fixes #122166.
+
+diff --git a/llvm/lib/Analysis/ValueTracking.cpp
+b/llvm/lib/Analysis/ValueTracking.cpp
+index 1bab9b32525c..1853b1c67159 100644
+--- a/llvm/lib/Analysis/ValueTracking.cpp
++++ b/llvm/lib/Analysis/ValueTracking.cpp
+@@ -6886,7 +6886,7 @@ const Value *llvm::getUnderlyingObjectAggressive(const
+Value *V) {
+       return FirstObject;
+   } while (!Worklist.empty());
+
+-  return Object;
++  return Object ? Object : FirstObject;
+ }
+
+ /// This is the function that does the work of looking through basic
+
+Statistics
+----------
+{
+  "command": {
+    "issue": "117308",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/117308-gpt5-11260806.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp
+b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex 56bfc8432cbb..eec21526983f
+100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++
+b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -122,6 +122,13 @@ static void
+addLocAccess(MemoryEffects &ME, const MemoryLocation &Loc,\n     return;\n \n
+const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n+  //
+getUnderlyingObjectAggressive may return null (e.g., due to poison/undef\n+  //
+or cyclic PHIs). Conservatively treat as non-identified/unknown.\n+  if (!UO)
+{\n+    ME |= MemoryEffects::argMemOnly(MR);\n+    ME |=
+MemoryEffects(IRMemLocation::Other, MR);\n+    return;\n+  }\n   if
+(isa<AllocaInst>(UO))\n     return;\n   if (isa<Argument>(UO)) {\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 25349,
+  "output_tokens": 1413,
+  "cached_tokens": 10880,
+  "total_tokens": 26762,
+  "chat_rounds": 4,
+  "total_time_sec": 66.4759910106659,
+  "trans_point": [
+    "llvm/lib/Transforms/IPO/FunctionAttrs.cpp",
+    "addLocAccess",
+    125
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/FunctionAttrs.cpp",
+      124,
+      136
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs in addLocAccess()
+when calling isa<AllocaInst>(UO) on a null pointer. The underlying object UO is
+obtained via getUnderlyingObjectAggressive(Loc.Ptr), which can return null for
+certain poison/undef/phi-cycle patterns. The code assumes UO is always non-null,
+triggering an assertion in isa<> when it's actually null.\n\n2. Analyzing opt's
+Log:\nThe first transformation point is addLocAccess(). The stack trace shows the
+assertion failure at isa<AllocaInst>(UO) in FunctionAttrs.cpp:125. This indicates
+that addLocAccess() did not account for a null UO. The reproducer uses poison and
+cyclic phis leading to a situation where getUnderlyingObjectAggressive returns
+null, as hinted by the comment in the IR about a null-returning bug.\n\n3. Root
+Cause Analysis:\naddLocAccess() relies on getUnderlyingObjectAggressive() to
+categorize memory effects into local (alloca), argument (Argument or
+non-identified objects potentially being arguments), and other. However, it does
+not handle the case where getUnderlyingObjectAggressive returns null. With UO ==
+nullptr, the subsequent isa<AllocaInst>(UO) and isIdentifiedObject(UO) calls are
+invalid and hit assertions. Therefore, the root cause is missing a null check
+before using UO.\n\n4. Proposed Edit Points(s):\nInsert a null check immediately
+after obtaining UO in addLocAccess(). Treat a null underlying object as a
+non-identified object: we cannot prove it is local or a function Argument, so
+conservatively mark argmem-only (like the existing non-identified path) and
+'other' as accessed. Concretely, edit lines 124-136 to:\n\n--- Begin Patch
+---\nconst Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n//
+getUnderlyingObjectAggressive may return null (e.g., due to poison/undef or\n//
+complex cycles). Conservatively treat as non-identified/unknown.\nif (!UO) {\n
+ME |= MemoryEffects::argMemOnly(MR);\n  ME |= MemoryEffects(IRMemLocation::Other,
+MR);\n  return;\n}\nif (isa<AllocaInst>(UO))\n  return;\nif (isa<Argument>(UO))
+{\n  ME |= MemoryEffects::argMemOnly(MR);\n  return;\n}\n\n// If it's not an
+identified object, it might be an argument.\nif (!isIdentifiedObject(UO))\n  ME
+|= MemoryEffects::argMemOnly(MR);\nME |= MemoryEffects(IRMemLocation::Other,
+MR);\n--- End Patch ---\n\nThis preserves the original behavior while adding a
+safe handling path for null UO.\n\n5. Conclusion:\nThe crash stems from assuming
+getUnderlyingObjectAggressive never returns null. By adding a null check in
+addLocAccess() and conservatively classifying memory effects when UO is null, we
+avoid the assertion and maintain correct, conservative attribute inference. This
+fix prevents the abort in function-attrs on the provided reproducer and similar
+IR patterns.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp
+b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex 56bfc8432cbb..eec21526983f
+100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++
+b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -122,6 +122,13 @@ static void
+addLocAccess(MemoryEffects &ME, const MemoryLocation &Loc,\n     return;\n \n
+const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n+  //
+getUnderlyingObjectAggressive may return null (e.g., due to poison/undef\n+  //
+or cyclic PHIs). Conservatively treat as non-identified/unknown.\n+  if (!UO)
+{\n+    ME |= MemoryEffects::argMemOnly(MR);\n+    ME |=
+MemoryEffects(IRMemLocation::Other, MR);\n+    return;\n+  }\n   if
+(isa<AllocaInst>(UO))\n     return;\n   if (isa<Argument>(UO)) {\n"
+  ]
+}

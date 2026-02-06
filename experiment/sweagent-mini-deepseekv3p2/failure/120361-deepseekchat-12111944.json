@@ -1,0 +1,38 @@
+{
+  "command": {
+    "issue": "120361",
+    "model": "deepseek-chat"
+  },
+  "patch": null,
+  "error": "NoAvailablePatchFound",
+  "errmsg": "All efforts tried yet no available patches found.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/mswe.py\", line 348, in main\n    raise NoAvailablePatchFound(\"All efforts tried yet no available patches found.\")\nautofix.main.NoAvailablePatchFound: All efforts tried yet no available patches found.\n",
+  "input_tokens": 2597542,
+  "output_tokens": 24666,
+  "cached_tokens": 2574272,
+  "total_tokens": 2622208,
+  "chat_rounds": 107,
+  "total_time_sec": 1183.7013199329376,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex 5eebfdb774d2..3921e61c878e 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -3166,14 +3166,10 @@ static bool impliesPoisonOrCond(const Value *ValAssumedPoison, const Value *V,\n         match(ICmp->getOperand(1), m_APIntForbidPoison(RHSC1)) &&\n         match(V, m_ICmp(Pred, m_Specific(LHS), m_APIntAllowPoison(RHSC2)))) {\n       unsigned BitWidth = RHSC1->getBitWidth();\n-      ConstantRange CRX =\n-          RHSC1->isNonNegative()\n-              ? ConstantRange(APInt::getSignedMinValue(BitWidth),\n-                              APInt::getZero(BitWidth))\n-              : ConstantRange(APInt::getZero(BitWidth),\n-                              APInt::getSignedMinValue(BitWidth));\n-      return CRX.icmp(Expected ? Pred : ICmpInst::getInverseCmpPredicate(Pred),\n-                      *RHSC2);\n+      // For icmp samesign, poison occurs when LHS is zero.\n+      ConstantRange PoisonCR = ConstantRange(APInt::getZero(BitWidth), APInt(BitWidth, 1));\n+      return PoisonCR.icmp(Expected ? Pred : ICmpInst::getInverseCmpPredicate(Pred),\n+                           *RHSC2);\n     }\n   }\n \n",
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex 5eebfdb774d2..b906480a4914 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -3166,14 +3166,9 @@ static bool impliesPoisonOrCond(const Value *ValAssumedPoison, const Value *V,\n         match(ICmp->getOperand(1), m_APIntForbidPoison(RHSC1)) &&\n         match(V, m_ICmp(Pred, m_Specific(LHS), m_APIntAllowPoison(RHSC2)))) {\n       unsigned BitWidth = RHSC1->getBitWidth();\n-      ConstantRange CRX =\n-          RHSC1->isNonNegative()\n-              ? ConstantRange(APInt::getSignedMinValue(BitWidth),\n-                              APInt::getZero(BitWidth))\n-              : ConstantRange(APInt::getZero(BitWidth),\n-                              APInt::getSignedMinValue(BitWidth));\n-      return CRX.icmp(Expected ? Pred : ICmpInst::getInverseCmpPredicate(Pred),\n-                      *RHSC2);\n+      // For icmp samesign, poison occurs when LHS is zero.\n+      ConstantRange PoisonCR = ConstantRange(APInt::getZero(BitWidth), APInt(BitWidth, 1));\n+      return false;\n     }\n   }\n \n",
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex 5eebfdb774d2..7f7ecd154b95 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -3166,14 +3166,9 @@ static bool impliesPoisonOrCond(const Value *ValAssumedPoison, const Value *V,\n         match(ICmp->getOperand(1), m_APIntForbidPoison(RHSC1)) &&\n         match(V, m_ICmp(Pred, m_Specific(LHS), m_APIntAllowPoison(RHSC2)))) {\n       unsigned BitWidth = RHSC1->getBitWidth();\n-      ConstantRange CRX =\n-          RHSC1->isNonNegative()\n-              ? ConstantRange(APInt::getSignedMinValue(BitWidth),\n-                              APInt::getZero(BitWidth))\n-              : ConstantRange(APInt::getZero(BitWidth),\n-                              APInt::getSignedMinValue(BitWidth));\n-      return CRX.icmp(Expected ? Pred : ICmpInst::getInverseCmpPredicate(Pred),\n-                      *RHSC2);\n+      // For icmp samesign, poison occurs when LHS is zero.\n+      ConstantRange PoisonCR = ConstantRange(APInt::getZero(BitWidth), APInt(BitWidth, 1));\n+      return false;\n     }\n   }\n \n@@ -3243,6 +3238,17 @@ Instruction *InstCombinerImpl::foldSelectOfBools(SelectInst &SI) {\n   }\n \n   if (match(FalseVal, m_Zero())) {\n+    // Check for the problematic pattern: select (icmp ne X, 0), (icmp samesign eq X, C), false\n+    // where C is non-zero constant. This transformation is unsafe because when X == 0,\n+    // the icmp samesign is poison but the select should return false.\n+    const ICmpInst *ICmpCond = dyn_cast<ICmpInst>(CondVal);\n+    const ICmpInst *ICmpTrue = dyn_cast<ICmpInst>(TrueVal);\n+    if (ICmpCond && ICmpTrue && ICmpCond->getPredicate() == ICmpInst::ICMP_NE &&\n+        match(ICmpCond->getOperand(1), m_Zero()) &&\n+        ICmpTrue->hasSameSign() &&\n+        ICmpTrue->getPredicate() == ICmpInst::ICMP_EQ &&\n+        ICmpCond->getOperand(0) == ICmpTrue->getOperand(0))\n+      return nullptr;\n     if (impliesPoisonOrCond(TrueVal, CondVal, /*Expected=*/true)) {\n       // Change: A = select B, C, false --> A = and B, C\n       return BinaryOperator::CreateAnd(CondVal, TrueVal);\n",
+    "",
+    "",
+    "",
+    "",
+    ""
+  ]
+}

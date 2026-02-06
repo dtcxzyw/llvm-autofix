@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "116249",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/116249-gpt5-11260637.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Scalar/IndVarSimplify.cpp b/llvm/lib/Transforms/Scalar/IndVarSimplify.cpp\nindex 2b2d516a7079..3ab1160d3102 100644\n--- a/llvm/lib/Transforms/Scalar/IndVarSimplify.cpp\n+++ b/llvm/lib/Transforms/Scalar/IndVarSimplify.cpp\n@@ -1530,6 +1530,13 @@ bool IndVarSimplify::canonicalizeExitCondition(Loop *L) {\n           L->getLoopPreheader()->getTerminator()->getIterator());\n       ICmp->setOperand(Swapped ? 1 : 0, LHSOp);\n       ICmp->setOperand(Swapped ? 0 : 1, NewRHS);\n+      // Dropping the zext may invalidate any prior proof that the operands have\n+      // the same sign. For example, zext(Op) is always non-negative, but after\n+      // rotation we compare Op directly which may be negative. Conservatively\n+      // clear the samesign flag to avoid introducing new undefined behavior via\n+      // a poison-producing compare.\n+      if (ICmp->hasSameSign())\n+        ICmp->setSameSign(false);\n       if (LHS->use_empty())\n         DeadInsts.push_back(LHS);\n     };\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 186320,
+  "output_tokens": 14204,
+  "cached_tokens": 149120,
+  "total_tokens": 200524,
+  "chat_rounds": 16,
+  "total_time_sec": 569.0791220664978,
+  "trans_point": [
+    "llvm/lib/Transforms/Utils/BasicBlockUtils.cpp",
+    "SplitBlockPredecessorsImpl",
+    1354
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/IndVarSimplify.cpp",
+      1526,
+      1535
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe transformation performed by IndVarSimplify rewrites an icmp samesign ugt between a loop-invariant i32 and a zero-extended loop-varying i8 value (%x ugt zext %call2) into an icmp samesign ugt between the truncated loop-invariant i8 (%x trunc to i8) and the original loop-varying i8 (%call2). The original compare cannot produce poison because both operands are known non-negative: %x has a range metadata [0,32), and zext %call2 yields [0,256). After the transformation, %call2 can be negative (e.g. 0x80 = -128 as signed), while %x remains non-negative. The samesign flag now imposes a constraint that is no longer guaranteed, making the comparison potentially produce poison, thus introducing new undefined behavior not present in the source. Alive2 correctly reports the target as less defined.\n\n2. Analyzing opt's Log:\nLoopSimplify first creates the preheader (SplitBlockPredecessorsImpl). Then IndVarSimplify performs the rotate-out-of-loop transformation for (icmp unsigned zext(V), Invariant). The transformation site is in IndVarSimplify.cpp lines 1522\u20131535: the lambda doRotateTransform replaces the operands with the un-extended variant and a trunc of the invariant. No code adjusts or drops the samesign flag. This is the first semantic-altering transformation with respect to poison production.\n\n3. Root Cause Analysis:\nThe logic in IndVarSimplify assumes replacing zext(Op) with Op and trunc(RHS) preserves correctness for unsigned predicates. That holds for ordinary unsigned comparisons, but with the samesign flag, zero extension provided an implicit proof that the loop-varying operand was non-negative. Removing zext invalidates that proof. The pass fails to recompute or conservatively drop the samesign flag. As a result, the transformed icmp may produce poison when the varying operand is negative, whereas the original never did.\n\n4. Proposed Edit Point(s):\nFile: llvm/lib/Transforms/Scalar/IndVarSimplify.cpp, lines 1526\u20131535 (inside the doRotateTransform lambda). Insert code after setting the new operands to conservatively clear the samesign flag if present, because the transformation may have weakened sign information. A precise analysis (e.g. using ValueTracking to re-establish sign equality) could be added later, but conservative clearing is correct and sufficient to fix the miscompile.\n\nPatch logic to add:\nif (ICmp->hasSameSign()) { ICmp->setSameSign(false); }\nInclude explanatory comment referencing loss of guaranteed non-negativity from removed zext.\n\n5. Conclusion:\nDropping the samesign flag after rotating the zext out restores semantic equivalence by preventing introduction of new poison conditions. The original comparison was always defined; the transformed one must also be always defined. This change ensures IndVarSimplify does not incorrectly preserve samesign in cases where its preconditions no longer hold.\n",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Scalar/IndVarSimplify.cpp b/llvm/lib/Transforms/Scalar/IndVarSimplify.cpp\nindex 2b2d516a7079..3ab1160d3102 100644\n--- a/llvm/lib/Transforms/Scalar/IndVarSimplify.cpp\n+++ b/llvm/lib/Transforms/Scalar/IndVarSimplify.cpp\n@@ -1530,6 +1530,13 @@ bool IndVarSimplify::canonicalizeExitCondition(Loop *L) {\n           L->getLoopPreheader()->getTerminator()->getIterator());\n       ICmp->setOperand(Swapped ? 1 : 0, LHSOp);\n       ICmp->setOperand(Swapped ? 0 : 1, NewRHS);\n+      // Dropping the zext may invalidate any prior proof that the operands have\n+      // the same sign. For example, zext(Op) is always non-negative, but after\n+      // rotation we compare Op directly which may be negative. Conservatively\n+      // clear the samesign flag to avoid introducing new undefined behavior via\n+      // a poison-producing compare.\n+      if (ICmp->hasSameSign())\n+        ICmp->setSameSign(false);\n       if (LHS->use_empty())\n         DeadInsts.push_back(LHS);\n     };\n"
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "124526",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/124526-qwen3max-11242121.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/InstCombine/InstructionCombining.cpp b/llvm/lib/Transforms/InstCombine/InstructionCombining.cpp\nindex cad17c511b6d..8a600d1fbcf4 100644\n--- a/llvm/lib/Transforms/InstCombine/InstructionCombining.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstructionCombining.cpp\n@@ -758,11 +758,14 @@ static Value *tryFactorization(BinaryOperator &I, const SimplifyQuery &SQ,\n       //\n       // iff C+1 isn't INT_MIN\n       const APInt *CInt;\n-      if (match(V, m_APInt(CInt)) && !CInt->isMinSignedValue())\n-        cast<Instruction>(RetVal)->setHasNoSignedWrap(HasNSW);\n+      if (match(V, m_APInt(CInt)) && !CInt->isMinSignedValue()) {\n+        if (isa<Instruction>(RetVal))\n+          cast<Instruction>(RetVal)->setHasNoSignedWrap(HasNSW);\n+      }\n \n       // nuw can be propagated with any constant or nuw value.\n-      cast<Instruction>(RetVal)->setHasNoUnsignedWrap(HasNUW);\n+      if (isa<Instruction>(RetVal))\n+        cast<Instruction>(RetVal)->setHasNoUnsignedWrap(HasNUW);\n     }\n   }\n   return RetVal;\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 463667,
+  "output_tokens": 2253,
+  "cached_tokens": 157440,
+  "total_tokens": 465920,
+  "chat_rounds": 28,
+  "total_time_sec": 184.0114061832428,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstructionCombining.cpp",
+    "tryFactorization",
+    762
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstructionCombining.cpp",
+      762,
+      765
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs in `tryFactorization()` when attempting to cast `RetVal` to an `Instruction`. The assertion failure indicates that `RetVal` is not actually an `Instruction`, but rather a `ConstantExpr`. This happens because `Builder.CreateBinOp()` can return a `ConstantExpr` when both operands are constants, but the code assumes it always returns an `Instruction`.\n\n2. Analyzing `opt`'s Log: The log shows that the pass is processing `%add = add i32 %shl, %shl` where `%shl = shl i32 ptrtoint (ptr @g to i32), 1`. The factorization logic recognizes this as `(A * 2) + (A * 2)` which should become `A * 4`. However, since `ptrtoint (ptr @g to i32)` is treated as a constant and `4` is a constant, `Builder.CreateBinOp(Instruction::Mul, A, V)` returns a `ConstantExpr` rather than an `Instruction`.\n\n3. Root Cause Analysis: In `tryFactorization()`, lines 762 and 765 attempt to cast `RetVal` to `Instruction` without checking if it's actually an instruction. When both operands to `Builder.CreateBinOp()` are constants, LLVM's IRBuilder will create a `ConstantExpr` instead of an `Instruction`. The `cast<Instruction>` then fails because `ConstantExpr` has `ValueID` = 5, while `InstructionVal` starts at 29, so `isa<Instruction>` returns false.\n\n4. Proposed Edit Point(s): The fix is to check if `RetVal` is actually an `Instruction` before attempting to cast it and set overflow flags. If it's a `ConstantExpr`, we cannot set overflow flags on it, so we should skip this step.\n\n5. Conclusion: By adding a check for `isa<Instruction>(RetVal)` before casting, we prevent the assertion failure while still allowing the optimization to proceed correctly. The overflow flag propagation is only relevant for actual instructions anyway, so skipping it for constant expressions is the correct behavior.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstructionCombining.cpp b/llvm/lib/Transforms/InstCombine/InstructionCombining.cpp\nindex cad17c511b6d..8a600d1fbcf4 100644\n--- a/llvm/lib/Transforms/InstCombine/InstructionCombining.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstructionCombining.cpp\n@@ -758,11 +758,14 @@ static Value *tryFactorization(BinaryOperator &I, const SimplifyQuery &SQ,\n       //\n       // iff C+1 isn't INT_MIN\n       const APInt *CInt;\n-      if (match(V, m_APInt(CInt)) && !CInt->isMinSignedValue())\n-        cast<Instruction>(RetVal)->setHasNoSignedWrap(HasNSW);\n+      if (match(V, m_APInt(CInt)) && !CInt->isMinSignedValue()) {\n+        if (isa<Instruction>(RetVal))\n+          cast<Instruction>(RetVal)->setHasNoSignedWrap(HasNSW);\n+      }\n \n       // nuw can be propagated with any constant or nuw value.\n-      cast<Instruction>(RetVal)->setHasNoUnsignedWrap(HasNUW);\n+      if (isa<Instruction>(RetVal))\n+        cast<Instruction>(RetVal)->setHasNoUnsignedWrap(HasNUW);\n     }\n   }\n   return RetVal;\n"
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "command": {
+    "issue": "114191",
+    "model": "gpt-5"
+  },
+  "patch": null,
+  "error": "NoAvailablePatchFound",
+  "errmsg": "All efforts tried yet no available patches found.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/mswe.py\", line 350, in main\n    raise NoAvailablePatchFound(\"All efforts tried yet no available patches found.\")\nautofix.main.NoAvailablePatchFound: All efforts tried yet no available patches found.\n",
+  "input_tokens": 743839,
+  "output_tokens": 45993,
+  "cached_tokens": 656256,
+  "total_tokens": 789832,
+  "chat_rounds": 28,
+  "total_time_sec": 1073.3277423381805,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex 999ad1adff20..353f7dacb9b1 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -472,11 +472,10 @@ Instruction *InstCombinerImpl::foldSelectOpOp(SelectInst &SI, Instruction *TI,\n   // Cond ? x/y : x/z --> x / (Cond ? y : z)\n   auto *BO = dyn_cast<BinaryOperator>(TI);\n   if (BO && BO->isIntDivRem() && !isGuaranteedNotToBePoison(Cond)) {\n-    // A udiv/urem with a common divisor is safe because UB can only occur with\n-    // div-by-zero, and that would be present in the original code.\n-    if (BO->getOpcode() == Instruction::SDiv ||\n-        BO->getOpcode() == Instruction::SRem || MatchIsOpZero)\n-      Cond = Builder.CreateFreeze(Cond);\n+    // Freezing is required to avoid introducing immediate UB from a poison\n+    // condition when sinking div/rem through a select. Conservatively freeze the\n+    // condition for all integer div/rem when it may be poison.\n+    Cond = Builder.CreateFreeze(Cond);\n   }\n \n   // If we reach here, they do have operations in common.\n",
+    "diff --git a/llvm/lib/Analysis/InstructionSimplify.cpp b/llvm/lib/Analysis/InstructionSimplify.cpp\nindex d08be1e55c85..9c347dceb7ee 100644\n--- a/llvm/lib/Analysis/InstructionSimplify.cpp\n+++ b/llvm/lib/Analysis/InstructionSimplify.cpp\n@@ -1061,6 +1061,27 @@ static bool isDivZero(Value *X, Value *Y, const SimplifyQuery &Q,\n \n   // IsSigned == false.\n \n+  // Avoid over-aggressive folding for vectors: only proceed with unsigned\n+  // reasoning when the divisor is a uniform constant across lanes. Otherwise,\n+  // per-lane conditions may not hold globally, and folding X / Y -> 0 would be\n+  // incorrect.\n+  if (X->getType()->isVectorTy()) {\n+    auto *CVec = dyn_cast<Constant>(Y);\n+    if (!CVec || !isa<FixedVectorType>(Y->getType())) {\n+      return false;\n+    }\n+    // Ensure all elements are the same constant.\n+    auto *VTy = cast<FixedVectorType>(Y->getType());\n+    Constant *First = CVec->getAggregateElement(0u);\n+    if (!First)\n+      return false;\n+    for (unsigned i = 1, e = VTy->getNumElements(); i != e; ++i) {\n+      Constant *Elt = CVec->getAggregateElement(i);\n+      if (!Elt || Elt != First)\n+        return false;\n+    }\n+  }\n+\n   // Is the unsigned dividend known to be less than a constant divisor?\n   // TODO: Convert this (and above) to range analysis\n   //      (\"computeConstantRangeIncludingKnownBits\")?\ndiff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex 999ad1adff20..353f7dacb9b1 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -472,11 +472,10 @@ Instruction *InstCombinerImpl::foldSelectOpOp(SelectInst &SI, Instruction *TI,\n   // Cond ? x/y : x/z --> x / (Cond ? y : z)\n   auto *BO = dyn_cast<BinaryOperator>(TI);\n   if (BO && BO->isIntDivRem() && !isGuaranteedNotToBePoison(Cond)) {\n-    // A udiv/urem with a common divisor is safe because UB can only occur with\n-    // div-by-zero, and that would be present in the original code.\n-    if (BO->getOpcode() == Instruction::SDiv ||\n-        BO->getOpcode() == Instruction::SRem || MatchIsOpZero)\n-      Cond = Builder.CreateFreeze(Cond);\n+    // Freezing is required to avoid introducing immediate UB from a poison\n+    // condition when sinking div/rem through a select. Conservatively freeze the\n+    // condition for all integer div/rem when it may be poison.\n+    Cond = Builder.CreateFreeze(Cond);\n   }\n \n   // If we reach here, they do have operations in common.\n"
+  ]
+}

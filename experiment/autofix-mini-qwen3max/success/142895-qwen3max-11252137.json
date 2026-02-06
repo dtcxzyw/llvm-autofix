@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "142895",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/142895-qwen3max-11252137.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Utils/LoopPeel.cpp b/llvm/lib/Transforms/Utils/LoopPeel.cpp\nindex bd025fddd0cf..e6da3b1f26c8 100644\n--- a/llvm/lib/Transforms/Utils/LoopPeel.cpp\n+++ b/llvm/lib/Transforms/Utils/LoopPeel.cpp\n@@ -1257,7 +1257,14 @@ bool llvm::peelLoop(Loop *L, unsigned PeelCount, bool PeelLast, LoopInfo *LI,\n     // Now adjust users of the original exit values by replacing them with the\n     // exit value from the peeled iteration and remove them.\n     for (const auto &[P, E] : ExitValues) {\n-      P->replaceAllUsesWith(isa<Constant>(E) ? E : &*VMap.lookup(E));\n+      Value *Replacement = E;\n+      if (!isa<Constant>(E)) {\n+        // Only look up in VMap if E is defined within the loop being peeled.\n+        if (auto *EI = dyn_cast<Instruction>(E))\n+          if (L->contains(EI))\n+            Replacement = &*VMap.lookup(E);\n+      }\n+      P->replaceAllUsesWith(Replacement);\n       P->eraseFromParent();\n     }\n     formLCSSA(*L, DT, LI, SE);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 1052411,
+  "output_tokens": 2428,
+  "cached_tokens": 492672,
+  "total_tokens": 1054839,
+  "chat_rounds": 44,
+  "total_time_sec": 451.17190194129944,
+  "trans_point": [
+    "llvm/include/llvm/IR/ValueHandle.h",
+    "llvm::ValueHandleBase::operator*",
+    95
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/LoopPeel.cpp",
+      1260,
+      1260
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs when trying to dereference a ValueHandle that points to a null Value in LoopPeel.cpp:1260. The assertion failure `V && \"Dereferencing deleted ValueHandle\"` indicates that the WeakTrackingVH in VMap has become null, meaning the original Value it was tracking has been deleted or is no longer valid.\n\n2. Analyzing `opt`'s Log: The log shows that loop peeling is being attempted with `Peel 0 iteration(s) to turn some Phis into invariants` followed by `PEELING loop %loop with iteration count 1!`. This indicates that PeelLast is true (peeling the last iteration), and the code is trying to replace exit PHI nodes with values from the peeled iteration.\n\n3. Root Cause Analysis: In the reproducer, the exit block contains a PHI node `%exit.lcssa = phi i32 [ %mul, %loop ]` where `%mul` is defined in the entry block (not in the loop). When PeelLast is true, the code at line 1260 attempts to replace the PHI with `&*VMap.lookup(E)` where E is `%mul`. However, since `%mul` is not defined within the loop being peeled, it was never cloned and therefore doesn't exist in VMap. The lookup returns a null WeakTrackingVH, and dereferencing it causes the assertion failure.\n\nThe issue is that the code assumes that if E is not a Constant, it must be in VMap, but this is only true for values defined within the loop. Values defined outside the loop (like `%mul` in the entry block) are loop invariants and should be used directly, not looked up in VMap.\n\n4. Proposed Edit Point(s):\n+ The fix is to check if the value E is actually defined within the loop before attempting to look it up in VMap. If it's not in the loop (i.e., it's a loop invariant), we should use E directly.\n\n5. Conclusion: The fix ensures that when replacing exit PHI nodes during last-iteration peeling, we correctly handle both loop-internal values (which need to be mapped through VMap) and loop-invariant values (which should be used directly). This prevents the null dereference and allows the peeling pass to complete successfully.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/LoopPeel.cpp b/llvm/lib/Transforms/Utils/LoopPeel.cpp\nindex bd025fddd0cf..e6da3b1f26c8 100644\n--- a/llvm/lib/Transforms/Utils/LoopPeel.cpp\n+++ b/llvm/lib/Transforms/Utils/LoopPeel.cpp\n@@ -1257,7 +1257,14 @@ bool llvm::peelLoop(Loop *L, unsigned PeelCount, bool PeelLast, LoopInfo *LI,\n     // Now adjust users of the original exit values by replacing them with the\n     // exit value from the peeled iteration and remove them.\n     for (const auto &[P, E] : ExitValues) {\n-      P->replaceAllUsesWith(isa<Constant>(E) ? E : &*VMap.lookup(E));\n+      Value *Replacement = E;\n+      if (!isa<Constant>(E)) {\n+        // Only look up in VMap if E is defined within the loop being peeled.\n+        if (auto *EI = dyn_cast<Instruction>(E))\n+          if (L->contains(EI))\n+            Replacement = &*VMap.lookup(E);\n+      }\n+      P->replaceAllUsesWith(Replacement);\n       P->eraseFromParent();\n     }\n     formLCSSA(*L, DT, LI, SE);\n"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "119173",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/119173-gpt5-12060914.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ValueError",
+  "errmsg": "Line numbers 9036 and 9050 are out of bounds for file /llvm-autofix-deps/llvm/llvm/llvm/lib/Analysis/IVDescriptors.cpp",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 289, in patch_and_fix\n    code=extract_code_snippet(\n         ^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 240, in extract_code_snippet\n    raise ValueError(\nValueError: Line numbers 9036 and 9050 are out of bounds for file /llvm-autofix-deps/llvm/llvm/llvm/lib/Analysis/IVDescriptors.cpp\n",
+  "input_tokens": 237419,
+  "output_tokens": 7667,
+  "cached_tokens": 210304,
+  "total_tokens": 245086,
+  "chat_rounds": 16,
+  "total_time_sec": 630.822968006134,
+  "trans_point": [
+    "llvm/lib/Transforms/Utils/LCSSA.cpp",
+    "formLCSSAForInstructionsImpl",
+    178
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Analysis/IVDescriptors.cpp",
+      9036,
+      9050
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe loop-vectorizer produces an incorrect result for the provided loop. The original loop effectively keeps a recurrence value equal to 1: the PHI starts at 1 and the only backedge update is `add i8 0, %conv678`, which is an identity operation. The scalar result is 1.\nHowever, after vectorization, the pass introduces a vector reduction of `splat(1)` using `llvm.vector.reduce.add.v2i8`, yielding 2. This indicates the vectorizer incorrectly modeled the recurrence as an additive reduction over per-iteration inputs equal to 1, rather than recognizing that the binary op contributes the neutral element (0) and thus should not change the accumulator.\n\n2. Analyzing opt's Log:\nThe first transformation applied is LCSSA formation (LCSSA.cpp::formLCSSAForInstructionsImpl), as shown by the debug-only=lcssa output. This merely inserts PHIs to enable correct use rewriting across loop exits and does not change semantics.\nThe symptomatic wrong code is introduced during loop-vectorization: it creates a vector PHI initialized as `<1,0>` and then sets the vector recurrence to `splat(1)`, followed by a vector.reduce.add over `splat(1)`, returning 2. This shows the vectorization step is misidentifying or mishandling the reduction.\n\n3. Root Cause Analysis:\nThe recurrence is detected by RecurrenceDescriptor::isReductionPHI in IVDescriptors.cpp. The chain for an Add reduction generally recognizes `acc = acc + x[i]`. In the reproducer, the chain is `acc = add 0, acc`, which uses the accumulator with the neutral element (0) and has no other per-iteration input. This should not be considered as a reduction that accumulates any lane-wise values. If it is considered a reduction, the reduction input must be the per-iteration operand (`x[i]`), which here is consistently 0, not the accumulator's start value (1).\nThe observed VPlan uses `splat(1)` as the reduction vector, which demonstrates the chain incorrectly treated the PHI start value as the per-iteration contribution. This likely originates from reduction detection allowing identity/neutral operations (like add with 0) and subsequently building recipes that use the wrong operand for the lane-wise reduction input.\nTherefore, the fix is to adjust reduction detection to reject recurrence chains where the binary op combines the accumulator only with its neutral element across iterations. Such chains are semantically \"no-op reductions\" and should be treated as fixed-order recurrences or just carried-through PHIs, not as reductions.\n\n4. Proposed Edit Point(s):\nEdit IVDescriptors.cpp in RecurrenceDescriptor::isReductionPHI to filter out identity-only reduction patterns. Specifically, after recognizing a potential Add reduction, inspect the reduction-op chain and check if the non-accumulator operand is the neutral element (e.g., integer 0 for Add, integer 1 for Mul, etc.) and is loop invariant or constant for all iterations. If the chain contribution is the neutral element, do not classify the PHI as a reduction.\n\nSuggested change (conceptual):\n- In isReductionPHI, after AddReductionVar succeeds for Add, verify the reduction chain via getReductionOpChain and ensure the non-PHI operand is not a neutral constant. If it is neutral (e.g., `add acc, 0`) across the loop, return false instead of true.\n\nConcretely, insert a guard near the Add case to detect neutral-element-only contribution:\n\nllvm/lib/Analysis/IVDescriptors.cpp lines ~9036-9050:\n- After AddReductionVar(Phi, RecurKind::Add, ...) returned true but before returning true, fetch RedDes.getReductionOpChain() or equivalent info to inspect the combining instruction's other operand. If the other operand is the identity constant zero and invariant, then undo classification by returning false.\n\nThis prevents misclassification of \"carry-through\" PHIs as reductions, which would stop the vectorizer from generating a vector.reduce over `splat(1)` as seen.\n\n5. Conclusion:\nBy filtering out neutral-element-only reduction patterns in RecurrenceDescriptor::isReductionPHI, we prevent the loop-vectorizer from modeling such PHIs as additive reductions. This avoids introducing incorrect vector reductions over the PHI start value and restores correctness: the vectorizer will either leave the PHI as a fixed-order recurrence or a carried value, leading to the final value of 1 as in the scalar version. The first transformation (LCSSA) remains correct; the incorrect behavior is in reduction detection/modeling, and the proposed fix addresses it at the source.",
+  "test_traj": []
+}

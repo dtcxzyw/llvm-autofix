@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "110193",
+    "model": "gpt-5"
+  },
+  "patch": null,
+  "error": "RuntimeError",
+  "errmsg": "invalid HEAD",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/mswe.py\", line 344, in main\n    exit_status, result = agent.run(\n                          ^^^^^^^^^^\n  File \"/llvm-autofix-deps/py3_venv/lib/python3.12/site-packages/minisweagent/agents/default.py\", line 82, in run\n    self.step()\n  File \"/llvm-autofix/autofix/mswe.py\", line 286, in step\n    return super().step()\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix-deps/py3_venv/lib/python3.12/site-packages/minisweagent/agents/default.py\", line 91, in step\n    return self.get_observation(self.query())\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix-deps/py3_venv/lib/python3.12/site-packages/minisweagent/agents/default.py\", line 103, in get_observation\n    output = self.execute_action(self.parse_action(response))\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/mswe.py\", line 273, in execute_action\n    errmsg = self._test_submission()\n             ^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/mswe.py\", line 251, in _test_submission\n    res = self.tester.call()\n          ^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/tool.py\", line 89, in call\n    return self._call(**kwargs)\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/tools/test.py\", line 91, in _call\n    res, log = self.env.check_full()\n               ^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/llvm/lab_env.py\", line 127, in check_full\n    res, reason = self.build()\n                  ^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/llvm/lab_env.py\", line 84, in build\n    self.verify_head()\n  File \"/llvm-autofix/autofix/llvm/lab_env.py\", line 79, in verify_head\n    raise RuntimeError(\"invalid HEAD\")\nRuntimeError: invalid HEAD\n",
+  "input_tokens": 396523,
+  "output_tokens": 62742,
+  "cached_tokens": 349312,
+  "total_tokens": 459265,
+  "chat_rounds": 27,
+  "total_time_sec": 1177.3381497859955,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 24fad75f60ea..f6b2ebd3780c 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -3243,6 +3243,8 @@ private:\n     }\n \n     /// \\returns the \\p OpIdx operand of this TreeEntry.\n+    // Guard against transient out-of-range accesses during SLP costing/building.\n+\n     ValueList &getOperand(unsigned OpIdx) {\n     if (OpIdx >= Operands.size()) {\n       static ValueList Empty;\n@@ -3252,6 +3254,8 @@ private:\n   }\n \n     /// \\returns the \\p OpIdx operand of this TreeEntry.\n+    // Const overload: return an empty ArrayRef on out-of-range to avoid crashes.\n+\n     ArrayRef<Value *> getOperand(unsigned OpIdx) const {\n     if (OpIdx >= Operands.size())\n       return ArrayRef<Value *>();\n@@ -3263,7 +3267,8 @@ private:\n \n     /// \\return the single \\p OpIdx operand.\n     Value *getSingleOperand(unsigned OpIdx) const {\n-      assert(OpIdx < Operands.size() && \"Off bounds\");\n+      if (OpIdx >= Operands.size())\n+        return nullptr;\n       assert(!Operands[OpIdx].empty() && \"No operand available\");\n       return Operands[OpIdx][0];\n     }\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 24fad75f60ea..6a11edd9547d 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -3242,27 +3242,31 @@ private:\n         reorderScalars(Operand, Mask);\n     }\n \n+    /// Ensure operands are initialized in their original order if needed.\n+    void ensureOperands() const {\n+      if (Operands.empty())\n+        const_cast<TreeEntry *>(this)->setOperandsInOrder();\n+    }\n+\n+\n     /// \\returns the \\p OpIdx operand of this TreeEntry.\n     ValueList &getOperand(unsigned OpIdx) {\n-    if (OpIdx >= Operands.size()) {\n-      static ValueList Empty;\n-      return Empty;\n+      assert(OpIdx < Operands.size() && \"Off bounds\");\n+      return Operands[OpIdx];\n     }\n-    return Operands[OpIdx];\n-  }\n \n     /// \\returns the \\p OpIdx operand of this TreeEntry.\n     ArrayRef<Value *> getOperand(unsigned OpIdx) const {\n-    if (OpIdx >= Operands.size())\n-      return ArrayRef<Value *>();\n-    return Operands[OpIdx];\n-  }\n+      assert(OpIdx < Operands.size() && \"Off bounds\");\n+      return Operands[OpIdx];\n+    }\n+\n \n     /// \\returns the number of operands.\n     unsigned getNumOperands() const { return Operands.size(); }\n \n     /// \\return the single \\p OpIdx operand.\n-    Value *getSingleOperand(unsigned OpIdx) const {\n+      Value *getSingleOperand(unsigned OpIdx) const {\n       assert(OpIdx < Operands.size() && \"Off bounds\");\n       assert(!Operands[OpIdx].empty() && \"No operand available\");\n       return Operands[OpIdx][0];\n@@ -4247,6 +4251,11 @@ private:\n   /// bitwidth analysis attempt, like trunc, IToFP or ICmp.\n   DenseSet<unsigned> ExtraBitWidthNodes;\n };\n+    /// Ensure operands are initialized in their original order if needed.\n+    void ensureOperands() const {\n+      if (Operands.empty())\n+        const_cast<TreeEntry *>(this)->setOperandsInOrder();\n+    }\n \n } // end namespace slpvectorizer\n \n@@ -10241,6 +10250,8 @@ static SmallVector<Type *> buildIntrinsicArgTypes(const CallInst *CI,\n InstructionCost\n BoUpSLP::getEntryCost(const TreeEntry *E, ArrayRef<Value *> VectorizedVals,\n                       SmallPtrSetImpl<Value *> &CheckedExtracts) {\n+  E->ensureOperands();\n+\n   ArrayRef<Value *> VL = E->Scalars;\n \n   Type *ScalarTy = getValueType(VL[0]);\n"
+  ]
+}

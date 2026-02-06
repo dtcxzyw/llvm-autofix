@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "148052",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/148052-gpt5-12070824.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Utils/Local.cpp b/llvm/lib/Transforms/Utils/Local.cpp\nindex 2cfd70a1746c..503a6d7e99d4 100644\n--- a/llvm/lib/Transforms/Utils/Local.cpp\n+++ b/llvm/lib/Transforms/Utils/Local.cpp\n@@ -2852,7 +2852,10 @@ Instruction *llvm::removeUnwindEdge(BasicBlock *BB, DomTreeUpdater *DTU) {\n   BasicBlock *UnwindDest;\n \n   if (auto *CRI = dyn_cast<CleanupReturnInst>(TI)) {\n-    NewTI = CleanupReturnInst::Create(CRI->getCleanupPad(), nullptr, CRI->getIterator());\n+    // Operand 0 may be transiently undef if its defining cleanuppad was deleted.\n+    // Use the raw operand to avoid asserting in getCleanupPad() on undef.\n+    Value *Pad = CRI->getOperand(0);\n+    NewTI = CleanupReturnInst::Create(Pad, nullptr, CRI->getIterator());\n     UnwindDest = CRI->getUnwindDest();\n   } else if (auto *CatchSwitch = dyn_cast<CatchSwitchInst>(TI)) {\n     auto *NewCatchSwitch = CatchSwitchInst::Create(\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 105357,
+  "output_tokens": 4591,
+  "cached_tokens": 77952,
+  "total_tokens": 109948,
+  "chat_rounds": 9,
+  "total_time_sec": 115.96368432044983,
+  "trans_point": [
+    "llvm/include/llvm/IR/Instructions.h",
+    "llvm::CleanupReturnInst::getCleanupPad",
+    4449
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/Local.cpp",
+      2853,
+      2861
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs when simplifycfg attempts to process an EH cleanupret. Specifically, the assertion firing is in CleanupReturnInst::getCleanupPad(), which casts operand 0 to CleanupPadInst. The backtrace shows this happens via removeUnwindEdge called from removeEmptyCleanup/simplifyCleanupReturn, which is the first transformation.\n\n2. Analyzing opt's Log:\nThe debug log indicates that simplifycfg removes several unreachable blocks first (panic1, funclet_bb14, unreachable). Notably, funclet_bb14 contains the defining cleanuppad for a later cleanupret (bb13). After removing funclet_bb14, subsequent transformations touch cleanupret/cleanup pads. The first transformation point in the backtrace is removeUnwindEdge when simplifying a cleanupret. The log aligns with this: simplifycfg starts cleaning up predecessors/unwind edges, and the crash triggers when removeUnwindEdge calls getCleanupPad().\n\n3. Root Cause Analysis:\nremoveUnwindEdge has a case for CleanupReturnInst that constructs a new cleanupret which unwinds-to-caller: CleanupReturnInst::Create(CRI->getCleanupPad(), nullptr, ...). This relies on CRI->getCleanupPad(), which internally does cast<CleanupPadInst>(Op<0>()). However, due to earlier unreachable block deletion, the defining cleanuppad may have been erased, and the operand of the cleanupret can transiently become undef (or otherwise no longer be a CleanupPadInst). simplifyCleanupReturn already accounts for transient undef operands with a guard: if (isa<UndefValue>(RI->getOperand(0))) return false; But removeUnwindEdge does not; it unconditionally calls getCleanupPad() and asserts.\n\nIn other words, removeUnwindEdge assumes operand 0 of a CleanupReturnInst is always a CleanupPadInst, but simplifycfg can create a state where it is undef before removeUnwindEdge runs. This mismatch causes the assertion.\n\n4. Proposed Edit Point(s):\nEdit Local.cpp in removeUnwindEdge to avoid calling getCleanupPad() if operand 0 is no longer a CleanupPadInst. Instead, use the raw operand, which can be undef, when creating the new CleanupReturnInst. This mirrors simplifyCleanupReturn's tolerance for undef and prevents the cast assertion.\n\nProposed change (lines 2853-2861 in llvm/lib/Transforms/Utils/Local.cpp):\n- Current code:\n  if (auto *CRI = dyn_cast<CleanupReturnInst>(TI)) {\n    NewTI = CleanupReturnInst::Create(CRI->getCleanupPad(), nullptr, CRI->getIterator());\n    UnwindDest = CRI->getUnwindDest();\n  } else if (...)\n\n- Replace with:\n  if (auto *CRI = dyn_cast<CleanupReturnInst>(TI)) {\n    // Operand 0 may be transiently undef if its defining cleanuppad was deleted.\n    // Use the raw operand to preserve this state without asserting.\n    Value *Pad = CRI->getOperand(0);\n    NewTI = CleanupReturnInst::Create(Pad, nullptr, CRI->getIterator());\n    UnwindDest = CRI->getUnwindDest();\n  } else if (...)\n\nRationale:\n- CleanupReturnInst::Create accepts a Value* for the pad and asserts it is non-null, but does not require it to be a CleanupPadInst at construction time. Using the raw operand preserves undef values and avoids the cast in getCleanupPad(). Subsequent code which might query getCleanupPad() already contains guards (e.g., simplifyCleanupReturn) to skip processing when operand 0 is undef.\n- This keeps removeUnwindEdge robust in the presence of transient undef EH pad operands created by prior unreachable/dead block deletion.\n\n5. Conclusion:\nThe crash is caused by removeUnwindEdge assuming that the cleanuppad operand of a cleanupret is always a CleanupPadInst and calling getCleanupPad(), while simplifycfg can create a transient state where that operand becomes undef after deleting the defining EH pad block. Updating removeUnwindEdge to construct the replacement cleanupret using CRI->getOperand(0) instead of CRI->getCleanupPad() avoids the invalid cast and aligns with existing simplifycfg logic that tolerates undef EH pad operands. This fixes the assertion and allows simplifycfg to proceed safely.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/Local.cpp b/llvm/lib/Transforms/Utils/Local.cpp\nindex 2cfd70a1746c..503a6d7e99d4 100644\n--- a/llvm/lib/Transforms/Utils/Local.cpp\n+++ b/llvm/lib/Transforms/Utils/Local.cpp\n@@ -2852,7 +2852,10 @@ Instruction *llvm::removeUnwindEdge(BasicBlock *BB, DomTreeUpdater *DTU) {\n   BasicBlock *UnwindDest;\n \n   if (auto *CRI = dyn_cast<CleanupReturnInst>(TI)) {\n-    NewTI = CleanupReturnInst::Create(CRI->getCleanupPad(), nullptr, CRI->getIterator());\n+    // Operand 0 may be transiently undef if its defining cleanuppad was deleted.\n+    // Use the raw operand to avoid asserting in getCleanupPad() on undef.\n+    Value *Pad = CRI->getOperand(0);\n+    NewTI = CleanupReturnInst::Create(Pad, nullptr, CRI->getIterator());\n     UnwindDest = CRI->getUnwindDest();\n   } else if (auto *CatchSwitch = dyn_cast<CatchSwitchInst>(TI)) {\n     auto *NewCatchSwitch = CatchSwitchInst::Create(\n"
+  ]
+}

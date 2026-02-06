@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "121581",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/121581-gpt5-12061231.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp b/llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp\nindex d6fdade25559..386dbe241062 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp\n@@ -763,8 +763,11 @@ Instruction *InstCombinerImpl::foldGEPICmp(GEPOperator *GEPLHS, Value *RHS,\n           }\n \n       // If all indices are the same, just compare the base pointers.\n+      // This is only valid if we can fold under the current nowrap flags.\n+      GEPNoWrapFlags NWBaseCmp = GEPLHS->getNoWrapFlags() & GEPRHS->getNoWrapFlags();\n       Type *BaseType = GEPLHS->getOperand(0)->getType();\n-      if (IndicesTheSame && CmpInst::makeCmpResultType(BaseType) == I.getType())\n+      if (IndicesTheSame && CmpInst::makeCmpResultType(BaseType) == I.getType() &&\n+          CanFold(NWBaseCmp))\n         return new ICmpInst(Cond, GEPLHS->getOperand(0), GEPRHS->getOperand(0));\n \n       // If we're comparing GEPs with two base pointers that only differ in type\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 58083,
+  "output_tokens": 2827,
+  "cached_tokens": 38016,
+  "total_tokens": 60910,
+  "chat_rounds": 8,
+  "total_time_sec": 608.3289732933044,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp",
+    "llvm::InstCombinerImpl::foldGEPICmp",
+    768
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp",
+      750,
+      769
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe transformation replaces an icmp between two GEPs with identical indices but different bases into an icmp between the bases themselves. This is only valid if the addition of the common index to both bases does not wrap (modulo arithmetic). In the provided reproducer, the first GEP has nuw and the second has nusw. InstCombine is currently folding to a base-pointer comparison unconditionally in this case, which is incorrect for unsigned comparisons if either GEP could wrap unsigned.\n\nThis manifests as a miscompile: icmp ult (gep nuw x, z), (gep nusw y, z) is replaced by icmp ult x, y, which Alive2 shows to be wrong for x=null, y=non-null, z=-8.\n\n2. Analyzing opt's Log:\n- The first and only transformation is in foldGEPICmp: it converts \"%cmp = icmp ult ptr %gep1, %gep2\" into \"%cmp = icmp ult ptr %x, %y\" and erases the GEPs.\n- No other analysis feeds into this; AA reports no pointers and no mod/ref, so the decision is purely based on InstCombine's local reasoning.\n- The debug-only log shows the New instruction is created directly as \"icmp ult ptr %x, %y\" in foldGEPICmp.\n\n3. Root Cause Analysis:\nIn foldGEPICmp, the branch handling two GEPs with different base pointers but identical indices (lines 750\u2013769) performs the fold to compare bases without checking nowrap flags:\n\n  if (PtrBase != GEPRHS->getOperand(0)) {\n    ...\n    if (IndicesTheSame && CmpInst::makeCmpResultType(BaseType) == I.getType())\n      return new ICmpInst(Cond, GEPLHS->getOperand(0), GEPRHS->getOperand(0));\n  }\n\nFor unsigned predicates, this fold is only valid if adding the (common) OFFSET to both bases does not wrap. The function already defines CanFold(NW) to gate folding of unsigned compares based on nowrap flags (nuw/nusw), and later code uses NW = LHS_NW & RHS_NW to gate other folds. However, this particular base-pointer compare shortcut neglects to check CanFold(NW).\n\nGiven the reproducer, GEPLHS has nuw, GEPRHS has nusw. For unsigned compare, we require hasNoUnsignedWrap on both sides to avoid modulo wrap effects; intersecting flags yields NW that does not include nuw, so CanFold(NW) would be false. Thus the fold should not occur.\n\n4. Proposed Edit Point(s)\nFile: llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp\nEdit lines 750\u2013769 to gate the base-pointer comparison on nowrap flags. Specifically:\n- Compute NW = GEPLHS->getNoWrapFlags() & GEPRHS->getNoWrapFlags() before considering the base-pointer compare in the PtrBase != GEPRHS->getOperand(0) branch.\n- Require CanFold(NW) in addition to IndicesTheSame and type match before returning the base-pointer icmp.\n- The constructed icmp can remain as direct ICmpInst(Cond, BaseL, BaseR); we only need to prevent the transformation when unsigned wrap could occur.\n\nUpdated snippet conceptually:\n\n  if (PtrBase != GEPRHS->getOperand(0)) {\n    bool IndicesTheSame = ...;\n    // Compute combined nowrap flags of both GEPs.\n    GEPNoWrapFlags NW = GEPLHS->getNoWrapFlags() & GEPRHS->getNoWrapFlags();\n\n    Type *BaseType = GEPLHS->getOperand(0)->getType();\n    if (IndicesTheSame && CmpInst::makeCmpResultType(BaseType) == I.getType()\n        && CanFold(NW))\n      return new ICmpInst(Cond, GEPLHS->getOperand(0), GEPRHS->getOperand(0));\n\n    ...\n  }\n\nThis leverages the existing CanFold helper: for equality predicates, it always allows the fold; for unsigned predicates, it requires any nowrap flags, but specifically for unsigned wrap safety we need hasNoUnsignedWrap on both paths (which the intersection check handles).\n\n5. Conclusion:\nThe miscompile arises because foldGEPICmp incorrectly folds icmp between GEPs with identical indices and different bases into a base-pointer icmp without checking nowrap flags. By gating that fold with CanFold(NW), computed as the intersection of nowrap flags of both GEPs, we prevent invalid transformations when unsigned wrap may occur. This fixes the provided reproducer and aligns this shortcut with the safety conditions already applied to other GEP compare folds in the same function.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp b/llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp\nindex d6fdade25559..386dbe241062 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp\n@@ -763,8 +763,11 @@ Instruction *InstCombinerImpl::foldGEPICmp(GEPOperator *GEPLHS, Value *RHS,\n           }\n \n       // If all indices are the same, just compare the base pointers.\n+      // This is only valid if we can fold under the current nowrap flags.\n+      GEPNoWrapFlags NWBaseCmp = GEPLHS->getNoWrapFlags() & GEPRHS->getNoWrapFlags();\n       Type *BaseType = GEPLHS->getOperand(0)->getType();\n-      if (IndicesTheSame && CmpInst::makeCmpResultType(BaseType) == I.getType())\n+      if (IndicesTheSame && CmpInst::makeCmpResultType(BaseType) == I.getType() &&\n+          CanFold(NWBaseCmp))\n         return new ICmpInst(Cond, GEPLHS->getOperand(0), GEPRHS->getOperand(0));\n \n       // If we're comparing GEPs with two base pointers that only differ in type\n"
+  ]
+}

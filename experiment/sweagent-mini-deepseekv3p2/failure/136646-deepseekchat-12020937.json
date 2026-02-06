@@ -1,0 +1,32 @@
+{
+  "command": {
+    "issue": "136646",
+    "model": "deepseek-chat"
+  },
+  "patch": null,
+  "error": "NoAvailablePatchFound",
+  "errmsg": "All efforts tried yet no available patches found.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/mswe.py\", line 346, in main\n    raise NoAvailablePatchFound(\"All efforts tried yet no available patches found.\")\nautofix.main.NoAvailablePatchFound: All efforts tried yet no available patches found.\n",
+  "input_tokens": 2306062,
+  "output_tokens": 26103,
+  "cached_tokens": 2277696,
+  "total_tokens": 2332165,
+  "chat_rounds": 82,
+  "total_time_sec": 1144.4219152927399,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex 4bba2f406b4c..0b0da8c8de2e 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -2790,10 +2790,24 @@ static Instruction *foldSelectWithFCmpToFabs(SelectInst &SI,\n \n     if (!match(CondVal, m_FCmp(Pred, m_Specific(X), m_AnyZeroFP())))\n       continue;\n+    // Forward-propagate nnan and ninf from the fcmp to the select.\n+    // If all inputs are not those values, then the select is not either.\n+    // Note: nsz is defined differently, so it may not be correct to propagate.\n+    FastMathFlags FMF = cast<FPMathOperator>(CondVal)->getFastMathFlags();\n+    if (FMF.noNaNs() && !SI.hasNoNaNs()) {\n+      SI.setHasNoNaNs(true);\n+      ChangedFMF = true;\n+    }\n+    if (FMF.noInfs() && !SI.hasNoInfs()) {\n+      SI.setHasNoInfs(true);\n+      ChangedFMF = true;\n+    }\n \n     // fold (X <= +/-0.0) ? (0.0 - X) : X to fabs(X), when 'Swap' is false\n     // fold (X >  +/-0.0) ? X : (0.0 - X) to fabs(X), when 'Swap' is true\n     if (match(TrueVal, m_FSub(m_PosZeroFP(), m_Specific(X)))) {\n+    if (!SI.hasNoNaNs())\n+      return nullptr;\n       if (!Swap && (Pred == FCmpInst::FCMP_OLE || Pred == FCmpInst::FCMP_ULE)) {\n         Value *Fabs = IC.Builder.CreateUnaryIntrinsic(Intrinsic::fabs, X, &SI);\n         return IC.replaceInstUsesWith(SI, Fabs);\n@@ -2807,18 +2821,6 @@ static Instruction *foldSelectWithFCmpToFabs(SelectInst &SI,\n     if (!match(TrueVal, m_FNeg(m_Specific(X))))\n       return nullptr;\n \n-    // Forward-propagate nnan and ninf from the fcmp to the select.\n-    // If all inputs are not those values, then the select is not either.\n-    // Note: nsz is defined differently, so it may not be correct to propagate.\n-    FastMathFlags FMF = cast<FPMathOperator>(CondVal)->getFastMathFlags();\n-    if (FMF.noNaNs() && !SI.hasNoNaNs()) {\n-      SI.setHasNoNaNs(true);\n-      ChangedFMF = true;\n-    }\n-    if (FMF.noInfs() && !SI.hasNoInfs()) {\n-      SI.setHasNoInfs(true);\n-      ChangedFMF = true;\n-    }\n     // Forward-propagate nnan from the fneg to the select.\n     // The nnan flag can be propagated iff fneg is selected when X is NaN.\n     if (!SI.hasNoNaNs() && cast<FPMathOperator>(TrueVal)->hasNoNaNs() &&\n",
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex 4bba2f406b4c..c5f53d51e863 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -2790,10 +2790,25 @@ static Instruction *foldSelectWithFCmpToFabs(SelectInst &SI,\n \n     if (!match(CondVal, m_FCmp(Pred, m_Specific(X), m_AnyZeroFP())))\n       continue;\n+    // Forward-propagate nnan and ninf from the fcmp to the select.\n+    // If all inputs are not those values, then the select is not either.\n+    // Note: nsz is defined differently, so it may not be correct to propagate.\n+    FastMathFlags FMF = cast<FPMathOperator>(CondVal)->getFastMathFlags();\n+    if (FMF.noNaNs() && !SI.hasNoNaNs()) {\n+      SI.setHasNoNaNs(true);\n+      ChangedFMF = true;\n+    }\n+    if (FMF.noInfs() && !SI.hasNoInfs()) {\n+      SI.setHasNoInfs(true);\n+      ChangedFMF = true;\n+    }\n \n     // fold (X <= +/-0.0) ? (0.0 - X) : X to fabs(X), when 'Swap' is false\n     // fold (X >  +/-0.0) ? X : (0.0 - X) to fabs(X), when 'Swap' is true\n     if (match(TrueVal, m_FSub(m_PosZeroFP(), m_Specific(X)))) {\n+    if (!SI.hasNoNaNs() && !isKnownNeverNaN(X, 0, IC.getSimplifyQuery()))\n+      return nullptr;\n+      return nullptr;\n       if (!Swap && (Pred == FCmpInst::FCMP_OLE || Pred == FCmpInst::FCMP_ULE)) {\n         Value *Fabs = IC.Builder.CreateUnaryIntrinsic(Intrinsic::fabs, X, &SI);\n         return IC.replaceInstUsesWith(SI, Fabs);\n@@ -2807,18 +2822,6 @@ static Instruction *foldSelectWithFCmpToFabs(SelectInst &SI,\n     if (!match(TrueVal, m_FNeg(m_Specific(X))))\n       return nullptr;\n \n-    // Forward-propagate nnan and ninf from the fcmp to the select.\n-    // If all inputs are not those values, then the select is not either.\n-    // Note: nsz is defined differently, so it may not be correct to propagate.\n-    FastMathFlags FMF = cast<FPMathOperator>(CondVal)->getFastMathFlags();\n-    if (FMF.noNaNs() && !SI.hasNoNaNs()) {\n-      SI.setHasNoNaNs(true);\n-      ChangedFMF = true;\n-    }\n-    if (FMF.noInfs() && !SI.hasNoInfs()) {\n-      SI.setHasNoInfs(true);\n-      ChangedFMF = true;\n-    }\n     // Forward-propagate nnan from the fneg to the select.\n     // The nnan flag can be propagated iff fneg is selected when X is NaN.\n     if (!SI.hasNoNaNs() && cast<FPMathOperator>(TrueVal)->hasNoNaNs() &&\n"
+  ]
+}

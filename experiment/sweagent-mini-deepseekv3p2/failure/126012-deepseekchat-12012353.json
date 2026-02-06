@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "126012",
+    "model": "deepseek-chat"
+  },
+  "patch": null,
+  "error": "NoAvailablePatchFound",
+  "errmsg": "All efforts tried yet no available patches found.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/mswe.py\", line 346, in main\n    raise NoAvailablePatchFound(\"All efforts tried yet no available patches found.\")\nautofix.main.NoAvailablePatchFound: All efforts tried yet no available patches found.\n",
+  "input_tokens": 2835688,
+  "output_tokens": 26299,
+  "cached_tokens": 2798336,
+  "total_tokens": 2861987,
+  "chat_rounds": 88,
+  "total_time_sec": 1164.9221124649048,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/SimplifyIndVar.cpp b/llvm/lib/Transforms/Utils/SimplifyIndVar.cpp\nindex 7b9c5c77cbe9..691e4aed7b2e 100644\n--- a/llvm/lib/Transforms/Utils/SimplifyIndVar.cpp\n+++ b/llvm/lib/Transforms/Utils/SimplifyIndVar.cpp\n@@ -270,7 +270,8 @@ void SimplifyIndvar::eliminateIVComparison(ICmpInst *ICmp,\n   for (auto *U : ICmp->users())\n     Users.push_back(cast<Instruction>(U));\n   const Instruction *CtxI = findCommonDominator(Users, *DT);\n-  if (auto Ev = SE->evaluatePredicateAt(Pred, S, X, CtxI)) {\n+  // Only evaluate predicate if S is an add recurrence, to avoid miscompilation with non-add recurrences.\n+  if (isa<SCEVAddRecExpr>(S) && (auto Ev = SE->evaluatePredicateAt(Pred, S, X, CtxI))) {\n     SE->forgetValue(ICmp);\n     ICmp->replaceAllUsesWith(ConstantInt::getBool(ICmp->getContext(), *Ev));\n     DeadInsts.emplace_back(ICmp);\n",
+    "diff --git a/llvm/lib/Transforms/Utils/SimplifyIndVar.cpp b/llvm/lib/Transforms/Utils/SimplifyIndVar.cpp\nindex 7b9c5c77cbe9..f08cf10f8543 100644\n--- a/llvm/lib/Transforms/Utils/SimplifyIndVar.cpp\n+++ b/llvm/lib/Transforms/Utils/SimplifyIndVar.cpp\n@@ -270,7 +270,11 @@ void SimplifyIndvar::eliminateIVComparison(ICmpInst *ICmp,\n   for (auto *U : ICmp->users())\n     Users.push_back(cast<Instruction>(U));\n   const Instruction *CtxI = findCommonDominator(Users, *DT);\n-  if (auto Ev = SE->evaluatePredicateAt(Pred, S, X, CtxI)) {\n+  // Only evaluate predicate if S is an add recurrence, to avoid miscompilation with non-add recurrences.\n+  std::optional<bool> Ev;\n+  if (isa<SCEVAddRecExpr>(S))\n+    Ev = SE->evaluatePredicateAt(Pred, S, X, CtxI);\n+  if (Ev) {\n     SE->forgetValue(ICmp);\n     ICmp->replaceAllUsesWith(ConstantInt::getBool(ICmp->getContext(), *Ev));\n     DeadInsts.emplace_back(ICmp);\n",
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex 2e14145aef88..13d5f48d441f 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -3156,13 +3156,20 @@ static bool impliesPoisonOrCond(const Value *ValAssumedPoison, const Value *V,\n         match(V, m_ICmp(Pred, m_Specific(LHS), m_APIntAllowPoison(RHSC2)))) {\n       unsigned BitWidth = RHSC1->getBitWidth();\n       ConstantRange CRX =\n-          RHSC1->isNonNegative()\n-              ? ConstantRange(APInt::getSignedMinValue(BitWidth),\n-                              APInt::getZero(BitWidth))\n-              : ConstantRange(APInt::getZero(BitWidth),\n-                              APInt::getSignedMinValue(BitWidth));\n-      return CRX.icmp(Expected ? Pred : ICmpInst::getInverseCmpPredicate(Pred),\n-                      *RHSC2);\n+          RHSC1->isNonNegative() ? ConstantRange(APInt::getZero(BitWidth),\n+                                                 APInt::getSignedMinValue(BitWidth))\n+                                 : ConstantRange(APInt::getSignedMinValue(BitWidth),\n+                                                 APInt::getZero(BitWidth));\n+      // We need to check: if ValAssumedPoison is poison, then V is Expected or poison.\n+      // That is, there is no value where ValAssumedPoison is poison and V is not Expected.\n+      // Let P be set where ValAssumedPoison is poison (complement of CRX).\n+      // Let F be set where V is not Expected (i.e., V is false if Expected true).\n+      // We need P \u2229 F = \u2205, i.e., F \u2286 CRX.\n+      // F is the set where inverse predicate holds.\n+      CmpPredicate InversePred = Expected ? ICmpInst::getInverseCmpPredicate(Pred)\n+                                          : Pred;\n+      ConstantRange F = ConstantRange::makeSatisfyingICmpRegion(InversePred, *RHSC2);\n+      return CRX.contains(F);\n     }\n   }\n \ndiff --git a/llvm/lib/Transforms/Utils/SimplifyIndVar.cpp b/llvm/lib/Transforms/Utils/SimplifyIndVar.cpp\nindex 7b9c5c77cbe9..013c91c940c7 100644\n--- a/llvm/lib/Transforms/Utils/SimplifyIndVar.cpp\n+++ b/llvm/lib/Transforms/Utils/SimplifyIndVar.cpp\n@@ -270,7 +270,14 @@ void SimplifyIndvar::eliminateIVComparison(ICmpInst *ICmp,\n   for (auto *U : ICmp->users())\n     Users.push_back(cast<Instruction>(U));\n   const Instruction *CtxI = findCommonDominator(Users, *DT);\n-  if (auto Ev = SE->evaluatePredicateAt(Pred, S, X, CtxI)) {\n+  // Only evaluate predicate if S is an add recurrence, to avoid miscompilation with non-add recurrences.\n+  // However, if the block is unreachable, we allow evaluation as the comparison is dead.\n+  std::optional<bool> Ev;\n+  if (!DT->isReachableFromEntry(ICmp->getParent()))\n+    Ev = SE->evaluatePredicateAt(Pred, S, X, CtxI);\n+  else if (isa<SCEVAddRecExpr>(S))\n+    Ev = SE->evaluatePredicateAt(Pred, S, X, CtxI);\n+  if (Ev) {\n     SE->forgetValue(ICmp);\n     ICmp->replaceAllUsesWith(ConstantInt::getBool(ICmp->getContext(), *Ev));\n     DeadInsts.emplace_back(ICmp);\n"
+  ]
+}

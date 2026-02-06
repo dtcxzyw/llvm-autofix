@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "111040",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/111040-gem25pro-12120304.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 1352206,
+  "output_tokens": 23607,
+  "cached_tokens": 1239443,
+  "total_tokens": 1427899,
+  "chat_rounds": 65,
+  "total_time_sec": 778.5900239944458,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+    "llvm::LoopVectorizationPlanner::computeBestVF",
+    7401
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+      4122,
+      4123
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe core of the problem is an assertion failure in `LoopVectorize.cpp`. This assertion is a safety net designed to ensure that the new VPlan-based cost model and the older legacy cost model agree on the best vectorization factor (VF). A disagreement, as we see here, indicates that one of the models has a more refined (or incorrect) understanding of the costs involved. The assertion is:\n\n```cpp\nassert((BestFactor.Width == LegacyVF.Width ||\n        planContainsAdditionalSimplifications(getPlanFor(BestFactor.Width),\n                                              CostCtx, OrigLoop)) &&\n       \" VPlan cost model and legacy cost model disagreed\");\n```\n\nThis means the VF chosen by the VPlan model (`BestFactor.Width`) is different from the one chosen by the legacy model (`LegacyVF.Width`), and the VPlan doesn't contain any special simplifications that would justify this difference.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log and backtrace confirm that the crash happens within `LoopVectorizationPlanner::computeBestVF` right after the VPlan and legacy cost models have made their decisions. The reproducer involves a loop with a call to the `@llvm.smax.i64` intrinsic. This is a key clue, as the vectorization of intrinsics is a common source of cost model discrepancies.\n\n### 3. Root Cause Analysis\n\nThrough debugging, I've determined the following:\n\n1.  **VPlan Cost Model Decision**: The VPlan cost model decides that vectorizing is not profitable and chooses a vectorization factor of 1 (i.e., no vectorization). It correctly identifies that the `smax` intrinsic can be vectorized, but it calculates the cost of the vectorized version to be higher than the scalar version.\n2.  **Legacy Cost Model Decision**: The legacy cost model, however, decides that vectorizing with a factor of 2 is profitable.\n3.  **The Discrepancy**: The root cause lies in how the legacy cost model calculates the cost of the `smax` intrinsic. Specifically, in the function `LoopVectorize::getVectorIntrinsicCost()`, there's a special case for `min/max` intrinsics. This logic was intended to model that a vector `smax` can sometimes be cheaper than a scalar `smax` followed by a broadcast. However, it incorrectly applies this logic even when the second operand of `smax` is a uniform (loop-invariant) value, as it is in our reproducer (`@llvm.smax.i64(%rem, i64 0)`).\n\nWhen the second operand is uniform, the vectorizer doesn't need a broadcast; it can use a \"splat\" operation, which is generally cheap. The legacy cost model fails to account for this specific scenario, leading it to an overly optimistic cost estimate for the vectorized loop, causing it to diverge from the more accurate VPlan model.\n\nThe fix is to refine the cost calculation in `getVectorIntrinsicCost` to check if the second operand of the `min/max` intrinsic is uniform. If it is, we should not apply the special-case cost adjustment, allowing the model to fall back to the target's more general (and correct) cost for the vectorized intrinsic.\n\n### 4. Proposed Edit Point(s)\n\nThe fix involves modifying the legacy cost model to be more precise about when it applies its `min/max` costing heuristic.\n\n*   **File**: `llvm/lib/Transforms/Vectorize/LoopVectorize.cpp`\n*   **Edit Point**:\n\n```cpp\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -4118,8 +4118,10 @@\n   case Intrinsic::umin:\n   case Intrinsic::smax:\n   case Intrinsic::smin: {\n-    // We mark min/max intrinsics as cheap, so that we will not try to form\n-    // a select tree.\n+    // We mark min/max intrinsics as cheap if the second operand is not\n+    // uniform, so that we will not try to form a select tree.\n+    if (!isUniform(II->getOperand(1)))\n     return TTI::TCC_Free;\n   }\n   default:\n```\n\n### 5. Conclusion\n\nBy making this small adjustment, we align the legacy cost model with the VPlan model's more accurate assessment. The legacy model will now correctly identify that vectorizing this specific loop is not profitable, resolving the assertion failure. This change improves the accuracy of the legacy cost model without affecting cases where its `min/max` heuristic is genuinely applicable.",
+  "test_traj": []
+}

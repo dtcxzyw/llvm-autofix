@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "132841",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/132841-gpt5-12070002.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 4dc398f716b3..aff2f1625c57 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -15111,6 +15111,12 @@ Instruction &BoUpSLP::getLastInstructionInBundle(const TreeEntry *E) {\n       Res = (*It)->getBundle().back()->getInst();\n       return *Res;\n     }\n+    // If no bundles were found for V, but we have a block schedule and this is\n+    // not a PHI, fall back to brute-force to find the last instruction.\n+    if (E->getOpcode() != Instruction::PHI) {\n+      Res = FindLastInst();\n+      return *Res;\n+    }\n     assert(E->getOpcode() == Instruction::PHI && \"Expected PHI\");\n   }\n \n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 100955,
+  "output_tokens": 2476,
+  "cached_tokens": 61824,
+  "total_tokens": 103431,
+  "chat_rounds": 9,
+  "total_time_sec": 97.3465633392334,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::getLastInstructionInBundle",
+    15114
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      15110,
+      15116
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs inside BoUpSLP::getLastInstructionInBundle with the assertion E->getOpcode() == Instruction::PHI && \"Expected PHI\". This path is taken when BlocksSchedules contains an entry for the basic block (BB) and E->isGather() is false, but getScheduleBundles(V) returns an empty array for the value V chosen to identify the bundle. The code then asserts that the TreeEntry's opcode must be PHI, assuming that only PHI nodes can reach this state.\n\n2. Analyzing opt's Log:\n- The pass analyzes a store chain in bb2 and schedules the bundle of four stores.\n- It subsequently adds PHI bundles for the values being stored.\n- During scheduling, it reports that the store bundle in bb2 is ready and scheduled, and then attempts to check readiness on the defining PHIs.\n- The crash happens when setInsertPointAfterBundle calls getLastInstructionInBundle, and the internal logic attempts to look up schedule bundles for V derived from E->Scalars. The 'Bundles' lookup returns empty, and because BlocksSchedules.count(BB) && !E->isGather() is true, it hits the assert expecting a PHI.\nThe debug log indicates that the pass is actively working with a store TreeEntry in bb2, not a PHI entry, so the assertion that only PHI opcodes reach this path is violated. This suggests that there's a legitimate scenario where a non-PHI bundle may fail to find schedule data, e.g., due to doesNotNeedToBeScheduled selecting a different V or dry-run scheduling limitations.\n\n3. Root Cause Analysis:\nThe assertion is too strict. The function assumes that when we have a BlocksSchedules entry for BB and the TreeEntry is non-gather, we must also have schedule bundle data for the chosen V (or else the TreeEntry must be a PHI). However, in practice, the schedule lookup may fail for non-PHI entries:\n- doesNotNeedToBeScheduled(V) may select a value that wasn't included in schedule bundles (e.g., constants, trivial ops), leading to getScheduleBundles(V) returning empty.\n- Early exits from buildTree_rec or scheduling dry-run adjustments can leave some entries without schedule data even if BlocksSchedules[BB] exists.\nWhen this happens, we should fall back to the brute-force FindLastInst() logic, which is already provided later in the function for cases where Res is null. Asserting on non-PHI opcodes here causes a crash instead of gracefully falling back.\n\n4. Proposed Edit Points(s):\n- Edit point: llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp lines 15110-15116.\nChange the behavior when Bundles is empty under BlocksSchedules.count(BB) && !E->isGather(): instead of asserting that E is a PHI, fall back to FindLastInst(). This keeps the invariant of attempting to find the last instruction via brute-force when schedule data is missing.\nSpecifically, replace:\n  if (ArrayRef<ScheduleBundle *> Bundles = BlocksSchedules[BB]->getScheduleBundles(V); !Bundles.empty()) {\n    ...\n    return *Res;\n  }\n  assert(E->getOpcode() == Instruction::PHI && \"Expected PHI\");\nwith:\n  if (ArrayRef<ScheduleBundle *> Bundles = BlocksSchedules[BB]->getScheduleBundles(V); !Bundles.empty()) {\n    ...\n    return *Res;\n  }\n  // No bundles found for V despite having a block schedule; fall back to brute-force.\n  Res = FindLastInst();\nThis preserves the later assert(\"Failed to find last instruction in bundle\") after the brute-force path, ensuring correctness.\n\n5. Conclusion:\nThe fix removes an overzealous assertion and adds a safe fallback to FindLastInst() when schedule bundle lookup fails for a non-gather entry despite having block schedule information. This addresses the crash by allowing the vectorizer to compute the last instruction in the bundle without relying on schedule data that might be missing for certain values, particularly in minimized or edge-case IR like the provided reproducer. The expected effect is that the SLP vectorizer completes without aborting, correctly setting the insertion point and proceeding with vectorization.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 4dc398f716b3..9455d6652509 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -15111,7 +15111,9 @@ Instruction &BoUpSLP::getLastInstructionInBundle(const TreeEntry *E) {\n       Res = (*It)->getBundle().back()->getInst();\n       return *Res;\n     }\n-    assert(E->getOpcode() == Instruction::PHI && \"Expected PHI\");\n+    // No bundles found for V despite having a block schedule; fall back to\n+    // brute-force search of the last instruction in the bundle.\n+    Res = FindLastInst();\n   }\n \n   // LastInst can still be null at this point if there's either not an entry\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 4dc398f716b3..aff2f1625c57 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -15111,6 +15111,12 @@ Instruction &BoUpSLP::getLastInstructionInBundle(const TreeEntry *E) {\n       Res = (*It)->getBundle().back()->getInst();\n       return *Res;\n     }\n+    // If no bundles were found for V, but we have a block schedule and this is\n+    // not a PHI, fall back to brute-force to find the last instruction.\n+    if (E->getOpcode() != Instruction::PHI) {\n+      Res = FindLastInst();\n+      return *Res;\n+    }\n     assert(E->getOpcode() == Instruction::PHI && \"Expected PHI\");\n   }\n \n"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "115574",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/115574-gem25pro-12130122.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ValueError",
+  "errmsg": "Line numbers 1008 and 1011 are out of bounds for file /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/Scalar/InstSimplifyPass.cpp",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 289, in patch_and_fix\n    code=extract_code_snippet(\n         ^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 240, in extract_code_snippet\n    raise ValueError(\nValueError: Line numbers 1008 and 1011 are out of bounds for file /llvm-autofix-deps/llvm/llvm/llvm/lib/Transforms/Scalar/InstSimplifyPass.cpp\n",
+  "input_tokens": 31484,
+  "output_tokens": 3560,
+  "cached_tokens": 16155,
+  "total_tokens": 39475,
+  "chat_rounds": 7,
+  "total_time_sec": 626.6593368053436,
+  "trans_point": [
+    "llvm/lib/Transforms/Scalar/InstSimplifyPass.cpp",
+    "runImpl",
+    56
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/InstSimplifyPass.cpp",
+      1008,
+      1011
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe transformation `select (icmp eq A, B), A, B -> B` is being incorrectly applied to pointers. The `icmp eq` instruction on pointers compares only their address values, not their provenance. When two pointers, `%a` and `%b`, have the same address but different provenance, `icmp eq ptr %a, %b` evaluates to true. In this case, the original `select` instruction would return `%a`, preserving its provenance. The faulty transformation, however, replaces the `select` with `%b`, effectively changing the provenance of the result, which is a miscompilation.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log shows the transformation from `select i1 %cmp, ptr %a, ptr %b` to `ret ptr %b`. The Alive2 verification log confirms this is incorrect by providing a counterexample where `%a` and `%b` have the same address but different provenance, causing the transformed code to return a value with the wrong provenance.\n\n### 3. Root Cause Analysis\n\nThe root cause is an incorrect pattern matching in the `simplifySelectInst` function. The code simplifies `select (icmp eq X, Y), X, Y` to `Y` without considering the implications for pointer types. While this simplification is valid for integers, it is incorrect for pointers due to provenance rules in the LLVM IR. The same logic applies to the `select (icmp ne X, Y), Y, X -> Y` pattern.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to remove the code that performs this invalid simplification. The relevant code is in `llvm/lib/Transforms/Scalar/InstSimplifyPass.cpp` within the `simplifySelectInst` function.\n\n```cpp\n// llvm/lib/Transforms/Scalar/InstSimplifyPass.cpp:1008-1011\n\n  // select (icmp eq X, Y), X, Y -> Y\n  if (match(C, m_ICmp(Pred, m_Value(Op0), m_Value(Op1))) &&\n      ((Pred == ICmpInst::ICMP_EQ && V1 == Op0 && V2 == Op1) ||\n       (Pred == ICmpInst::ICMP_NE && V1 == Op1 && V2 == Op0)))\n    return V2;\n```\n\nThis block of code needs to be removed entirely.\n\n### 5. Conclusion\n\nBy removing the faulty simplification pattern from `simplifySelectInst`, we prevent the miscompilation for pointer types. This ensures that `instsimplify` no longer alters pointer provenance incorrectly for this specific `select` pattern, resolving the bug reported.",
+  "test_traj": []
+}

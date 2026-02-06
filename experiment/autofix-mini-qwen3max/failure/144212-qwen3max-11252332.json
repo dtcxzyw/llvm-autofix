@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "144212",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/144212-qwen3max-11252332.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 808, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 627, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 467, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 323, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 5046777,
+  "output_tokens": 4466,
+  "cached_tokens": 3444352,
+  "total_tokens": 5051243,
+  "chat_rounds": 89,
+  "total_time_sec": 1130.069186925888,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+    "llvm::LoopVectorizePass::processLoop",
+    10343
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+      8502,
+      8504
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The crash occurs due to a dominance violation in the generated IR. The error message shows that `%broadcast.splat2` (a shufflevector instruction) does not dominate its use in the `%vector.recur` phi node. This happens during vectorization of a first-order recurrence where the recurrence value `%for` is invariant (since `%for.next = and i8 %for.start, -1` simplifies to just `%for.start`). The vectorizer incorrectly creates a broadcast and shuffle for this invariant value and tries to use it in a phi node without proper dominance.\n\n2. **Analyzing `opt`'s Log**: The Scalar Evolution analysis shows that `%for` is invariant (`--> %for.start U: full-set S: full-set`). The vectorizer should recognize this as a uniform value that doesn't need complex recurrence handling. However, the current code path treats it as a first-order recurrence and creates unnecessary broadcast/shuffle instructions that violate dominance when used in phi nodes.\n\n3. **Root Cause Analysis**: In the `addScalarResumePhis` function in LoopVectorize.cpp, when handling first-order recurrences (FORs), the code unconditionally creates an extract operation for the backedge value on line 8502-8504. However, when the recurrence is actually invariant (both start value and backedge value are the same invariant), this extract operation is unnecessary and creates a dominance problem. The broadcast and shuffle instructions are created for an invariant value that should just be used directly.\n\n4. **Proposed Edit Point(s)**: The fix is to check if the FOR backedge value is actually invariant before creating the extract operation. If both the start value and backedge value are invariant and equal, we can skip the extract and use the value directly.\n\n+ **File**: llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+ **Lines**: 8502-8504\n+ **Current code**:\n```cpp\nif (IsFOR)\n  ResumeFromVectorLoop = MiddleBuilder.createNaryOp(\n      VPInstruction::ExtractLastElement, {ResumeFromVectorLoop}, {},\n      \"vector.recur.extract\");\n```\n+ **Proposed fix**: Add a check to see if the recurrence is actually invariant before creating the extract.\n\n5. **Conclusion**: The issue stems from the vectorizer not recognizing that a first-order recurrence with identical invariant start and backedge values doesn't need the complex extract/splice machinery. By adding a check for this invariant case, we can avoid creating the problematic broadcast/shuffle instructions that violate dominance, thus fixing the crash while maintaining correct vectorization behavior for genuine recurrences.",
+  "test_traj": []
+}

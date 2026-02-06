@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "117308",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/117308-gem25pro-12130742.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex 56bfc8432cbb..a7bd9036df41 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -122,6 +122,11 @@ static void addLocAccess(MemoryEffects &ME, const MemoryLocation &Loc,\n     return;\n \n   const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n+  if (!UO) {\n+    // Pointer has no underlying object.\n+    ME |= MemoryEffects(IRMemLocation::Other, MR);\n+    return;\n+  }\n   if (isa<AllocaInst>(UO))\n     return;\n   if (isa<Argument>(UO)) {\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 52590,
+  "output_tokens": 3325,
+  "cached_tokens": 36560,
+  "total_tokens": 59788,
+  "chat_rounds": 8,
+  "total_time_sec": 118.42969155311584,
+  "trans_point": [
+    "llvm/lib/Transforms/IPO/FunctionAttrs.cpp",
+    "addLocAccess",
+    125
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/FunctionAttrs.cpp",
+      125,
+      125
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe `function-attrs` pass analyzes memory accesses within a function to deduce attributes like `readonly`, `readnone`, `argmemonly`, etc. The `addLocAccess` function is a helper that processes a single `MemoryLocation`. It uses `getUnderlyingObjectAggressive` to find the base object of a memory access.\n\nIn the provided IR, the memory access is on a pointer that is part of a cycle of PHI nodes. `getUnderlyingObjectAggressive` correctly identifies that it cannot resolve this cycle to a single underlying object and returns `nullptr`.\n\nThe crash occurs because `addLocAccess` immediately tries to use this `nullptr` result in an `isa<AllocaInst>` check, which contains an assertion against null inputs.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log and backtrace are very clear. The crash happens inside `addLocAccess` at `FunctionAttrs.cpp:125`.\n\n```cpp\n// llvm/lib/Transforms/IPO/FunctionAttrs.cpp:124\nconst Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\nif (isa<AllocaInst>(UO)) // CRASH on this line\n  return;\n```\n\nThe assertion `Val && \"isa<> used on a null pointer\"` inside `isa<>` confirms that `UO` is `nullptr`. This points directly to `getUnderlyingObjectAggressive` returning null and `addLocAccess` failing to check for it.\n\n### 3. Root Cause Analysis\n\nThe root cause is a missing null check in `addLocAccess`. The function assumes that `getUnderlyingObjectAggressive` will always return a valid `Value*`. However, the documentation and behavior of `getUnderlyingObjectAggressive` show that it can and will return `nullptr` when it cannot determine a unique underlying object, such as in the case of the PHI cycle in the reproducer.\n\nWhen `getUnderlyingObjectAggressive` returns `nullptr`, `addLocAccess` should treat the memory location as pointing to an unknown or \"other\" memory, which is the most conservative assumption.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to add a null check for the result of `getUnderlyingObjectAggressive` in `addLocAccess`. If the result is null, we should conservatively assume the access is to \"other\" memory and update the memory effects accordingly before returning.\n\nHere is the proposed edit:\n\n*   **File**: `llvm/lib/Transforms/IPO/FunctionAttrs.cpp`\n*   **Lines**: 125-125\n*   **Change**:\n\n```cpp\n// In addLocAccess, after the call to getUnderlyingObjectAggressive:\nconst Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\nif (!UO) {\n  ME |= MemoryEffects(IRMemLocation::Other, MR);\n  return;\n}\nif (isa<AllocaInst>(UO))\n  return;\n```\n\nThis change introduces the necessary null check. If `UO` is null, we update the `MemoryEffects` to reflect a modification or reference to `Other` memory and then exit the function, preventing the crash.\n\n### 5. Conclusion\n\nThe issue is a classic case of a missing null check when calling a utility function that has a documented case for returning null. The proposed fix is simple and robust: it handles the null return from `getUnderlyingObjectAggressive` by making a conservative assumption about the memory access, which is the correct behavior for this analysis pass. This will prevent the crash and allow the `function-attrs` pass to correctly analyze functions with complex pointer cycles.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex 56bfc8432cbb..a7bd9036df41 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -122,6 +122,11 @@ static void addLocAccess(MemoryEffects &ME, const MemoryLocation &Loc,\n     return;\n \n   const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n+  if (!UO) {\n+    // Pointer has no underlying object.\n+    ME |= MemoryEffects(IRMemLocation::Other, MR);\n+    return;\n+  }\n   if (isa<AllocaInst>(UO))\n     return;\n   if (isa<Argument>(UO)) {\n"
+  ]
+}

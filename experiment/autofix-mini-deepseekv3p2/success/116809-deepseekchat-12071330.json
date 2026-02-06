@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "116809",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/116809-deepseekchat-12071330.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Scalar/LICM.cpp b/llvm/lib/Transforms/Scalar/LICM.cpp\nindex fa04ced7182d..a38b29c41998 100644\n--- a/llvm/lib/Transforms/Scalar/LICM.cpp\n+++ b/llvm/lib/Transforms/Scalar/LICM.cpp\n@@ -1465,14 +1465,20 @@ static Instruction *cloneInstructionInExitBlock(\n \n   if (MSSAU.getMemorySSA()->getMemoryAccess(&I)) {\n     // Create a new MemoryAccess and let MemorySSA set its defining access.\n-    MemoryAccess *NewMemAcc = MSSAU.createMemoryAccessInBB(\n-        New, nullptr, New->getParent(), MemorySSA::Beginning);\n-    if (NewMemAcc) {\n-      if (auto *MemDef = dyn_cast<MemoryDef>(NewMemAcc))\n-        MSSAU.insertDef(MemDef, /*RenameUses=*/true);\n-      else {\n-        auto *MemUse = cast<MemoryUse>(NewMemAcc);\n-        MSSAU.insertUse(MemUse, /*RenameUses=*/true);\n+    // Only create a MemoryAccess if the cloned instruction actually accesses\n+    // memory. The original instruction may have had a MemoryAccess but after\n+    // transformations (e.g., unswitching) the cloned instruction might not\n+    // access memory anymore.\n+    if (New->mayReadFromMemory() || New->mayWriteToMemory()) {\n+      MemoryAccess *NewMemAcc = MSSAU.createMemoryAccessInBB(\n+          New, nullptr, New->getParent(), MemorySSA::Beginning);\n+      if (NewMemAcc) {\n+        if (auto *MemDef = dyn_cast<MemoryDef>(NewMemAcc))\n+          MSSAU.insertDef(MemDef, /*RenameUses=*/true);\n+        else {\n+          auto *MemUse = cast<MemoryUse>(NewMemAcc);\n+          MSSAU.insertUse(MemUse, /*RenameUses=*/true);\n+        }\n       }\n     }\n   }\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 2084464,
+  "output_tokens": 9925,
+  "cached_tokens": 2034368,
+  "total_tokens": 2094389,
+  "chat_rounds": 110,
+  "total_time_sec": 628.5875840187073,
+  "trans_point": [
+    "llvm/lib/Analysis/MemorySSA.cpp",
+    "llvm::MemorySSA::createDefinedAccess",
+    1732
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/LICM.cpp",
+      1466,
+      1478
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs when LICM tries to sink a call instruction after SimpleLoopUnswitch has transformed the loop. The original indirect call `%i3 = call i32 %i()` had a MemoryAccess because it could potentially access memory. After unswitching, the call becomes `call i32 @bar()` which has `memory(none)` attribute, meaning it doesn't access memory. However, LICM's `cloneInstructionInExitBlock` still tries to create a MemoryAccess for the cloned instruction because the original had one, but `createDefinedAccess` fails because the new instruction doesn't need a MemoryAccess.\n\n2. Analyzing `opt`'s Log: The log shows LICM sinking instruction `%i3 = call i32 @bar()` and then crashing in `MemorySSA::createDefinedAccess`. The assertion failure indicates `NewAccess != nullptr` failed, meaning `createNewAccess` returned nullptr for an instruction that doesn't touch memory.\n\n3. Root Cause Analysis: The issue is in `cloneInstructionInExitBlock` at lines 1466-1478. It checks if the original instruction has a MemoryAccess (`MSSAU.getMemorySSA()->getMemoryAccess(&I)`), and if so, tries to create a MemoryAccess for the cloned instruction. However, the cloned instruction might have different memory behavior than the original (especially after unswitching where indirect calls become direct calls with known attributes). The code should check whether the cloned instruction actually needs a MemoryAccess, not just whether the original had one.\n\n4. Proposed Edit Point(s): In `cloneInstructionInExitBlock`, we should check if the cloned instruction actually needs a MemoryAccess by checking its memory behavior, not just whether the original had one. The fix is to modify the condition at line 1466 to check if the cloned instruction may read or write memory.\n\n5. Conclusion: The fix ensures that we only create MemoryAccess for cloned instructions that actually access memory, preventing the assertion failure when sinking instructions that have been optimized to not access memory.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Scalar/LICM.cpp b/llvm/lib/Transforms/Scalar/LICM.cpp\nindex fa04ced7182d..a38b29c41998 100644\n--- a/llvm/lib/Transforms/Scalar/LICM.cpp\n+++ b/llvm/lib/Transforms/Scalar/LICM.cpp\n@@ -1465,14 +1465,20 @@ static Instruction *cloneInstructionInExitBlock(\n \n   if (MSSAU.getMemorySSA()->getMemoryAccess(&I)) {\n     // Create a new MemoryAccess and let MemorySSA set its defining access.\n-    MemoryAccess *NewMemAcc = MSSAU.createMemoryAccessInBB(\n-        New, nullptr, New->getParent(), MemorySSA::Beginning);\n-    if (NewMemAcc) {\n-      if (auto *MemDef = dyn_cast<MemoryDef>(NewMemAcc))\n-        MSSAU.insertDef(MemDef, /*RenameUses=*/true);\n-      else {\n-        auto *MemUse = cast<MemoryUse>(NewMemAcc);\n-        MSSAU.insertUse(MemUse, /*RenameUses=*/true);\n+    // Only create a MemoryAccess if the cloned instruction actually accesses\n+    // memory. The original instruction may have had a MemoryAccess but after\n+    // transformations (e.g., unswitching) the cloned instruction might not\n+    // access memory anymore.\n+    if (New->mayReadFromMemory() || New->mayWriteToMemory()) {\n+      MemoryAccess *NewMemAcc = MSSAU.createMemoryAccessInBB(\n+          New, nullptr, New->getParent(), MemorySSA::Beginning);\n+      if (NewMemAcc) {\n+        if (auto *MemDef = dyn_cast<MemoryDef>(NewMemAcc))\n+          MSSAU.insertDef(MemDef, /*RenameUses=*/true);\n+        else {\n+          auto *MemUse = cast<MemoryUse>(NewMemAcc);\n+          MSSAU.insertUse(MemUse, /*RenameUses=*/true);\n+        }\n       }\n     }\n   }\n"
+  ]
+}

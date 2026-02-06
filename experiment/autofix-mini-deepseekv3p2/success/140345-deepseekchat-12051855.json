@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "140345",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/140345-deepseekchat-12051855.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex f918d7e059b6..fe7f63e40fe1 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -677,9 +677,19 @@ ArgumentAccessInfo getArgumentAccessInfo(const Instruction *I,\n     auto *ConstantLength = dyn_cast<ConstantInt>(Length);\n     if (ConstantLength && Offset &&\n         ConstantLength->getValue().isStrictlyPositive()) {\n-      return ConstantRange(\n-          APInt(64, *Offset, true),\n-          APInt(64, *Offset + ConstantLength->getSExtValue(), true));\n+      APInt Low(64, *Offset, true);\n+      APInt LengthVal = ConstantLength->getValue();\n+      // Sign-extend LengthVal to 64 bits if needed\n+      if (LengthVal.getBitWidth() < 64)\n+        LengthVal = LengthVal.sext(64);\n+      else if (LengthVal.getBitWidth() > 64)\n+        LengthVal = LengthVal.trunc(64);\n+      bool Overflow;\n+      APInt High = Low.sadd_ov(LengthVal, Overflow);\n+      // Bail if the range overflows signed 64-bit int.\n+      if (Overflow)\n+        return std::nullopt;\n+      return ConstantRange(Low, High);\n     }\n     return std::nullopt;\n   };\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 3168105,
+  "output_tokens": 9603,
+  "cached_tokens": 3131776,
+  "total_tokens": 3177708,
+  "chat_rounds": 198,
+  "total_time_sec": 831.4514081478119,
+  "trans_point": [
+    "llvm/lib/IR/ConstantRangeList.cpp",
+    "llvm::ConstantRangeList::insert",
+    41
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/FunctionAttrs.cpp",
+      710,
+      714
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The crash occurs in `ConstantRangeList::insert()` when trying to insert a `ConstantRange` where `getLower().slt(getUpper())` is false. This happens because we're creating an invalid `ConstantRange` with lower bound > upper bound in signed comparison due to integer overflow.\n\n2. **Analyzing `opt`'s Log**: The crash happens when processing a `llvm.memset` with offset 9223372036854775805 and length 3. The `GetConstantIntRange` function computes `Offset + Length = 9223372036854775805 + 3 = 9223372036854775808`, which overflows signed 64-bit and wraps to -9223372036854775808. This creates a `ConstantRange` with lower=9223372036854775805 and upper=-9223372036854775808. In signed comparison: 9223372036854775805 < -9223372036854775808 is false, causing assertion failure.\n\n3. **Root Cause Analysis**: The issue is in `GetConstantIntRange` function in `FunctionAttrs.cpp`. It doesn't handle signed overflow when computing `Offset + Length`. The function should either detect overflow and return `std::nullopt` (conservative) or handle wrap-around ranges properly. Looking at similar code in `GetTypeAccessRange`, it has overflow detection using `sadd_ov`, but `GetConstantIntRange` doesn't have this check.\n\n4. **Proposed Edit Point(s)**: We need to fix `GetConstantIntRange` to detect overflow when computing `Offset + Length`. The fix should mirror the approach in `GetTypeAccessRange`.\n\n5. **Conclusion**: The fix adds overflow detection to `GetConstantIntRange` to prevent creating invalid `ConstantRange` objects when offset + length overflows signed 64-bit. This makes the analysis conservative (returns no range) for such cases, which is safe.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex f918d7e059b6..fe7f63e40fe1 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -677,9 +677,19 @@ ArgumentAccessInfo getArgumentAccessInfo(const Instruction *I,\n     auto *ConstantLength = dyn_cast<ConstantInt>(Length);\n     if (ConstantLength && Offset &&\n         ConstantLength->getValue().isStrictlyPositive()) {\n-      return ConstantRange(\n-          APInt(64, *Offset, true),\n-          APInt(64, *Offset + ConstantLength->getSExtValue(), true));\n+      APInt Low(64, *Offset, true);\n+      APInt LengthVal = ConstantLength->getValue();\n+      // Sign-extend LengthVal to 64 bits if needed\n+      if (LengthVal.getBitWidth() < 64)\n+        LengthVal = LengthVal.sext(64);\n+      else if (LengthVal.getBitWidth() > 64)\n+        LengthVal = LengthVal.trunc(64);\n+      bool Overflow;\n+      APInt High = Low.sadd_ov(LengthVal, Overflow);\n+      // Bail if the range overflows signed 64-bit int.\n+      if (Overflow)\n+        return std::nullopt;\n+      return ConstantRange(Low, High);\n     }\n     return std::nullopt;\n   };\n"
+  ]
+}

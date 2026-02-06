@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "114901",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/114901-gem25pro-12122252.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 025234c54956..a2d810508dc4 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -1037,6 +1037,11 @@ bool VectorCombine::foldExtractedCmps(Instruction &I) {\n   if (!I.isBinaryOp() || !I.getType()->isIntegerTy(1))\n     return false;\n \n+  // The semantics of 'ashr i1' are not the same as for other integer types and\n+  // we should not vectorize it.\n+  if (I.getOpcode() == Instruction::AShr)\n+    return false;\n+\n   // The compare predicates should match, and each compare should have a\n   // constant operand.\n   Value *B0 = I.getOperand(0), *B1 = I.getOperand(1);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 68920,
+  "output_tokens": 4847,
+  "cached_tokens": 42768,
+  "total_tokens": 77857,
+  "chat_rounds": 8,
+  "total_time_sec": 652.069219827652,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+    "(anonymous namespace)::VectorCombine::foldExtractedCmps",
+    1113
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+      1039,
+      1039
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe `vector-combine` pass incorrectly tries to vectorize a series of scalar operations involving an arithmetic shift right (`ashr`) on `i1` (boolean) values. The semantics of a scalar `ashr i1, i1` are equivalent to a select: if the shift amount is 0, the original value is returned; otherwise, the result is `poison`. However, the vectorized `ashr` instruction performs a bitwise shift on each element. Shifting an `i1` value by 1 bit shifts out the only bit of information, resulting in `poison`. This discrepancy leads to a miscompilation where the transformed code produces `poison` while the original code produces a valid boolean value.\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log and the `alive2` output clearly demonstrate the faulty transformation. The original IR extracts elements from a vector, performs scalar comparisons, and then uses the boolean results in an `ashr` instruction. The transformed IR combines the comparisons into a single vector `icmp` and then attempts to perform the shift using a vector `ashr`. The `alive2` counterexample pinpoints a case where the scalar `ashr` on `i1` has well-defined behavior (shifting by 0), but the corresponding lane in the vector `ashr` attempts to shift by 1, causing it to become `poison`.\n\n### 3. Root Cause Analysis\n\nThe root cause lies within the `foldExtractedCmps` function in `VectorCombine.cpp`. This function identifies patterns where scalar values, derived from vector `extractelement` instructions, are used in a common instruction. It then attempts to vectorize this common instruction. The logic for vectorizing binary operators, found around line 1116, is too general. It does not account for the special, non-arithmetic behavior of `ashr` when applied to `i1` types. The code proceeds to vectorize the `ashr` without realizing that the vector version has different semantics from the scalar one in this specific case.\n\n### 4. Proposed Edit Point(s)\n\nTo fix this, I will add a condition to prevent the vectorization of `ashr` when its operands are of type `i1`. This check should be placed at the beginning of the `foldExtractedCmps` function.\n\n```cpp\n// llvm/lib/Transforms/Vectorize/VectorCombine.cpp:1039\n  if (I.getOpcode() == Instruction::AShr)\n    return false;\n```\n\nThis change specifically targets the problematic case. It checks if the binary operator is an `ashr` and if its result type (and thus operand type) is `i1`. If both conditions are true, it bails out of the transformation, preserving the original scalar code and preventing the miscompilation.\n\n### 5. Conclusion\n\nThe issue is a classic example of a vectorization heuristic being too aggressive and not fully accounting for the specific semantics of an instruction on a particular data type. By adding a simple check to disable the vectorization of `ashr` on `i1` types within `foldExtractedCmps`, we can fix the bug while leaving the rest of the valuable vector-combining logic intact. This targeted fix ensures correctness without impacting other valid transformations.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 025234c54956..a2d810508dc4 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -1037,6 +1037,11 @@ bool VectorCombine::foldExtractedCmps(Instruction &I) {\n   if (!I.isBinaryOp() || !I.getType()->isIntegerTy(1))\n     return false;\n \n+  // The semantics of 'ashr i1' are not the same as for other integer types and\n+  // we should not vectorize it.\n+  if (I.getOpcode() == Instruction::AShr)\n+    return false;\n+\n   // The compare predicates should match, and each compare should have a\n   // constant operand.\n   Value *B0 = I.getOperand(0), *B1 = I.getOperand(1);\n"
+  ]
+}

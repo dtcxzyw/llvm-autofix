@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "154045",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/154045-gpt5-11280152.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VPlanTransforms.cpp b/llvm/lib/Transforms/Vectorize/VPlanTransforms.cpp\nindex 81088c9a8139..959b8e54a0b0 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanTransforms.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanTransforms.cpp\n@@ -981,8 +981,14 @@ static Value *tryToFoldLiveIns(const VPRecipeBase &R, unsigned Opcode,\n                           Ops[1],\n                           cast<VPRecipeWithIRFlags>(R).getGEPNoWrapFlags());\n   case Instruction::InsertElement:\n+    // Ensure the vector operand is actually a vector before attempting to fold.\n+    if (!isa<VectorType>(Ops[0]->getType()))\n+      return nullptr;\n     return Folder.FoldInsertElement(Ops[0], Ops[1], Ops[2]);\n   case Instruction::ExtractElement:\n+    // Ensure the vector operand is actually a vector before attempting to fold.\n+    if (!isa<VectorType>(Ops[0]->getType()))\n+      return nullptr;\n     return Folder.FoldExtractElement(Ops[0], Ops[1]);\n   }\n   return nullptr;\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 218652,
+  "output_tokens": 15595,
+  "cached_tokens": 193408,
+  "total_tokens": 234247,
+  "chat_rounds": 18,
+  "total_time_sec": 422.6736614704132,
+  "trans_point": [
+    "llvm/lib/Analysis/InstructionSimplify.cpp",
+    "simplifyExtractElementInst",
+    5257
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VPlanTransforms.cpp",
+      983,
+      987
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs during loop-vectorization while VPlanTransforms tries to simplify a VP recipe by folding live-in operands via InstSimplifyFolder. Specifically, it attempts to fold an ExtractElement recipe where the vector operand is actually a scalar constant (i32 0). InstructionSimplify's simplifyExtractElementInst immediately casts the operand's type to VectorType, asserting that the operand is a vector. Because the operand is scalar, an assertion fires and opt aborts.\n\nThis matches the IR comment in the reproducer: \"Make sure we don't try to fold a Instruction::ExtractElement ir<0>, ir<0>, since we can't materialize the live-in for the vector operand.\"\n\n2. Analyzing opt's Log:\n- The first transformation point identified is simplifyExtractElementInst in InstructionSimplify.cpp.\n- The backtrace shows tryToFoldLiveIns calling InstSimplifyFolder::FoldExtractElement with ill-typed operands (Vec is i32 0).\n- Debugger locals show Ops[0] == 0x... (i32 0), Ops[1] is an index, and Opcode == 62 (ExtractElement). The immediate assert in simplifyExtractElementInst casts Vec->getType() to VectorType.\n\n3. Root Cause Analysis:\nVPlanTransforms::tryToFoldLiveIns assumes that if all operands are live-ins, it can hand them to InstSimplifyFolder. However, for certain VP recipes (like ExtractElement), the VP graph may have scalar live-ins in places where the instruction semantics require a vector (e.g., an extractelement of a vector). Passing such ill-typed operands to InstSimplifyFolder leads to InstructionSimplify assuming well-typed IR and asserting.\n\nTherefore, the bug is that tryToFoldLiveIns does not verify operand types for instructions with strict type requirements (ExtractElement, InsertElement, etc.) before attempting to fold.\n\n4. Proposed Edit Point(s):\n- File: llvm/lib/Transforms/Vectorize/VPlanTransforms.cpp\n- Location: tryToFoldLiveIns switch handling of InsertElement and ExtractElement (lines 983\u2013987 in provided snapshot).\n- Change: Add type guards to ensure the vector operand is actually vector-typed before calling InstSimplifyFolder. If not, bail out and return nullptr so no folding is attempted.\n\nProposed patch (conceptual):\n\nReplace existing cases:\n  case Instruction::InsertElement:\n    return Folder.FoldInsertElement(Ops[0], Ops[1], Ops[2]);\n  case Instruction::ExtractElement:\n    return Folder.FoldExtractElement(Ops[0], Ops[1]);\n\nWith guarded versions:\n  case Instruction::InsertElement: {\n    if (!isa<VectorType>(Ops[0]->getType()))\n      return nullptr;\n    return Folder.FoldInsertElement(Ops[0], Ops[1], Ops[2]);\n  }\n  case Instruction::ExtractElement: {\n    if (!isa<VectorType>(Ops[0]->getType()))\n      return nullptr;\n    return Folder.FoldExtractElement(Ops[0], Ops[1]);\n  }\n\nRationale:\n- Prevents calling simplifyExtractElementInst/simplifyInsertElementInst with ill-typed operands, preserving the precondition that the IR being folded is well-typed.\n- Matches the intent spelled out in the reproducer comment: do not try to fold extractelement ir<0>, ir<0> when you can't materialize the vector live-in.\n- Keeps the change localized to VPlanTransforms, which is the origin of the incorrect folding request, rather than weakening assertions in the more general InstSimplify code.\n\n5. Conclusion:\nThe crash is caused by VPlanTransforms::tryToFoldLiveIns attempting to fold an ExtractElement with scalar live-ins, violating type invariants expected by InstSimplify and triggering an assertion. Adding vector type checks before calling the Folder for ExtractElement (and symmetrically for InsertElement) avoids ill-typed folding, preventing the assertion and aligning behavior with the reproducer's expectation. This fix prevents the abort while preserving all valid simplifications.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VPlanTransforms.cpp b/llvm/lib/Transforms/Vectorize/VPlanTransforms.cpp\nindex 81088c9a8139..959b8e54a0b0 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanTransforms.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanTransforms.cpp\n@@ -981,8 +981,14 @@ static Value *tryToFoldLiveIns(const VPRecipeBase &R, unsigned Opcode,\n                           Ops[1],\n                           cast<VPRecipeWithIRFlags>(R).getGEPNoWrapFlags());\n   case Instruction::InsertElement:\n+    // Ensure the vector operand is actually a vector before attempting to fold.\n+    if (!isa<VectorType>(Ops[0]->getType()))\n+      return nullptr;\n     return Folder.FoldInsertElement(Ops[0], Ops[1], Ops[2]);\n   case Instruction::ExtractElement:\n+    // Ensure the vector operand is actually a vector before attempting to fold.\n+    if (!isa<VectorType>(Ops[0]->getType()))\n+      return nullptr;\n     return Folder.FoldExtractElement(Ops[0], Ops[1]);\n   }\n   return nullptr;\n"
+  ]
+}

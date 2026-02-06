@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "140345",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/140345-gpt5-11271458.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex f918d7e059b6..28f6add88107 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -677,9 +677,13 @@ ArgumentAccessInfo getArgumentAccessInfo(const Instruction *I,\n     auto *ConstantLength = dyn_cast<ConstantInt>(Length);\n     if (ConstantLength && Offset &&\n         ConstantLength->getValue().isStrictlyPositive()) {\n-      return ConstantRange(\n-          APInt(64, *Offset, true),\n-          APInt(64, *Offset + ConstantLength->getSExtValue(), true));\n+      APInt Low(64, *Offset, /*isSigned=*/true);\n+      APInt Len(64, ConstantLength->getSExtValue(), /*isSigned=*/true);\n+      bool Overflow = false;\n+      APInt High = Low.sadd_ov(Len, Overflow);\n+      if (Overflow)\n+        return std::nullopt;\n+      return ConstantRange(Low, High);\n     }\n     return std::nullopt;\n   };\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 22507,
+  "output_tokens": 1571,
+  "cached_tokens": 9600,
+  "total_tokens": 24078,
+  "chat_rounds": 4,
+  "total_time_sec": 73.11490368843079,
+  "trans_point": [
+    "llvm/lib/IR/ConstantRangeList.cpp",
+    "llvm::ConstantRangeList::insert",
+    41
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/FunctionAttrs.cpp",
+      674,
+      685
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs due to an assertion failure inside ConstantRangeList::insert, specifically asserting that the new ConstantRange has Lower < Upper. This indicates that we are attempting to insert an invalid ConstantRange where the computed High bound is not strictly greater than the Low bound. The reproducer uses a memset with a very large positive GEP offset and a small nonzero size, which causes signed 64-bit addition to overflow when computing the upper bound of the access range.\n\n2. Analyzing opt's Log:\nThe stack trace points to getArgumentAccessInfo in FunctionAttrs.cpp:712, which builds ConstantRangeLists for accesses and inserts them. The helper lambda GetConstantIntRange (lines 674-685) constructs ConstantRange for memsets/memcpys with constant length by computing [Offset, Offset + Length) using signed APInt arithmetic, but it lacks overflow checks. In contrast, GetTypeAccessRange (lines 658-673) does signed addition via sadd_ov and bails on overflow. The memset case hits GetConstantIntRange and then insert, triggering the assertion.\n\n3. Root Cause Analysis:\nIn GetConstantIntRange, High is constructed as APInt(64, *Offset + ConstantLength->getSExtValue(), true) without checking for signed overflow. For the reproducer, Offset = 9223372036854775805 (2^63-3), Length = 3, so Offset + Length = 9223372036854775808, which overflows signed 64-bit. Creating APInt with 'true' (signed) from the overflowing sum wraps High to a negative value, making High <= Low. When inserting this ConstantRange(Low, High), ConstantRangeList asserts that Lower.slt(Upper), and the assertion fails.\n\n4. Proposed Edit Point(s):\nEdit the lambda GetConstantIntRange (lines 674-685) to mirror the overflow-safe pattern used in GetTypeAccessRange. Specifically:\n- Build Low as APInt(64, *Offset, true).\n- Build Len as APInt(64, ConstantLength->getSExtValue(), true).\n- Use APInt::sadd_ov to compute High and capture whether signed overflow occurred.\n- If overflow occurs, return std::nullopt to avoid creating an invalid ConstantRange.\n- Otherwise, construct ConstantRange(Low, High).\n\nProposed code replacement for lines 674-685:\n\n  auto GetConstantIntRange =\n      [](Value *Length,\n         std::optional<int64_t> Offset) -> std::optional<ConstantRange> {\n    auto *ConstantLength = dyn_cast<ConstantInt>(Length);\n    if (ConstantLength && Offset &&\n        ConstantLength->getValue().isStrictlyPositive()) {\n      APInt Low(64, *Offset, true);\n      bool Overflow = false;\n      APInt High = Low.sadd_ov(APInt(64, ConstantLength->getSExtValue(), true), Overflow);\n      // Bail if the range overflows signed 64-bit int.\n      if (Overflow)\n        return std::nullopt;\n      return ConstantRange(Low, High);\n    }\n    return std::nullopt;\n  };\n\nThis maintains consistency with GetTypeAccessRange and prevents invalid ranges from being inserted.\n\n5. Conclusion:\nThe fix adds a signed-overflow check when computing the upper bound for constant-length memory operations in function-attrs. By bailing out on overflow, we avoid constructing an invalid ConstantRange, preventing the assertion in ConstantRangeList::insert. This resolves the crash on large GEP offsets with small nonzero sizes (like the provided memset reproducer) and aligns with the conservative approach already used for type-size ranges.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex f918d7e059b6..28f6add88107 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -677,9 +677,13 @@ ArgumentAccessInfo getArgumentAccessInfo(const Instruction *I,\n     auto *ConstantLength = dyn_cast<ConstantInt>(Length);\n     if (ConstantLength && Offset &&\n         ConstantLength->getValue().isStrictlyPositive()) {\n-      return ConstantRange(\n-          APInt(64, *Offset, true),\n-          APInt(64, *Offset + ConstantLength->getSExtValue(), true));\n+      APInt Low(64, *Offset, /*isSigned=*/true);\n+      APInt Len(64, ConstantLength->getSExtValue(), /*isSigned=*/true);\n+      bool Overflow = false;\n+      APInt High = Low.sadd_ov(Len, Overflow);\n+      if (Overflow)\n+        return std::nullopt;\n+      return ConstantRange(Low, High);\n     }\n     return std::nullopt;\n   };\n"
+  ]
+}

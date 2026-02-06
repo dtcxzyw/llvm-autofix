@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "116809",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/116809-qwen3max-12070359.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Scalar/LICM.cpp b/llvm/lib/Transforms/Scalar/LICM.cpp\nindex fa04ced7182d..07c0bac93711 100644\n--- a/llvm/lib/Transforms/Scalar/LICM.cpp\n+++ b/llvm/lib/Transforms/Scalar/LICM.cpp\n@@ -1463,7 +1463,7 @@ static Instruction *cloneInstructionInExitBlock(\n   if (!I.getName().empty())\n     New->setName(I.getName() + \".le\");\n \n-  if (MSSAU.getMemorySSA()->getMemoryAccess(&I)) {\n+  if (MSSAU.getMemorySSA()->getMemoryAccess(&I) && New->mayReadOrWriteMemory()) {\n     // Create a new MemoryAccess and let MemorySSA set its defining access.\n     MemoryAccess *NewMemAcc = MSSAU.createMemoryAccessInBB(\n         New, nullptr, New->getParent(), MemorySSA::Beginning);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 361948,
+  "output_tokens": 2361,
+  "cached_tokens": 136192,
+  "total_tokens": 364309,
+  "chat_rounds": 32,
+  "total_time_sec": 179.62189769744873,
+  "trans_point": [
+    "llvm/lib/Analysis/MemorySSA.cpp",
+    "llvm::MemorySSA::createDefinedAccess",
+    1732
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/LICM.cpp",
+      1466,
+      1478
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The crash occurs in `MemorySSA::createDefinedAccess` when LICM attempts to create a memory access for an instruction that doesn't touch memory. The assertion fails because `createNewAccess` returns `nullptr` for non-memory-touching instructions, but `CreationMustSucceed` is true.\n\n2. **Analyzing `opt`'s Log**: The log shows \"LICM sinking instruction:   %i3 = call i32 @bar()\" followed immediately by the assertion failure. The function `@bar` is declared with `memory(none)`, meaning it doesn't access memory. This explains why `mayReadFromMemory()` and `mayWriteToMemory()` both return false.\n\n3. **Root Cause Analysis**: In `cloneInstructionInExitBlock` (LICM.cpp:1466-1478), the code unconditionally attempts to create a MemorySSA access for any instruction that had a MemorySSA access before cloning. However, after loop unswitching, the cloned instruction might be a call to a function that doesn't access memory (like `@bar` with `memory(none)`). The original instruction `%i3 = call i32 %i()` was polymorphic (could call either `%arg1` or `@bar`), so it needed a MemorySSA access. But after unswitching, the cloned version specifically calls `@bar()`, which has `memory(none)` and thus shouldn't have a MemorySSA access.\n\n4. **Proposed Edit Point(s)**\n   + The issue is in `llvm/lib/Transforms/Scalar/LICM.cpp` lines 1466-1478. Before creating a MemorySSA access for the cloned instruction, we need to check if the new instruction actually touches memory. If it doesn't, we should skip creating the MemorySSA access.\n\n5. **Conclusion**: The fix involves adding a check in `cloneInstructionInExitBlock` to verify that the cloned instruction actually requires a MemorySSA access before attempting to create one. This prevents the assertion failure when sinking calls to memory(none) functions that were previously polymorphic calls requiring MemorySSA tracking.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Scalar/LICM.cpp b/llvm/lib/Transforms/Scalar/LICM.cpp\nindex fa04ced7182d..07c0bac93711 100644\n--- a/llvm/lib/Transforms/Scalar/LICM.cpp\n+++ b/llvm/lib/Transforms/Scalar/LICM.cpp\n@@ -1463,7 +1463,7 @@ static Instruction *cloneInstructionInExitBlock(\n   if (!I.getName().empty())\n     New->setName(I.getName() + \".le\");\n \n-  if (MSSAU.getMemorySSA()->getMemoryAccess(&I)) {\n+  if (MSSAU.getMemorySSA()->getMemoryAccess(&I) && New->mayReadOrWriteMemory()) {\n     // Create a new MemoryAccess and let MemorySSA set its defining access.\n     MemoryAccess *NewMemAcc = MSSAU.createMemoryAccessInBB(\n         New, nullptr, New->getParent(), MemorySSA::Beginning);\n"
+  ]
+}

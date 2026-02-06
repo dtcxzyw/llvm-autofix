@@ -1,0 +1,691 @@
+Setting up the buggy LLVM environment ...
+Building LLVM and try reproducing the issue ...
+Issue reproduced successfully.
+Starting to fix the issue ...
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@901227] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ You are an expert LLVM developer. Please solve this LLVM issue:                                                                                                                          │
+│                                                                                                                                                                                          │
+│ ------ BEGIN ISSUE ------                                                                                                                                                                │
+│ Type: miscompilation                                                                                                                                                                     │
+│                                                                                                                                                                                          │
+│ Reproducer (LLVM IR): ```bash                                                                                                                                                            │
+│ cat /tmp/test.ll                                                                                                                                                                         │
+│ define i32 @loadcombine_consecutive_idx_64(ptr %data) {                                                                                                                                  │
+│ entry:                                                                                                                                                                                   │
+│   %arrayidx = getelementptr inbounds nuw i8, ptr %data, i64 2149675577                                                                                                                   │
+│   %val = load i8, ptr %arrayidx, align 1                                                                                                                                                 │
+│   %conv = zext i8 %val to i32                                                                                                                                                            │
+│   %arrayidx.2 = getelementptr inbounds nuw i8, ptr %data, i64 2149675576                                                                                                                 │
+│   %val.2 = load i8, ptr %arrayidx.2, align 1                                                                                                                                             │
+│   %conv.2 = zext i8 %val.2 to i32                                                                                                                                                        │
+│   %shl = shl nuw nsw i32 %conv, 8                                                                                                                                                        │
+│   %or = or disjoint i32 %shl, %conv.2                                                                                                                                                    │
+│   ret i32 %or                                                                                                                                                                            │
+│ }                                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ LLVM's Symptom: ```bash                                                                                                                                                                  │
+│ /llvm-autofix/build/llvm-build/118467/bin/opt /tmp/test.ll -passes=aggressive-instcombine -mtriple x86_64-none-eabi -mattr=avx2 -data-layout=e-n64 -S                                    │
+│ --- src ---                                                                                                                                                                              │
+│ target datalayout = "e-n64"                                                                                                                                                              │
+│ target triple = "x86_64-unknown-none-eabi"                                                                                                                                               │
+│ define i32 @loadcombine_consecutive_idx_64(ptr %data) {                                                                                                                                  │
+│ entry:                                                                                                                                                                                   │
+│   %arrayidx = getelementptr inbounds nuw i8, ptr %data, i64 2149675577                                                                                                                   │
+│   %val = load i8, ptr %arrayidx, align 1                                                                                                                                                 │
+│   %conv = zext i8 %val to i32                                                                                                                                                            │
+│   %arrayidx.2 = getelementptr inbounds nuw i8, ptr %data, i64 2149675576                                                                                                                 │
+│   %val.2 = load i8, ptr %arrayidx.2, align 1                                                                                                                                             │
+│   %conv.2 = zext i8 %val.2 to i32                                                                                                                                                        │
+│   %shl = shl nuw nsw i32 %conv, 8                                                                                                                                                        │
+│   %or = or disjoint i32 %shl, %conv.2                                                                                                                                                    │
+│   ret i32 %or                                                                                                                                                                            │
+│ }                                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ --- tgt ---                                                                                                                                                                              │
+│ ; ModuleID = '<stdin>'                                                                                                                                                                   │
+│ source_filename = "<stdin>"                                                                                                                                                              │
+│ target datalayout = "e-n64"                                                                                                                                                              │
+│ target triple = "x86_64-unknown-none-eabi"                                                                                                                                               │
+│                                                                                                                                                                                          │
+│ define i32 @loadcombine_consecutive_idx_64(ptr %data) #0 {                                                                                                                               │
+│ entry:                                                                                                                                                                                   │
+│   %0 = getelementptr i8, ptr %data, i32 -2145291720                                                                                                                                      │
+│   %val.2 = load i16, ptr %0, align 1                                                                                                                                                     │
+│   %1 = zext i16 %val.2 to i32                                                                                                                                                            │
+│   ret i32 %1                                                                                                                                                                             │
+│ }                                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│ attributes #0 = { "target-features"="+avx2" }                                                                                                                                            │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ --- log ---                                                                                                                                                                              │
+│                                                                                                                                                                                          │
+│ ----------------------------------------                                                                                                                                                 │
+│ define i32 @loadcombine_consecutive_idx_64(ptr %data) {                                                                                                                                  │
+│ entry:                                                                                                                                                                                   │
+│   %arrayidx = gep inbounds nuw ptr %data, 1 x i64 2149675577                                                                                                                             │
+│   %val = load i8, ptr %arrayidx, align 1                                                                                                                                                 │
+│   %conv = zext i8 %val to i32                                                                                                                                                            │
+│   %arrayidx.2 = gep inbounds nuw ptr %data, 1 x i64 2149675576                                                                                                                           │
+│   %val.2 = load i8, ptr %arrayidx.2, align 1                                                                                                                                             │
+│   %conv.2 = zext i8 %val.2 to i32                                                                                                                                                        │
+│   %shl = shl nsw nuw i32 %conv, 8                                                                                                                                                        │
+│   %or = or disjoint i32 %shl, %conv.2                                                                                                                                                    │
+│   ret i32 %or                                                                                                                                                                            │
+│ }                                                                                                                                                                                        │
+│ =>                                                                                                                                                                                       │
+│ define i32 @loadcombine_consecutive_idx_64(ptr %data) {                                                                                                                                  │
+│ entry:                                                                                                                                                                                   │
+│   %#0 = gep ptr %data, 1 x i32 2149675576                                                                                                                                                │
+│   %val.2 = load i16, ptr %#0, align 1                                                                                                                                                    │
+│   %#1 = zext i16 %val.2 to i32                                                                                                                                                           │
+│   ret i32 %#1                                                                                                                                                                            │
+│ }                                                                                                                                                                                        │
+│ Transformation doesn't verify!                                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ ERROR: Source is more defined than target                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ Example:                                                                                                                                                                                 │
+│ ptr %data = pointer(non-local, block_id=1, offset=0) / Address=#x000000001                                                                                                               │
+│                                                                                                                                                                                          │
+│ Source:                                                                                                                                                                                  │
+│ ptr %arrayidx = pointer(non-local, block_id=1, offset=2149675577) / Address=#x08021723a                                                                                                  │
+│ i8 %val = poison                                                                                                                                                                         │
+│ i32 %conv = poison                                                                                                                                                                       │
+│ ptr %arrayidx.2 = pointer(non-local, block_id=1, offset=2149675576) / Address=#x080217239                                                                                                │
+│ i8 %val.2 = poison                                                                                                                                                                       │
+│ i32 %conv.2 = poison                                                                                                                                                                     │
+│ i32 %shl = poison                                                                                                                                                                        │
+│ i32 %or = poison                                                                                                                                                                         │
+│                                                                                                                                                                                          │
+│ SOURCE MEMORY STATE                                                                                                                                                                      │
+│ ===================                                                                                                                                                                      │
+│ NON-LOCAL BLOCKS:                                                                                                                                                                        │
+│ Block 0 >       size: 0 align: 1        alloc type: 0   alive: false    address: #x000000000                                                                                             │
+│ Block 1 >       size: 4294967296        align: 1        alloc type: 0   alive: true     address: #x000000001                                                                             │
+│                                                                                                                                                                                          │
+│ Target:                                                                                                                                                                                  │
+│ ptr %#0 = pointer(non-local, block_id=1, offset=-2145291720) / Address=#xf80217239                                                                                                       │
+│ i16 %val.2 = UB triggered!                                                                                                                                                               │
+│                                                                                                                                                                                          │
+│ TARGET MEMORY STATE                                                                                                                                                                      │
+│ ===================                                                                                                                                                                      │
+│ NON-LOCAL BLOCKS:                                                                                                                                                                        │
+│ Block 0 >       size: 0 align: 1        alloc type: 0   alive: false    address: #x000000000                                                                                             │
+│ Block 1 >       size: 4294967296        align: 1        alloc type: 0   alive: true     address: #x000000001                                                                             │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ Summary:                                                                                                                                                                                 │
+│   0 correct transformations                                                                                                                                                              │
+│   1 incorrect transformations                                                                                                                                                            │
+│   0 failed-to-prove transformations                                                                                                                                                      │
+│   0 Alive2 errors                                                                                                                                                                        │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ --- opt_stderr ---                                                                                                                                                                       │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│                                                                                                                                                                                          │
+│ ```                                                                                                                                                                                      │
+│ ------  END ISSUE  ------                                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ You can execute bash commands and edit files to implement the necessary changes.                                                                                                         │
+│                                                                                                                                                                                          │
+│ ## Recommended Workflow                                                                                                                                                                  │
+│                                                                                                                                                                                          │
+│ This workflows should be done step-by-step so that you can iterate on your changes and any possible problems.                                                                            │
+│                                                                                                                                                                                          │
+│ 1. Analyze the codebase by finding and reading relevant files                                                                                                                            │
+│ 2. Edit the source code to resolve the issue                                                                                                                                             │
+│ 3. Verify your fix works by running the `submit-patch` command                                                                                                                           │
+│ 4. Based on the output of `submit-patch`, repeat steps 1-3 as necessary until the issue is resolved                                                                                      │
+│                                                                                                                                                                                          │
+│ ## Important Rules                                                                                                                                                                       │
+│                                                                                                                                                                                          │
+│ 1. Every response must contain exactly one action                                                                                                                                        │
+│ 2. The action must be enclosed in triple backticks                                                                                                                                       │
+│ 3. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.                                                                             │
+│    However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files                                           │
+│ 4. Solving this issue does not require deleting any files or accessing the internet, so you are not permitted to use tools such as: rm, curl, wget, git, ssh, scp, ftp, telnet, ping,    │
+│ traceroute, nslookup, dig, nmap, apt, apt-get, yum, dnf, pacman, brew.                                                                                                                   │
+│                                                                                                                                                                                          │
+│ <system_information>                                                                                                                                                                     │
+│ Linux 5.15.0-143-generic #153-Ubuntu SMP Fri Jun 13 19:10:45 UTC 2025 x86_64                                                                                                             │
+│ </system_information>                                                                                                                                                                    │
+│                                                                                                                                                                                          │
+│ ## Formatting your response                                                                                                                                                              │
+│                                                                                                                                                                                          │
+│ Here is an example of a correct response:                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ <example_response>                                                                                                                                                                       │
+│ THOUGHT: I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.                 │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ ls -la                                                                                                                                                                                   │
+│ ```                                                                                                                                                                                      │
+│ </example_response>                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ## Useful command examples                                                                                                                                                               │
+│                                                                                                                                                                                          │
+│ ### Create a new file:                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ cat <<'EOF' > newfile.py                                                                                                                                                                 │
+│ import numpy as np                                                                                                                                                                       │
+│ hello = "world"                                                                                                                                                                          │
+│ print(hello)                                                                                                                                                                             │
+│ EOF                                                                                                                                                                                      │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### Edit files with sed:```bash                                                                                                                                                          │
+│ # Replace all occurrences                                                                                                                                                                │
+│ sed -i 's/old_string/new_string/g' filename.py                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ # Replace only first occurrence                                                                                                                                                          │
+│ sed -i 's/old_string/new_string/' filename.py                                                                                                                                            │
+│                                                                                                                                                                                          │
+│ # Replace first occurrence on line 1                                                                                                                                                     │
+│ sed -i '1s/old_string/new_string/' filename.py                                                                                                                                           │
+│                                                                                                                                                                                          │
+│ # Replace all occurrences in lines 1-10                                                                                                                                                  │
+│ sed -i '1,10s/old_string/new_string/g' filename.py                                                                                                                                       │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### View file content:                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ # View specific lines with numbers                                                                                                                                                       │
+│ nl -ba filename.py | sed -n '10,20p'                                                                                                                                                     │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### Submit your patch:                                                                                                                                                                   │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ # This command has no arguments                                                                                                                                                          │
+│ submit-patch                                                                                                                                                                             │
+│ ```                                                                                                                                                                                      │
+│                                                                                                                                                                                          │
+│ ### Any other permitted command you want to run:                                                                                                                                         │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ anything                                                                                                                                                                                 │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #0, chat statistics so far: {'chat_rounds': 0, 'input_tokens': 0, 'cached_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}
+╭─ assistant [MainThread@901227] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT: I need to see the repository structure before locating the code responsible for the aggressive instcombine transformation that merged two i8 loads (with 64-bit indices) into a │
+│ single i16 load using a truncated 32-bit index. I'll list the files in the current directory to begin navigating the source tree.                                                        │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ ls -la                                                                                                                                                                                   │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@901227] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ total 292                                                                                                                                                                                │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 13:12 .                                                                                                                            │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Nov 17 13:07 ..                                                                                                                           │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 14:09 bolt                                                                                                                         │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 14:09 .ci                                                                                                                          │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 12:37 clang                                                                                                                        │
+│ -rw-r--r-- 1 autofix       autofix          19 Nov 18 15:58 .clang-format                                                                                                                │
+│ -rw-r--r-- 1 autofix       autofix        1428 Dec  1 09:40 .clang-tidy                                                                                                                  │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 13:50 clang-tools-extra                                                                                                            │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Nov 17 12:58 cmake                                                                                                                        │
+│ -rw-rw-r-- 1 autofix-admin autofix-admin   112 Nov 17 12:58 CODE_OF_CONDUCT.md                                                                                                           │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 14:09 compiler-rt                                                                                                                  │
+│ -rw-r--r-- 1 autofix       autofix         687 Dec  1 09:40 CONTRIBUTING.md                                                                                                              │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 12:37 cross-project-tests                                                                                                          │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 12:37 flang                                                                                                                        │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 14:09 .git                                                                                                                         │
+│ -rw-rw-r-- 1 autofix-admin autofix-admin  9245 Nov 17 12:58 .gitattributes                                                                                                               │
+│ -rw-r--r-- 1 autofix       autofix        3428 Dec  2 12:37 .git-blame-ignore-revs                                                                                                       │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 14:09 .github                                                                                                                      │
+│ -rw-r--r-- 1 autofix       autofix        2236 Dec  2 12:37 .gitignore                                                                                                                   │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 14:09 libc                                                                                                                         │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 12:37 libclc                                                                                                                       │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 12:37 libcxx                                                                                                                       │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 12:37 libcxxabi                                                                                                                    │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 12:37 libunwind                                                                                                                    │
+│ -rw-rw-r-- 1 autofix-admin autofix-admin 15141 Nov 17 12:58 LICENSE.TXT                                                                                                                  │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 14:09 lld                                                                                                                          │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 09:44 lldb                                                                                                                         │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 14:09 llvm                                                                                                                         │
+│ drwxrwxr-x 3 autofix-admin autofix-admin  4096 Nov 17 12:58 llvm-libgcc                                                                                                                  │
+│ -rw-r--r-- 1 autofix       autofix        2394 Dec  1 09:40 .mailmap                                                                                                                     │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 13:50 mlir                                                                                                                         │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 13:50 offload                                                                                                                      │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 14:09 openmp                                                                                                                       │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 12:37 polly                                                                                                                        │
+│ drwxr-xr-x 6 autofix       autofix        4096 Dec  1 09:40 pstl                                                                                                                         │
+│ -rw-rw-r-- 1 autofix-admin autofix-admin    57 Nov 17 12:58 pyproject.toml                                                                                                               │
+│ -rw-rw-r-- 1 autofix-admin autofix-admin  2243 Nov 17 12:58 README.md                                                                                                                    │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  2 14:09 runtimes                                                                                                                     │
+│ -rw-rw-r-- 1 autofix-admin autofix-admin   205 Nov 17 12:58 SECURITY.md                                                                                                                  │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Dec  1 09:40 third-party                                                                                                                  │
+│ drwxrwxr-x 1 autofix-admin autofix-admin  4096 Nov 17 12:58 utils                                                                                                                        │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #1, chat statistics so far: {'chat_rounds': 1, 'input_tokens': 2006, 'cached_tokens': 0, 'output_tokens': 338, 'total_tokens': 2344}
+╭─ assistant [MainThread@901227] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT: I will inspect the AggressiveInstCombine implementation to find where it forms the new combined load and possibly uses a 32-bit index for the GEP, leading to truncation. I'll  │
+│ grep for CreateGEP usage in AggressiveInstCombine.cpp to locate the code responsible.                                                                                                    │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ grep -n "CreateGEP" llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp                                                                                                  │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@901227] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>1</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #2, chat statistics so far: {'chat_rounds': 2, 'input_tokens': 5295, 'cached_tokens': 1920, 'output_tokens': 1011, 'total_tokens': 6306}
+╭─ assistant [MainThread@901227] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT: I will search for occurrences of "disjoint" in the LLVM AggressiveInstCombine sources to locate the optimization logic that combines loads, so I can inspect how it builds the  │
+│ GEP index and potentially truncates 64-bit constants to 32-bit.                                                                                                                          │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ grep -Rn "disjoint" llvm/lib/Transforms/AggressiveInstCombine                                                                                                                            │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@901227] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>1</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #3, chat statistics so far: {'chat_rounds': 3, 'input_tokens': 8696, 'cached_tokens': 5120, 'output_tokens': 1866, 'total_tokens': 10562}
+╭─ assistant [MainThread@901227] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT: I will search for code related to combining consecutive loads in AggressiveInstCombine to locate where the incorrect GEP index type might be produced.                          │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ grep -Rni "Consecutive" llvm/lib/Transforms/AggressiveInstCombine                                                                                                                        │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@901227] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│ llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp:621:// Identify and Merge consecutive loads recursively which is of the form                                         │
+│ llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp:666:  // Check if loads are consecutive and same size.                                                               │
+│ llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp:743:  // are consecutive.                                                                                            │
+│ llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp:772:static bool foldConsecutiveLoads(Instruction &I, const DataLayout &DL,                                           │
+│ llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp:1254:      MadeChange |= foldConsecutiveLoads(I, DL, TTI, AA, DT);                                                   │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #4, chat statistics so far: {'chat_rounds': 4, 'input_tokens': 12198, 'cached_tokens': 8448, 'output_tokens': 2890, 'total_tokens': 15088}
+╭─ assistant [MainThread@901227] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT: I will inspect the implementation of foldConsecutiveLoads in AggressiveInstCombine.cpp around the identified line numbers to find where the GEP index constant is created and   │
+│ see if it incorrectly uses a 32-bit type.                                                                                                                                                │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ nl -ba llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp | sed -n '600,820p'                                                                                           │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@901227] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│    600      ZExtOrTrunc = B.CreateZExtOrTrunc(Select, AccessType);                                                                                                                       │
+│    601    }                                                                                                                                                                              │
+│    602                                                                                                                                                                                   │
+│    603    LI->replaceAllUsesWith(ZExtOrTrunc);                                                                                                                                           │
+│    604                                                                                                                                                                                   │
+│    605    return true;                                                                                                                                                                   │
+│    606  }                                                                                                                                                                                │
+│    607                                                                                                                                                                                   │
+│    608  /// This is used by foldLoadsRecursive() to capture a Root Load node which is                                                                                                    │
+│    609  /// of type or(load, load) and recursively build the wide load. Also capture the                                                                                                 │
+│    610  /// shift amount, zero extend type and loadSize.                                                                                                                                 │
+│    611  struct LoadOps {                                                                                                                                                                 │
+│    612    LoadInst *Root = nullptr;                                                                                                                                                      │
+│    613    LoadInst *RootInsert = nullptr;                                                                                                                                                │
+│    614    bool FoundRoot = false;                                                                                                                                                        │
+│    615    uint64_t LoadSize = 0;                                                                                                                                                         │
+│    616    const APInt *Shift = nullptr;                                                                                                                                                  │
+│    617    Type *ZextType;                                                                                                                                                                │
+│    618    AAMDNodes AATags;                                                                                                                                                              │
+│    619  };                                                                                                                                                                               │
+│    620                                                                                                                                                                                   │
+│    621  // Identify and Merge consecutive loads recursively which is of the form                                                                                                         │
+│    622  // (ZExt(L1) << shift1) | (ZExt(L2) << shift2) -> ZExt(L3) << shift1                                                                                                             │
+│    623  // (ZExt(L1) << shift1) | ZExt(L2) -> ZExt(L3)                                                                                                                                   │
+│    624  static bool foldLoadsRecursive(Value *V, LoadOps &LOps, const DataLayout &DL,                                                                                                    │
+│    625                                 AliasAnalysis &AA) {                                                                                                                              │
+│    626    const APInt *ShAmt2 = nullptr;                                                                                                                                                 │
+│    627    Value *X;                                                                                                                                                                      │
+│    628    Instruction *L1, *L2;                                                                                                                                                          │
+│    629                                                                                                                                                                                   │
+│    630    // Go to the last node with loads.                                                                                                                                             │
+│    631    if (match(V, m_OneUse(m_c_Or(                                                                                                                                                  │
+│    632                     m_Value(X),                                                                                                                                                   │
+│    633                     m_OneUse(m_Shl(m_OneUse(m_ZExt(m_OneUse(m_Instruction(L2)))),                                                                                                 │
+│    634                                    m_APInt(ShAmt2)))))) ||                                                                                                                        │
+│    635        match(V, m_OneUse(m_Or(m_Value(X),                                                                                                                                         │
+│    636                               m_OneUse(m_ZExt(m_OneUse(m_Instruction(L2)))))))) {                                                                                                 │
+│    637      if (!foldLoadsRecursive(X, LOps, DL, AA) && LOps.FoundRoot)                                                                                                                  │
+│    638        // Avoid Partial chain merge.                                                                                                                                              │
+│    639        return false;                                                                                                                                                              │
+│    640    } else                                                                                                                                                                         │
+│    641      return false;                                                                                                                                                                │
+│    642                                                                                                                                                                                   │
+│    643    // Check if the pattern has loads                                                                                                                                              │
+│    644    LoadInst *LI1 = LOps.Root;                                                                                                                                                     │
+│    645    const APInt *ShAmt1 = LOps.Shift;                                                                                                                                              │
+│    646    if (LOps.FoundRoot == false &&                                                                                                                                                 │
+│    647        (match(X, m_OneUse(m_ZExt(m_Instruction(L1)))) ||                                                                                                                          │
+│    648         match(X, m_OneUse(m_Shl(m_OneUse(m_ZExt(m_OneUse(m_Instruction(L1)))),                                                                                                    │
+│    649                                 m_APInt(ShAmt1)))))) {                                                                                                                            │
+│    650      LI1 = dyn_cast<LoadInst>(L1);                                                                                                                                                │
+│    651    }                                                                                                                                                                              │
+│    652    LoadInst *LI2 = dyn_cast<LoadInst>(L2);                                                                                                                                        │
+│    653                                                                                                                                                                                   │
+│    654    // Check if loads are same, atomic, volatile and having same address space.                                                                                                    │
+│    655    if (LI1 == LI2 || !LI1 || !LI2 || !LI1->isSimple() || !LI2->isSimple() ||                                                                                                      │
+│    656        LI1->getPointerAddressSpace() != LI2->getPointerAddressSpace())                                                                                                            │
+│    657      return false;                                                                                                                                                                │
+│    658                                                                                                                                                                                   │
+│    659    // Check if Loads come from same BB.                                                                                                                                           │
+│    660    if (LI1->getParent() != LI2->getParent())                                                                                                                                      │
+│    661      return false;                                                                                                                                                                │
+│    662                                                                                                                                                                                   │
+│    663    // Find the data layout                                                                                                                                                        │
+│    664    bool IsBigEndian = DL.isBigEndian();                                                                                                                                           │
+│    665                                                                                                                                                                                   │
+│    666    // Check if loads are consecutive and same size.                                                                                                                               │
+│    667    Value *Load1Ptr = LI1->getPointerOperand();                                                                                                                                    │
+│    668    APInt Offset1(DL.getIndexTypeSizeInBits(Load1Ptr->getType()), 0);                                                                                                              │
+│    669    Load1Ptr =                                                                                                                                                                     │
+│    670        Load1Ptr->stripAndAccumulateConstantOffsets(DL, Offset1,                                                                                                                   │
+│    671                                                    /* AllowNonInbounds */ true);                                                                                                  │
+│    672                                                                                                                                                                                   │
+│    673    Value *Load2Ptr = LI2->getPointerOperand();                                                                                                                                    │
+│    674    APInt Offset2(DL.getIndexTypeSizeInBits(Load2Ptr->getType()), 0);                                                                                                              │
+│    675    Load2Ptr =                                                                                                                                                                     │
+│    676        Load2Ptr->stripAndAccumulateConstantOffsets(DL, Offset2,                                                                                                                   │
+│    677                                                    /* AllowNonInbounds */ true);                                                                                                  │
+│    678                                                                                                                                                                                   │
+│    679    // Verify if both loads have same base pointers and load sizes are same.                                                                                                       │
+│    680    uint64_t LoadSize1 = LI1->getType()->getPrimitiveSizeInBits();                                                                                                                 │
+│    681    uint64_t LoadSize2 = LI2->getType()->getPrimitiveSizeInBits();                                                                                                                 │
+│    682    if (Load1Ptr != Load2Ptr || LoadSize1 != LoadSize2)                                                                                                                            │
+│    683      return false;                                                                                                                                                                │
+│    684                                                                                                                                                                                   │
+│    685    // Support Loadsizes greater or equal to 8bits and only power of 2.                                                                                                            │
+│    686    if (LoadSize1 < 8 || !isPowerOf2_64(LoadSize1))                                                                                                                                │
+│    687      return false;                                                                                                                                                                │
+│    688                                                                                                                                                                                   │
+│    689    // Alias Analysis to check for stores b/w the loads.                                                                                                                           │
+│    690    LoadInst *Start = LOps.FoundRoot ? LOps.RootInsert : LI1, *End = LI2;                                                                                                          │
+│    691    MemoryLocation Loc;                                                                                                                                                            │
+│    692    if (!Start->comesBefore(End)) {                                                                                                                                                │
+│    693      std::swap(Start, End);                                                                                                                                                       │
+│    694      Loc = MemoryLocation::get(End);                                                                                                                                              │
+│    695      if (LOps.FoundRoot)                                                                                                                                                          │
+│    696        Loc = Loc.getWithNewSize(LOps.LoadSize);                                                                                                                                   │
+│    697    } else                                                                                                                                                                         │
+│    698      Loc = MemoryLocation::get(End);                                                                                                                                              │
+│    699    unsigned NumScanned = 0;                                                                                                                                                       │
+│    700    for (Instruction &Inst :                                                                                                                                                       │
+│    701         make_range(Start->getIterator(), End->getIterator())) {                                                                                                                   │
+│    702      if (Inst.mayWriteToMemory() && isModSet(AA.getModRefInfo(&Inst, Loc)))                                                                                                       │
+│    703        return false;                                                                                                                                                              │
+│    704                                                                                                                                                                                   │
+│    705      // Ignore debug info so that's not counted against MaxInstrsToScan.                                                                                                          │
+│    706      // Otherwise debug info could affect codegen.                                                                                                                                │
+│    707      if (!isa<DbgInfoIntrinsic>(Inst) && ++NumScanned > MaxInstrsToScan)                                                                                                          │
+│    708        return false;                                                                                                                                                              │
+│    709    }                                                                                                                                                                              │
+│    710                                                                                                                                                                                   │
+│    711    // Make sure Load with lower Offset is at LI1                                                                                                                                  │
+│    712    bool Reverse = false;                                                                                                                                                          │
+│    713    if (Offset2.slt(Offset1)) {                                                                                                                                                    │
+│    714      std::swap(LI1, LI2);                                                                                                                                                         │
+│    715      std::swap(ShAmt1, ShAmt2);                                                                                                                                                   │
+│    716      std::swap(Offset1, Offset2);                                                                                                                                                 │
+│    717      std::swap(Load1Ptr, Load2Ptr);                                                                                                                                               │
+│    718      std::swap(LoadSize1, LoadSize2);                                                                                                                                             │
+│    719      Reverse = true;                                                                                                                                                              │
+│    720    }                                                                                                                                                                              │
+│    721                                                                                                                                                                                   │
+│    722    // Big endian swap the shifts                                                                                                                                                  │
+│    723    if (IsBigEndian)                                                                                                                                                               │
+│    724      std::swap(ShAmt1, ShAmt2);                                                                                                                                                   │
+│    725                                                                                                                                                                                   │
+│    726    // Find Shifts values.                                                                                                                                                         │
+│    727    uint64_t Shift1 = 0, Shift2 = 0;                                                                                                                                               │
+│    728    if (ShAmt1)                                                                                                                                                                    │
+│    729      Shift1 = ShAmt1->getZExtValue();                                                                                                                                             │
+│    730    if (ShAmt2)                                                                                                                                                                    │
+│    731      Shift2 = ShAmt2->getZExtValue();                                                                                                                                             │
+│    732                                                                                                                                                                                   │
+│    733    // First load is always LI1. This is where we put the new load.                                                                                                                │
+│    734    // Use the merged load size available from LI1 for forward loads.                                                                                                              │
+│    735    if (LOps.FoundRoot) {                                                                                                                                                          │
+│    736      if (!Reverse)                                                                                                                                                                │
+│    737        LoadSize1 = LOps.LoadSize;                                                                                                                                                 │
+│    738      else                                                                                                                                                                         │
+│    739        LoadSize2 = LOps.LoadSize;                                                                                                                                                 │
+│    740    }                                                                                                                                                                              │
+│    741                                                                                                                                                                                   │
+│    742    // Verify if shift amount and load index aligns and verifies that loads                                                                                                        │
+│    743    // are consecutive.                                                                                                                                                            │
+│    744    uint64_t ShiftDiff = IsBigEndian ? LoadSize2 : LoadSize1;                                                                                                                      │
+│    745    uint64_t PrevSize =                                                                                                                                                            │
+│    746        DL.getTypeStoreSize(IntegerType::get(LI1->getContext(), LoadSize1));                                                                                                       │
+│    747    if ((Shift2 - Shift1) != ShiftDiff || (Offset2 - Offset1) != PrevSize)                                                                                                         │
+│    748      return false;                                                                                                                                                                │
+│    749                                                                                                                                                                                   │
+│    750    // Update LOps                                                                                                                                                                 │
+│    751    AAMDNodes AATags1 = LOps.AATags;                                                                                                                                               │
+│    752    AAMDNodes AATags2 = LI2->getAAMetadata();                                                                                                                                      │
+│    753    if (LOps.FoundRoot == false) {                                                                                                                                                 │
+│    754      LOps.FoundRoot = true;                                                                                                                                                       │
+│    755      AATags1 = LI1->getAAMetadata();                                                                                                                                              │
+│    756    }                                                                                                                                                                              │
+│    757    LOps.LoadSize = LoadSize1 + LoadSize2;                                                                                                                                         │
+│    758    LOps.RootInsert = Start;                                                                                                                                                       │
+│    759                                                                                                                                                                                   │
+│    760    // Concatenate the AATags of the Merged Loads.                                                                                                                                 │
+│    761    LOps.AATags = AATags1.concat(AATags2);                                                                                                                                         │
+│    762                                                                                                                                                                                   │
+│    763    LOps.Root = LI1;                                                                                                                                                               │
+│    764    LOps.Shift = ShAmt1;                                                                                                                                                           │
+│    765    LOps.ZextType = X->getType();                                                                                                                                                  │
+│    766    return true;                                                                                                                                                                   │
+│    767  }                                                                                                                                                                                │
+│    768                                                                                                                                                                                   │
+│    769  // For a given BB instruction, evaluate all loads in the chain that form a                                                                                                       │
+│    770  // pattern which suggests that the loads can be combined. The one and only use                                                                                                   │
+│    771  // of the loads is to form a wider load.                                                                                                                                         │
+│    772  static bool foldConsecutiveLoads(Instruction &I, const DataLayout &DL,                                                                                                           │
+│    773                                   TargetTransformInfo &TTI, AliasAnalysis &AA,                                                                                                    │
+│    774                                   const DominatorTree &DT) {                                                                                                                      │
+│    775    // Only consider load chains of scalar values.                                                                                                                                 │
+│    776    if (isa<VectorType>(I.getType()))                                                                                                                                              │
+│    777      return false;                                                                                                                                                                │
+│    778                                                                                                                                                                                   │
+│    779    LoadOps LOps;                                                                                                                                                                  │
+│    780    if (!foldLoadsRecursive(&I, LOps, DL, AA) || !LOps.FoundRoot)                                                                                                                  │
+│    781      return false;                                                                                                                                                                │
+│    782                                                                                                                                                                                   │
+│    783    IRBuilder<> Builder(&I);                                                                                                                                                       │
+│    784    LoadInst *NewLoad = nullptr, *LI1 = LOps.Root;                                                                                                                                 │
+│    785                                                                                                                                                                                   │
+│    786    IntegerType *WiderType = IntegerType::get(I.getContext(), LOps.LoadSize);                                                                                                      │
+│    787    // TTI based checks if we want to proceed with wider load                                                                                                                      │
+│    788    bool Allowed = TTI.isTypeLegal(WiderType);                                                                                                                                     │
+│    789    if (!Allowed)                                                                                                                                                                  │
+│    790      return false;                                                                                                                                                                │
+│    791                                                                                                                                                                                   │
+│    792    unsigned AS = LI1->getPointerAddressSpace();                                                                                                                                   │
+│    793    unsigned Fast = 0;                                                                                                                                                             │
+│    794    Allowed = TTI.allowsMisalignedMemoryAccesses(I.getContext(), LOps.LoadSize,                                                                                                    │
+│    795                                                 AS, LI1->getAlign(), &Fast);                                                                                                      │
+│    796    if (!Allowed || !Fast)                                                                                                                                                         │
+│    797      return false;                                                                                                                                                                │
+│    798                                                                                                                                                                                   │
+│    799    // Get the Index and Ptr for the new GEP.                                                                                                                                      │
+│    800    Value *Load1Ptr = LI1->getPointerOperand();                                                                                                                                    │
+│    801    Builder.SetInsertPoint(LOps.RootInsert);                                                                                                                                       │
+│    802    if (!DT.dominates(Load1Ptr, LOps.RootInsert)) {                                                                                                                                │
+│    803      APInt Offset1(DL.getIndexTypeSizeInBits(Load1Ptr->getType()), 0);                                                                                                            │
+│    804      Load1Ptr = Load1Ptr->stripAndAccumulateConstantOffsets(                                                                                                                      │
+│    805          DL, Offset1, /* AllowNonInbounds */ true);                                                                                                                               │
+│    806      Load1Ptr = Builder.CreatePtrAdd(Load1Ptr,                                                                                                                                    │
+│    807                                      Builder.getInt32(Offset1.getZExtValue()));                                                                                                   │
+│    808    }                                                                                                                                                                              │
+│    809    // Generate wider load.                                                                                                                                                        │
+│    810    NewLoad = Builder.CreateAlignedLoad(WiderType, Load1Ptr, LI1->getAlign(),                                                                                                      │
+│    811                                        LI1->isVolatile(), "");                                                                                                                    │
+│    812    NewLoad->takeName(LI1);                                                                                                                                                        │
+│    813    // Set the New Load AATags Metadata.                                                                                                                                           │
+│    814    if (LOps.AATags)                                                                                                                                                               │
+│    815      NewLoad->setAAMetadata(LOps.AATags);                                                                                                                                         │
+│    816                                                                                                                                                                                   │
+│    817    Value *NewOp = NewLoad;                                                                                                                                                        │
+│    818    // Check if zero extend needed.                                                                                                                                                │
+│    819    if (LOps.ZextType)                                                                                                                                                             │
+│    820      NewOp = Builder.CreateZExt(NewOp, LOps.ZextType);                                                                                                                            │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #5, chat statistics so far: {'chat_rounds': 5, 'input_tokens': 15934, 'cached_tokens': 11904, 'output_tokens': 3619, 'total_tokens': 19553}
+╭─ assistant [MainThread@901227] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT: The miscompilation arises from truncating a 64-bit offset APInt to 32 bits when creating the PtrAdd: Builder.getInt32(Offset1.getZExtValue()). This loses high bits for large   │
+│ offsets. Replace it with Builder.getInt(Offset1) to preserve full width. I'll apply this change.                                                                                         │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ sed -i 's/getInt32(Offset1.getZExtValue())/getInt(Offset1)/' llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp && nl -ba                                               │
+│ llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp | sed -n '790,810p'                                                                                                  │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Remaining tools: [edit[25], test[25]]
+╭─ user [MainThread@901227] ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ <returncode>0</returncode>                                                                                                                                                               │
+│ <output>                                                                                                                                                                                 │
+│    790      return false;                                                                                                                                                                │
+│    791                                                                                                                                                                                   │
+│    792    unsigned AS = LI1->getPointerAddressSpace();                                                                                                                                   │
+│    793    unsigned Fast = 0;                                                                                                                                                             │
+│    794    Allowed = TTI.allowsMisalignedMemoryAccesses(I.getContext(), LOps.LoadSize,                                                                                                    │
+│    795                                                 AS, LI1->getAlign(), &Fast);                                                                                                      │
+│    796    if (!Allowed || !Fast)                                                                                                                                                         │
+│    797      return false;                                                                                                                                                                │
+│    798                                                                                                                                                                                   │
+│    799    // Get the Index and Ptr for the new GEP.                                                                                                                                      │
+│    800    Value *Load1Ptr = LI1->getPointerOperand();                                                                                                                                    │
+│    801    Builder.SetInsertPoint(LOps.RootInsert);                                                                                                                                       │
+│    802    if (!DT.dominates(Load1Ptr, LOps.RootInsert)) {                                                                                                                                │
+│    803      APInt Offset1(DL.getIndexTypeSizeInBits(Load1Ptr->getType()), 0);                                                                                                            │
+│    804      Load1Ptr = Load1Ptr->stripAndAccumulateConstantOffsets(                                                                                                                      │
+│    805          DL, Offset1, /* AllowNonInbounds */ true);                                                                                                                               │
+│    806      Load1Ptr = Builder.CreatePtrAdd(Load1Ptr,                                                                                                                                    │
+│    807                                      Builder.getInt(Offset1));                                                                                                                    │
+│    808    }                                                                                                                                                                              │
+│    809    // Generate wider load.                                                                                                                                                        │
+│    810    NewLoad = Builder.CreateAlignedLoad(WiderType, Load1Ptr, LI1->getAlign(),                                                                                                      │
+│ </output>                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Executing round #6, chat statistics so far: {'chat_rounds': 6, 'input_tokens': 22735, 'cached_tokens': 15616, 'output_tokens': 4346, 'total_tokens': 27081}
+╭─ assistant [MainThread@901227] ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ THOUGHT: I made the code change; now I need to build and run the patch submission to verify if the issue is resolved and the transformation no longer miscompiles. I'll run              │
+│ submit-patch.                                                                                                                                                                            │
+│                                                                                                                                                                                          │
+│ ```bash                                                                                                                                                                                  │
+│ submit-patch                                                                                                                                                                             │
+│ ```                                                                                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Generation statistics saved to /tmp/118467-gpt5-12021409.json.
+Saved trajectory to '/tmp/118467-gpt5-12021409.traj.json'
+Final Patch
+-----------
+diff --git a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
+index b5b561797f75..96e768f3c797 100644
+--- a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
++++ b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
+@@ -804,7 +804,7 @@ static bool foldConsecutiveLoads(Instruction &I, const DataLayout &DL,
+     Load1Ptr = Load1Ptr->stripAndAccumulateConstantOffsets(
+         DL, Offset1, /* AllowNonInbounds */ true);
+     Load1Ptr = Builder.CreatePtrAdd(Load1Ptr,
+-                                    Builder.getInt32(Offset1.getZExtValue()));
++                                    Builder.getInt(Offset1));
+   }
+   // Generate wider load.
+   NewLoad = Builder.CreateAlignedLoad(WiderType, Load1Ptr, LI1->getAlign(),
+
+Reference Patch
+---------------
+commit f68b0e36997322eeda8fd199ea80deb1b49c5410
+Author: Antonio Frighetto <me@antoniofrighetto.com>
+Date:   Wed Dec 4 10:15:11 2024 +0100
+
+    [AggressiveInstCombine] Use APInt and avoid truncation when folding loads
+
+    A miscompilation issue has been addressed with improved handling.
+
+    Fixes: https://github.com/llvm/llvm-project/issues/118467.
+
+diff --git a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
+index b5b561797f75..45ee2d472a11 100644
+--- a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
++++ b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp
+@@ -803,8 +803,7 @@ static bool foldConsecutiveLoads(Instruction &I, const DataLayout &DL,
+     APInt Offset1(DL.getIndexTypeSizeInBits(Load1Ptr->getType()), 0);
+     Load1Ptr = Load1Ptr->stripAndAccumulateConstantOffsets(
+         DL, Offset1, /* AllowNonInbounds */ true);
+-    Load1Ptr = Builder.CreatePtrAdd(Load1Ptr,
+-                                    Builder.getInt32(Offset1.getZExtValue()));
++    Load1Ptr = Builder.CreatePtrAdd(Load1Ptr, Builder.getInt(Offset1));
+   }
+   // Generate wider load.
+   NewLoad = Builder.CreateAlignedLoad(WiderType, Load1Ptr, LI1->getAlign(),
+
+Statistics
+----------
+{
+  "command": {
+    "issue": "118467",
+    "model": "gpt-5"
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\nindex
+b5b561797f75..96e768f3c797 100644\n--- a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\n+++ b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\n@@
+-804,7 +804,7 @@ static bool foldConsecutiveLoads(Instruction &I, const DataLayout &DL,\n     Load1Ptr = Load1Ptr->stripAndAccumulateConstantOffsets(\n         DL, Offset1, /*
+AllowNonInbounds */ true);\n     Load1Ptr = Builder.CreatePtrAdd(Load1Ptr,\n-                                    Builder.getInt32(Offset1.getZExtValue()));\n+
+Builder.getInt(Offset1));\n   }\n   // Generate wider load.\n   NewLoad = Builder.CreateAlignedLoad(WiderType, Load1Ptr, LI1->getAlign(),\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 29999,
+  "output_tokens": 4406,
+  "cached_tokens": 22400,
+  "total_tokens": 34405,
+  "chat_rounds": 7,
+  "total_time_sec": 207.81174898147583,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\nindex
+b5b561797f75..96e768f3c797 100644\n--- a/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\n+++ b/llvm/lib/Transforms/AggressiveInstCombine/AggressiveInstCombine.cpp\n@@
+-804,7 +804,7 @@ static bool foldConsecutiveLoads(Instruction &I, const DataLayout &DL,\n     Load1Ptr = Load1Ptr->stripAndAccumulateConstantOffsets(\n         DL, Offset1, /*
+AllowNonInbounds */ true);\n     Load1Ptr = Builder.CreatePtrAdd(Load1Ptr,\n-                                    Builder.getInt32(Offset1.getZExtValue()));\n+
+Builder.getInt(Offset1));\n   }\n   // Generate wider load.\n   NewLoad = Builder.CreateAlignedLoad(WiderType, Load1Ptr, LI1->getAlign(),\n"
+  ]
+}

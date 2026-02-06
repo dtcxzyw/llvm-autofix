@@ -1,0 +1,38 @@
+{
+  "command": {
+    "issue": "120615",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/120615-qwen3max-11241300.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 621, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 461, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 311, in patch_and_fix\n    patch = agent.run(\n            ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 5065358,
+  "output_tokens": 7098,
+  "cached_tokens": 2435200,
+  "total_tokens": 5072456,
+  "chat_rounds": 103,
+  "total_time_sec": 1507.0992422103882,
+  "trans_point": [
+    "llvm/lib/IR/Constants.cpp",
+    "llvm::ConstantInt::get",
+    911
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Analysis/ScalarEvolution.cpp",
+      15770,
+      15772
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The issue is a segmentation fault occurring in the `nary-reassociate` pass when processing a function with an unreachable basic block (`%bb` has no predecessors but is listed as a predecessor of `%header`). The crash happens during ScalarEvolution's loop guard collection phase, specifically when trying to create a `ConstantInt` with an invalid type. The backtrace shows infinite recursion between loop guard collection functions, indicating a cycle that isn't being properly terminated.\n\n2. Analyzing `opt`'s Log: The Scalar Evolution analysis correctly identifies the PHI node `%0` as an add recurrence `{0,+,1}<nuw><nsw><%header>`, but the loop guard collection logic gets stuck in an infinite loop when processing the unreachable block `%bb` in the PHI's predecessors. The infinite recursion eventually leads to stack corruption and the segfault when accessing type information.\n\n3. Root Cause Analysis: The root cause is in the `LoopGuards::collectFromBlock` function in ScalarEvolution.cpp. While there is a `MaxLoopGuardCollectionDepth` constant and a `Depth` parameter to prevent infinite recursion, the depth check is only applied in a specific case (when collecting conditions from predecessor chains) but not at the general entry point of the function. When processing PHI nodes with unreachable predecessors, the recursion depth isn't properly limited, leading to infinite recursion and eventual stack overflow/corruption.\n\n4. Proposed Edit Point(s): Add a depth check at the beginning of `collectFromBlock` to prevent infinite recursion. The function already has a `Depth` parameter and `MaxLoopGuardCollectionDepth` constant, so we just need to apply the depth limit universally.\n\n5. Conclusion: Adding the depth check at the start of `collectFromBlock` will prevent infinite recursion when processing problematic CFGs with unreachable blocks, fixing the segfault while maintaining the existing functionality for valid cases. This is a minimal, targeted fix that addresses the root cause without affecting normal operation.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Analysis/ScalarEvolution.cpp b/llvm/lib/Analysis/ScalarEvolution.cpp\nindex 8ab56025546e..6485adf2b295 100644\n--- a/llvm/lib/Analysis/ScalarEvolution.cpp\n+++ b/llvm/lib/Analysis/ScalarEvolution.cpp\n@@ -15405,6 +15405,9 @@ void ScalarEvolution::LoopGuards::collectFromBlock(\n     ScalarEvolution &SE, ScalarEvolution::LoopGuards &Guards,\n     const BasicBlock *Block, const BasicBlock *Pred,\n     SmallPtrSetImpl<const BasicBlock *> &VisitedBlocks, unsigned Depth) {\n+  // Prevent infinite recursion by checking depth limit at the start.\n+  if (Depth >= MaxLoopGuardCollectionDepth)\n+    return;\n   SmallVector<const SCEV *> ExprsToRewrite;\n   auto CollectCondition = [&](ICmpInst::Predicate Predicate, const SCEV *LHS,\n                               const SCEV *RHS,\n",
+    "diff --git a/llvm/lib/Analysis/ScalarEvolution.cpp b/llvm/lib/Analysis/ScalarEvolution.cpp\nindex 8ab56025546e..673fc9533555 100644\n--- a/llvm/lib/Analysis/ScalarEvolution.cpp\n+++ b/llvm/lib/Analysis/ScalarEvolution.cpp\n@@ -15405,6 +15405,9 @@ void ScalarEvolution::LoopGuards::collectFromBlock(\n     ScalarEvolution &SE, ScalarEvolution::LoopGuards &Guards,\n     const BasicBlock *Block, const BasicBlock *Pred,\n     SmallPtrSetImpl<const BasicBlock *> &VisitedBlocks, unsigned Depth) {\n+  // Prevent infinite recursion by checking depth limit at the start.\n+  if (Depth > MaxLoopGuardCollectionDepth)\n+    return;\n   SmallVector<const SCEV *> ExprsToRewrite;\n   auto CollectCondition = [&](ICmpInst::Predicate Predicate, const SCEV *LHS,\n                               const SCEV *RHS,\n",
+    "diff --git a/llvm/lib/Analysis/ScalarEvolution.cpp b/llvm/lib/Analysis/ScalarEvolution.cpp\nindex 8ab56025546e..4c7a494f5df4 100644\n--- a/llvm/lib/Analysis/ScalarEvolution.cpp\n+++ b/llvm/lib/Analysis/ScalarEvolution.cpp\n@@ -15405,6 +15405,10 @@ void ScalarEvolution::LoopGuards::collectFromBlock(\n     ScalarEvolution &SE, ScalarEvolution::LoopGuards &Guards,\n     const BasicBlock *Block, const BasicBlock *Pred,\n     SmallPtrSetImpl<const BasicBlock *> &VisitedBlocks, unsigned Depth) {\n+  // Prevent infinite recursion by checking depth limit at the start.\n+  if (Depth >= MaxLoopGuardCollectionDepth)\n+    return;\n+\n   SmallVector<const SCEV *> ExprsToRewrite;\n   auto CollectCondition = [&](ICmpInst::Predicate Predicate, const SCEV *LHS,\n                               const SCEV *RHS,\n",
+    "diff --git a/llvm/lib/Analysis/ScalarEvolution.cpp b/llvm/lib/Analysis/ScalarEvolution.cpp\nindex 8ab56025546e..78d25545bd26 100644\n--- a/llvm/lib/Analysis/ScalarEvolution.cpp\n+++ b/llvm/lib/Analysis/ScalarEvolution.cpp\n@@ -15789,7 +15789,7 @@ void ScalarEvolution::LoopGuards::collectFromBlock(\n   // blocks and try to merge the found conditions to build a new one\n   // for the Phi.\n   if (Pair.second->hasNPredecessorsOrMore(2) &&\n-      Depth < MaxLoopGuardCollectionDepth) {\n+      Depth + 1 < MaxLoopGuardCollectionDepth) {\n     SmallDenseMap<const BasicBlock *, LoopGuards> IncomingGuards;\n     for (auto &Phi : Pair.second->phis())\n       collectFromPHI(SE, Guards, Phi, VisitedBlocks, IncomingGuards, Depth);\n"
+  ]
+}

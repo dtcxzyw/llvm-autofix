@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "112076",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/112076-gem25pro-12120623.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 736887,
+  "output_tokens": 24835,
+  "cached_tokens": 643198,
+  "total_tokens": 789815,
+  "chat_rounds": 35,
+  "total_time_sec": 1003.2221901416779,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+    "foldBitCeil",
+    3504
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+      3490,
+      3490
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe core of the problem lies in an incorrect transformation performed by `foldBitCeil` in `InstCombineSelect.cpp`. This function attempts to optimize a `select` instruction that implements the `bit_ceil` operation (finding the next power of two) into a more efficient sequence of instructions.\n\nThe original code calculates `bit_ceil(x)` using the following pattern:\n`y = x - 1`\n`z = 1 << (32 - ctlz(y))`\nIf `x` is 0 or 1, the result is 1. Otherwise, it's `z`.\n\nThe transformation incorrectly simplifies this to `1 << (32 - ctlz(x))`, which is mathematically equivalent to `bit_ceil(x+1)`. This is a subtle but critical logic error.\n\nThe miscompilation is exposed by Alive2 with the input `x = -1` (0xffffffff).\n\n*   **Source Execution (`x = -1`):**\n    1.  `ctlz(-1)` is 0. The `range(1, 33)` metadata on the result of `llvm.ctlz.i32` makes the value `poison` because 0 is outside the valid range `[1, 32]`.\n    2.  The `shl` instruction, which depends on the `poison` value, also produces `poison`.\n    3.  The `select` condition `icmp ult (x-1), -2` evaluates to `false`.\n    4.  The `select` instruction therefore chooses its false-value operand, which is the constant `1`. The function correctly returns `1`.\n\n*   **Target Execution (`x = -1`):**\n    1.  `ctlz(-1)` is 0, which again becomes `poison` due to the range metadata.\n    2.  The transformed code directly uses this `poison` value to calculate the final result.\n    3.  `sub nsw i32 0, poison` -> `poison`.\n    4.  `and i32 poison, 31` -> `poison`.\n    5.  `shl nuw i32 1, poison` -> `poison`.\n    6.  The function incorrectly returns `poison`.\n\nThe transformation is invalid because it produces `poison` where the original code produced a concrete value (`1`).\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log confirms that the transformation happens when visiting the `select` instruction:\n\n```\nIC: Visiting:   %sel = select i1 %ult, i32 %shl, i32 1\nADD DEFERRED:   %1 = sub i32 0, %ctlz\nADD DEFERRED:   %2 = and i32 %1, 31\nIC: Old =   %sel = select i1 %ult, i32 %shl, i32 1\n    New =   <badref> = shl i32 1, %2\n```\n\nThis shows `foldBitCeil` matching the `select` and replacing it with a new `shl` instruction, which is the root of the miscompilation.\n\n### 3. Root Cause Analysis\n\nThe bug is in the logic of `foldBitCeil`. The function tries to match the pattern `select (icmp ult (X-1), C), (shl 1, (BW-ctlz(X))), 1`. However, the correct pattern for `bit_ceil(X)` is `select (icmp ult (X-1), C), (shl 1, (BW-ctlz(X-1))), 1`.\n\nThe existing code in `foldBitCeil` incorrectly uses `X` as the argument to `ctlz` when it should be using `X-1`. The `ctlz` operand is extracted from the `shl` instruction's operand, which in the reproducer is `%sub = sub i32 32, %ctlz`. The `%ctlz` operand is `call @llvm.ctlz.i32(i32 %x, ...)`. The code incorrectly assumes the argument to `ctlz` is `X` itself, not `X-1`.\n\nThe fix is to ensure that the argument to `ctlz` is indeed `X-1`. We can do this by checking if the `ctlz` operand is the result of `add i32 %x, -1` or `sub i32 %x, 1`. If it is not, the optimization is invalid and should be aborted.\n\n### 4. Proposed Edit Point(s)\n\nThe necessary change is in `llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp`, within the `foldBitCeil` function. We need to add a check to validate that the `ctlz` intrinsic is being called on `X-1`.\n\n```cpp\n// llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp:3490\n\n  // The ctlz must be on X-1.\n  if (CtlzArg != XMinus1)\n    return nullptr;\n\n  // We have bit_ceil. We can implement this as `1 << (BW - ctlz(X-1))` if we\n  // can prove that `X-1` is not `(1 << (BW-1)) - 1`. That is because\n```\n\nThis change ensures that the `ctlz` argument (`CtlzArg`) is the same value as `X-1` (`XMinus1`), which is the operand of the `icmp` condition. This correctly restricts the optimization to the valid `bit_ceil` pattern.\n\n### 5. Conclusion\n\nThe miscompilation is caused by an overly aggressive `bit_ceil` optimization in `foldBitCeil` that incorrectly matches a pattern where the `ctlz` argument is `X` instead of the required `X-1`. By adding a check to enforce that the `ctlz` argument is `X-1`, we correct the logic and prevent the faulty transformation. This will resolve the verification failure and ensure `instcombine` produces correct code for this case.",
+  "test_traj": []
+}

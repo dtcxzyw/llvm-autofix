@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "155287",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/155287-gpt5-11280214.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\nindex 060ca92e559a..e7bdd6e3a69c 100644\n--- a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n+++ b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n@@ -1239,9 +1239,13 @@ Value *SCEVExpander::tryToReuseLCSSAPhi(const SCEVAddRecExpr *S) {\n     if (!isa<SCEVAddRecExpr>(ExitSCEV))\n       continue;\n     Type *PhiTy = PN.getType();\n-    if (STy->isIntegerTy() && PhiTy->isPointerTy())\n+    if (STy->isIntegerTy() && PhiTy->isPointerTy()) {\n       ExitSCEV = SE.getPtrToIntExpr(ExitSCEV, STy);\n-    else if (S->getType() != PN.getType())\n+      // getPtrToIntExpr may fail for non-integral pointer types and return\n+      // SCEVCouldNotCompute. In that case we cannot reuse this PHI.\n+      if (isa<SCEVCouldNotCompute>(ExitSCEV))\n+        continue;\n+    } else if (S->getType() != PN.getType())\n       continue;\n \n     // Check if we can re-use the existing PN, by adjusting it with an expanded\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 109125,
+  "output_tokens": 6395,
+  "cached_tokens": 72704,
+  "total_tokens": 115520,
+  "chat_rounds": 12,
+  "total_time_sec": 155.1803479194641,
+  "trans_point": [
+    "llvm/lib/Analysis/ScalarEvolution.cpp",
+    "llvm::SCEV::getType",
+    412
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp",
+      1239,
+      1245
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs inside ScalarEvolution when SCEV::getType() is invoked on a SCEVCouldNotCompute object. This indicates an earlier misuse: some code passed a SCEV that represents 'could not compute' into an API that assumes the SCEV is well-formed and typed. The reproducer uses a non-integral pointer address space (\"ni:1\" in the datalayout). Non-integral pointers cannot be losslessly converted to integers. In tryToReuseLCSSAPhi(), we attempt to convert a pointer induction SCEV (ExitSCEV) to an integer using getPtrToIntExpr. For non-integral pointer types, getPtrToIntExpr returns SCEVCouldNotCompute. The current code does not check for this and unconditionally passes the resulting SCEV into getMinusSCEV, which then calls getType() on the RHS, triggering the unreachable assertion.\n\n2. Analyzing opt's Log:\nThe log shows the loop-idiom pass begins processing a countable loop and immediately aborts with 'Attempt to use a SCEVCouldNotCompute object!' before any transformation messages (e.g. memset/memcpy recognition) appear. The stack trace pinpoints the call chain: tryToReuseLCSSAPhi -> getMinusSCEV -> SCEV::getType(). This proves the first mutation point is the attempted SCEV difference calculation in tryToReuseLCSSAPhi, not a later transformation such as store pattern rewriting.\n\n3. Root Cause Analysis:\nThe relevant code in SCEVExpander::tryToReuseLCSSAPhi:\n  if (STy->isIntegerTy() && PhiTy->isPointerTy())\n    ExitSCEV = SE.getPtrToIntExpr(ExitSCEV, STy);\n  else if (S->getType() != PN.getType())\n    continue;\nImmediately after, it computes Diff = SE.getMinusSCEV(S, ExitSCEV). If getPtrToIntExpr fails (which happens for non-integral pointer address spaces), it returns a SCEVCouldNotCompute object. There is no guard, so Diff computation proceeds. getMinusSCEV assumes operands are valid typed SCEVs; encountering SCEVCouldNotCompute leads to invoking getType(), which is defined as unreachable for that sentinel object. Therefore, the misuse resides in tryToReuseLCSSAPhi lacking a check after the pointer-to-int conversion.\nAlternative (broader) fixes could add a defensive early return inside getMinusSCEV for CouldNotCompute operands, but per instructions we target the earliest incorrect use site. The assertion is correct; the earlier logic must avoid propagating CouldNotCompute.\n\n4. Proposed Edit Point(s):\nFile: llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\nLines: 1239-1245 (the block handling the STy/PhiTy type adaptation)\nChange: Wrap the pointer-to-int conversion in braces and add a check:\n  if (STy->isIntegerTy() && PhiTy->isPointerTy()) {\n    ExitSCEV = SE.getPtrToIntExpr(ExitSCEV, STy);\n    if (isa<SCEVCouldNotCompute>(ExitSCEV))\n      continue; // Cannot safely reuse this PHI; skip.\n  } else if (S->getType() != PN.getType()) {\n    continue;\n  }\nThis prevents passing a SCEVCouldNotCompute to getMinusSCEV. It preserves existing behavior for successful conversions and maintains the existing type mismatch filtering logic.\nRationale: Minimal, localized fix at first misuse site; avoids changing broader SCEV semantics.\nRisk Assessment: Negligible. We only add a guard to skip reuse if conversion fails. Downstream code already handles the nullptr return by proceeding with normal expansion.\n\n5. Conclusion:\nThe crash stems from failing to check for SCEVCouldNotCompute after attempting a pointer-to-int SCEV conversion for a non-integral pointer. Adding a guard in tryToReuseLCSSAPhi prevents invalid SCEV objects from reaching getMinusSCEV, eliminating the assertion. This fix ensures loop-idiom recognition safely falls back to normal expansion without attempting illegal reuse in non-integral pointer contexts.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\nindex 060ca92e559a..e7bdd6e3a69c 100644\n--- a/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n+++ b/llvm/lib/Transforms/Utils/ScalarEvolutionExpander.cpp\n@@ -1239,9 +1239,13 @@ Value *SCEVExpander::tryToReuseLCSSAPhi(const SCEVAddRecExpr *S) {\n     if (!isa<SCEVAddRecExpr>(ExitSCEV))\n       continue;\n     Type *PhiTy = PN.getType();\n-    if (STy->isIntegerTy() && PhiTy->isPointerTy())\n+    if (STy->isIntegerTy() && PhiTy->isPointerTy()) {\n       ExitSCEV = SE.getPtrToIntExpr(ExitSCEV, STy);\n-    else if (S->getType() != PN.getType())\n+      // getPtrToIntExpr may fail for non-integral pointer types and return\n+      // SCEVCouldNotCompute. In that case we cannot reuse this PHI.\n+      if (isa<SCEVCouldNotCompute>(ExitSCEV))\n+        continue;\n+    } else if (S->getType() != PN.getType())\n       continue;\n \n     // Check if we can re-use the existing PN, by adjusting it with an expanded\n"
+  ]
+}

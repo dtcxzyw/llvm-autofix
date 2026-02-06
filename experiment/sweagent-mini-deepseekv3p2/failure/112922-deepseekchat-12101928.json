@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "112922",
+    "model": "deepseek-chat"
+  },
+  "patch": null,
+  "error": "NoAvailablePatchFound",
+  "errmsg": "All efforts tried yet no available patches found.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/mswe.py\", line 348, in main\n    raise NoAvailablePatchFound(\"All efforts tried yet no available patches found.\")\nautofix.main.NoAvailablePatchFound: All efforts tried yet no available patches found.\n",
+  "input_tokens": 2268048,
+  "output_tokens": 19471,
+  "cached_tokens": 2231680,
+  "total_tokens": 2287519,
+  "chat_rounds": 87,
+  "total_time_sec": 819.5488061904907,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 857efbdf687c..7c85258b8961 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -7393,12 +7393,22 @@ static bool planContainsAdditionalSimplifications(VPlan &Plan,\n   };\n \n   DenseSet<Instruction *> SeenInstrs;\n+  // Check if the loop contains multiple store instructions (potential interleaving)\n+  unsigned StoreCount = 0;\n+  for (auto *BB : TheLoop->blocks())\n+    for (auto &I : *BB)\n+      if (isa<StoreInst>(&I))\n+        ++StoreCount;\n+  if (StoreCount > 1)\n+    return true;\n+  bool HasInterleaveRecipe = false;\n   auto Iter = vp_depth_first_deep(Plan.getVectorLoopRegion()->getEntry());\n   for (VPBasicBlock *VPBB : VPBlockUtils::blocksOnly<VPBasicBlock>(Iter)) {\n     for (VPRecipeBase &R : *VPBB) {\n       if (auto *IR = dyn_cast<VPInterleaveRecipe>(&R)) {\n         auto *IG = IR->getInterleaveGroup();\n         unsigned NumMembers = IG->getNumMembers();\n+        HasInterleaveRecipe = true;\n         for (unsigned I = 0; I != NumMembers; ++I) {\n           if (Instruction *M = IG->getMember(I))\n             SeenInstrs.insert(M);\n@@ -7409,6 +7419,8 @@ static bool planContainsAdditionalSimplifications(VPlan &Plan,\n         SeenInstrs.insert(UI);\n     }\n   }\n+  if (HasInterleaveRecipe)\n+    return true;\n \n   // Return true if the loop contains any instructions that are not also part of\n   // the VPlan or are skipped for VPlan-based cost computations. This indicates\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 857efbdf687c..d5e79f3b500b 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -7393,9 +7393,24 @@ static bool planContainsAdditionalSimplifications(VPlan &Plan,\n   };\n \n   DenseSet<Instruction *> SeenInstrs;\n+  // Check if the loop contains any interleaved accesses\n+  bool HasInterleavedAccess = false;\n+  for (auto *BB : TheLoop->blocks()) {\n+    for (auto &I : *BB) {\n+      if (CostCtx.CM.InterleaveInfo.isInterleaved(&I)) {\n+        HasInterleavedAccess = true;\n+        break;\n+      }\n+    }\n+    if (HasInterleavedAccess) break;\n+  }\n+  if (HasInterleavedAccess)\n+    return true;\n+  bool HasInterleaveRecipe = false;\n   auto Iter = vp_depth_first_deep(Plan.getVectorLoopRegion()->getEntry());\n   for (VPBasicBlock *VPBB : VPBlockUtils::blocksOnly<VPBasicBlock>(Iter)) {\n     for (VPRecipeBase &R : *VPBB) {\n+        HasInterleaveRecipe = true;\n       if (auto *IR = dyn_cast<VPInterleaveRecipe>(&R)) {\n         auto *IG = IR->getInterleaveGroup();\n         unsigned NumMembers = IG->getNumMembers();\n@@ -7409,6 +7424,8 @@ static bool planContainsAdditionalSimplifications(VPlan &Plan,\n         SeenInstrs.insert(UI);\n     }\n   }\n+  if (HasInterleaveRecipe)\n+    return true;\n \n   // Return true if the loop contains any instructions that are not also part of\n   // the VPlan or are skipped for VPlan-based cost computations. This indicates\n",
+    "diff --git a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\nindex 857efbdf687c..7f0a97f99e55 100644\n--- a/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n+++ b/llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n@@ -7393,9 +7393,22 @@ static bool planContainsAdditionalSimplifications(VPlan &Plan,\n   };\n \n   DenseSet<Instruction *> SeenInstrs;\n+  // Check if the loop contains stores of different types (potential mixed-type interleaving)\n+  DenseSet<Type *> StoreTypes;\n+  for (auto *BB : TheLoop->blocks()) {\n+    for (auto &I : *BB) {\n+      if (auto *SI = dyn_cast<StoreInst>(&I)) {\n+        StoreTypes.insert(SI->getValueOperand()->getType());\n+      }\n+    }\n+  }\n+  if (StoreTypes.size() > 1)\n+    return true;\n+  bool HasInterleaveRecipe = false;\n   auto Iter = vp_depth_first_deep(Plan.getVectorLoopRegion()->getEntry());\n   for (VPBasicBlock *VPBB : VPBlockUtils::blocksOnly<VPBasicBlock>(Iter)) {\n     for (VPRecipeBase &R : *VPBB) {\n+        HasInterleaveRecipe = true;\n       if (auto *IR = dyn_cast<VPInterleaveRecipe>(&R)) {\n         auto *IG = IR->getInterleaveGroup();\n         unsigned NumMembers = IG->getNumMembers();\n@@ -7409,6 +7422,8 @@ static bool planContainsAdditionalSimplifications(VPlan &Plan,\n         SeenInstrs.insert(UI);\n     }\n   }\n+  if (HasInterleaveRecipe)\n+    return true;\n \n   // Return true if the loop contains any instructions that are not also part of\n   // the VPlan or are skipped for VPlan-based cost computations. This indicates\n"
+  ]
+}

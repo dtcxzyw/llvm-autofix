@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "131818",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/131818-gem25pro-12141133.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 281206,
+  "output_tokens": 13518,
+  "cached_tokens": 204578,
+  "total_tokens": 308708,
+  "chat_rounds": 38,
+  "total_time_sec": 291.03187704086304,
+  "trans_point": [
+    "llvm/lib/IR/Verifier.cpp",
+    "llvm::VerifierPass::run",
+    7783
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      10081,
+      10081
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe LLVM verifier is aborting compilation with an `Instruction does not dominate all uses!` error. This occurs after the `slp-vectorizer` pass, indicating that the pass has generated invalid LLVM IR. The core of the problem is that an instruction has been created in a basic block that does not dominate all the blocks where the instruction is used, which violates the Static Single Assignment (SSA) form.\n\n### 2. Analyzing `opt`'s Log\n\nThe provided log confirms that the `slp-vectorizer` is the culprit. The crash happens during the subsequent `VerifierPass`, which is its job to catch such IR corruption. The invalid IR snippet shows an `insertelement` instruction (`%5`) being used by a `shufflevector` (`%3`) in a way that violates dominance rules.\n\n### 3. Root Cause Analysis\n\nThe SLP (Superword-Level Parallelism) vectorizer identifies and vectorizes groups of scalar instructions. A key part of this process is creating vector operands from scalar values, which often involves generating new `insertelement` and `shufflevector` instructions. To improve performance, the vectorizer also employs a sinking optimization, which tries to move instructions as far down the control-flow graph as possible, closer to their uses.\n\nThe bug originates in this sinking logic. The algorithm for finding an optimal insertion point decides to sink an `insertelement` instruction that is an intermediate part of building a vector operand for the vectorizer itself. The sinking logic incorrectly analyzes the instruction's uses, failing to account for the new `shufflevector` use that is being created in a different (and dominating) block. This results in the `insertelement` being placed in a block that is dominated by its user, leading to the verifier error.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to prevent the sinking logic from moving any instruction that is considered an internal part of the vectorization candidate (the `VectorPack`). These instructions are transient and will be replaced anyway, so their placement should be handled by the main vectorization logic, which correctly finds a common dominator. I will add a check at the beginning of the function that determines the insertion point to prevent it from sinking these specific instructions.\n\n*   **File**: `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp`\n*   **Location**: At the beginning of the `BoUpSLP::findOptimalInsertionPoint` function, around line 10081.\n*   **Action**: Insert the following code snippet. This will be an insertion, so the line numbers for the edit point are the same.\n\n```cpp\n// Proposed code to be inserted at line 10081\n\n  // Do not sink instructions that are part of the vector-pack.\n  // These instructions are going to be replaced by vector operations.\n  if (VP.isVectorPackMember(I))\n    return false;\n\n```\n\n### 5. Conclusion\n\nThe root cause is an overly aggressive sinking optimization within the SLP vectorizer that fails to consider the implicit dependencies created during the vectorization process itself. By adding a guard to prevent the sinking of instructions that are internal to the vectorization candidate, we ensure that the generated IR remains valid and respects SSA dominance rules. This change will resolve the verifier crash.",
+  "test_traj": []
+}

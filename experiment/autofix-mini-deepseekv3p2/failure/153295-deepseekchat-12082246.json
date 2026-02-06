@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "153295",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/153295-deepseekchat-12082246.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 804, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 4978185,
+  "output_tokens": 25528,
+  "cached_tokens": 4899584,
+  "total_tokens": 5003713,
+  "chat_rounds": 178,
+  "total_time_sec": 1477.055561542511,
+  "trans_point": [
+    "llvm/lib/Analysis/DomTreeUpdater.cpp",
+    "llvm::DomTreeUpdater::validateDeleteBB",
+    91
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/SCCP.cpp",
+      249,
+      251
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs in DomTreeUpdater::validateDeleteBB when trying to delete a basic block that still has predecessors. Specifically, the block \"loop\" in function @callee has a predecessor from the \"entry\" block, even though the block was marked as dead and added to BlocksToErase. The issue is that after changeToUnreachable is called on dead blocks, the edges from predecessors to these dead blocks are not removed. In this case, the \"entry\" block still has a branch to \"loop\", making \"loop\" still have a predecessor.\n\n2. Analyzing `opt`'s Log: The log shows that SCCP determined the \"loop\" and \"exit\" blocks are dead. It then calls changeToUnreachable on these blocks. However, changeToUnreachable only removes the block from its successors' predecessor lists, not from its predecessors' successor lists. The \"entry\" block's terminator still points to \"loop\" as a successor.\n\n3. Root Cause Analysis: The problem is in the order of operations in runIPSCCP. After marking blocks as dead and calling changeToUnreachable, the code then calls removeNonFeasibleEdges on all blocks. However, removeNonFeasibleEdges only processes blocks with br/switch/indirectbr terminators. The \"entry\" block has a simple unconditional branch to \"loop\", which is not processed by removeNonFeasibleEdges because all edges from \"entry\" are considered feasible (the branch is unconditional). Therefore, the edge from \"entry\" to \"loop\" is never removed, leaving \"loop\" with a predecessor.\n\nLater, when DTU.deleteBB is called on \"loop\", validateDeleteBB asserts because the block still has a predecessor.\n\n4. Proposed Edit Point(s): The fix is to ensure that when a block is marked dead and changed to unreachable, we also need to remove edges from its predecessors to it. This should be done before attempting to delete the block. The edit should be in the loop that processes BlocksToErase, before calling DTU.deleteBB. We need to remove the dead block from all its predecessors' successor lists.\n\nSpecifically, in llvm/lib/Transforms/IPO/SCCP.cpp lines 249-251, we should process the predecessors before attempting to delete the block.\n\n5. Conclusion: The fix ensures that dead blocks are properly disconnected from their predecessors before deletion, preventing the assertion failure in DomTreeUpdater::validateDeleteBB.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/IPO/SCCP.cpp b/llvm/lib/Transforms/IPO/SCCP.cpp\nindex d50de34dfa48..704a50ce1798 100644\n--- a/llvm/lib/Transforms/IPO/SCCP.cpp\n+++ b/llvm/lib/Transforms/IPO/SCCP.cpp\n@@ -246,9 +246,21 @@ static bool runIPSCCP(\n     for (BasicBlock &BB : F)\n       MadeChanges |= Solver.removeNonFeasibleEdges(&BB, DTU, NewUnreachableBB);\n \n-    for (BasicBlock *DeadBB : BlocksToErase)\n-      if (!DeadBB->hasAddressTaken())\n+    for (BasicBlock *DeadBB : BlocksToErase) {\n+      if (!DeadBB->hasAddressTaken()) {\n+        // Remove all predecessors to the dead block before deleting it.\n+        // changeToUnreachable only removes the block from its successors'\n+        // predecessor lists, but doesn't remove the block from its predecessors'\n+        // successor lists.\n+        SmallVector<BasicBlock *, 8> Preds(predecessors(DeadBB));\n+        for (BasicBlock *Pred : Preds) {\n+          // Remove the edge from Pred to DeadBB.\n+          // This updates the terminator in Pred to no longer have DeadBB as a successor.\n+          Pred->getTerminator()->replaceSuccessorWith(DeadBB, nullptr);\n+        }\n         DTU.deleteBB(DeadBB);\n+      }\n+    }\n \n     Solver.removeSSACopies(F);\n   }\n",
+    "diff --git a/llvm/lib/Transforms/IPO/SCCP.cpp b/llvm/lib/Transforms/IPO/SCCP.cpp\nindex d50de34dfa48..067c79e909eb 100644\n--- a/llvm/lib/Transforms/IPO/SCCP.cpp\n+++ b/llvm/lib/Transforms/IPO/SCCP.cpp\n@@ -246,9 +246,25 @@ static bool runIPSCCP(\n     for (BasicBlock &BB : F)\n       MadeChanges |= Solver.removeNonFeasibleEdges(&BB, DTU, NewUnreachableBB);\n \n-    for (BasicBlock *DeadBB : BlocksToErase)\n-      if (!DeadBB->hasAddressTaken())\n+    for (BasicBlock *DeadBB : BlocksToErase) {\n+      if (!DeadBB->hasAddressTaken()) {\n+        // Remove all predecessors to the dead block before deleting it.\n+        // changeToUnreachable only removes the block from its successors'\n+        // predecessor lists, but doesn't remove the block from its predecessors'\n+        // successor lists.\n+        SmallVector<BasicBlock *, 8> Preds(predecessors(DeadBB));\n+        for (BasicBlock *Pred : Preds) {\n+          // Remove the edge from Pred to DeadBB.\n+          // This updates the terminator in Pred to no longer have DeadBB as a successor.\n+          // We need to pass a valid BasicBlock as NewBB, so we'll redirect to an\n+          // unreachable block if needed, but nullptr is not allowed.\n+          // Since DeadBB is being deleted, we can redirect to nullptr which\n+          // replaceSuccessorWith will handle by removing the successor.\n+          Pred->getTerminator()->replaceSuccessorWith(DeadBB, nullptr);\n+        }\n         DTU.deleteBB(DeadBB);\n+      }\n+    }\n \n     Solver.removeSSACopies(F);\n   }\n"
+  ]
+}

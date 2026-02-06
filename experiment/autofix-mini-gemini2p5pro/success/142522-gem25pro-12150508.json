@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "142522",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/142522-gem25pro-12150508.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\nindex 245d0c4f073d..6fb5624857c4 100644\n--- a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n+++ b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n@@ -8224,6 +8224,7 @@ static bool passingValueIsAlwaysUndefined(Value *V, Instruction *I, bool PtrValu\n         unsigned ArgIdx = CB->getArgOperandNo(&Use);\n         // Passing null to a nonnnull+noundef argument is undefined.\n         if (isa<ConstantPointerNull>(C) &&\n+            CB->getArgOperand(ArgIdx)->getType()->isPointerTy() &&\n             CB->paramHasNonNullAttr(ArgIdx, /*AllowUndefOrPoison=*/false))\n           return !PtrValueMayBeModified;\n         // Passing undef to a noundef argument is undefined.\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 33625,
+  "output_tokens": 2883,
+  "cached_tokens": 14241,
+  "total_tokens": 39220,
+  "chat_rounds": 5,
+  "total_time_sec": 114.30461239814758,
+  "trans_point": [
+    "llvm/lib/IR/Instructions.cpp",
+    "llvm::CallBase::paramHasNonNullAttr",
+    446
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/SimplifyCFG.cpp",
+      8226,
+      8228
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe `simplifycfg` pass is crashing with an assertion failure in `llvm::CallBase::paramHasNonNullAttr`. The assertion, `getArgOperand(ArgNo)->getType()->isPointerTy() && \"Argument must be a pointer\"`, indicates that `paramHasNonNullAttr` was called for a function argument that is not of a pointer type.\n\nThe crash occurs while processing the provided LLVM IR:\n```llvm\ndefine void @test9_gep_splat(i1 %X, ptr %Y) {\nentry:\n  br i1 %X, label %if, label %else\n\nif:\n  br label %else\n\nelse:\n  %phi = phi ptr [ %Y, %entry ], [ null, %if ]\n  %gep = getelementptr i8, ptr %phi, <2 x i64> zeroinitializer\n  call void @fn_arg_vec(<2 x ptr> %gep)\n  ret void\n}\n```\nThe `call` instruction `call void @fn_arg_vec(<2 x ptr> %gep)` has an argument `%gep` of type `<2 x ptr>`, which is a vector of pointers. The `nonnull` attribute, and consequently the `paramHasNonNullAttr` check, is defined only for scalar pointer types, not for vectors of pointers.\n\n### 2. Analyzing `opt`'s Log\n\nThe backtrace shows the crash happens during speculative execution analysis within `simplifycfg`:\n1.  `simplifyCondBranch` attempts to speculatively execute the `if` block.\n2.  This leads to `speculativelyExecuteBB`, which calls `validateAndCostRequiredSelects`.\n3.  `validateAndCostRequiredSelects` analyzes the potential `select` instruction that would be created for the `%phi` node: `select i1 %X, ptr %Y, ptr null`.\n4.  It then checks if using `null` in the `else` branch would lead to undefined behavior by calling `passingValueIsAlwaysUndefined`.\n5.  `passingValueIsAlwaysUndefined` recursively checks the uses of the `%phi` node. One use is the `%gep` instruction.\n6.  It then checks the uses of `%gep`, which leads to the `call` instruction.\n7.  Inside `passingValueIsAlwaysUndefined`, it encounters the `call` and tries to check for a `nonnull` attribute on the argument. It calls `paramHasNonNullAttr` on the argument, which has the vector type `<2 x ptr>`.\n8.  `paramHasNonNullAttr` asserts that its argument must be a pointer, which fails because the type is a vector.\n\n### 3. Root Cause Analysis\n\nThe root cause is that `passingValueIsAlwaysUndefined` does not correctly handle uses that are vectors of pointers. When it encounters a `call` instruction where the argument is a vector, it incorrectly proceeds to check for a `nonnull` attribute. The `nonnull` attribute is not applicable to vector types, and the checking function `paramHasNonNullAttr` is not designed to handle them, leading to the assertion failure.\n\nThe logic in `passingValueIsAlwaysUndefined` should be updated to recognize that if a `call` argument is a vector type, the `nonnull` attribute check is not applicable.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to add a check in `passingValueIsAlwaysUndefined` to ensure that we only call `paramHasNonNullAttr` for pointer-type arguments.\n\n**File**: `llvm/lib/Transforms/Utils/SimplifyCFG.cpp`\n\n```cpp\n// llvm/lib/Transforms/Utils/SimplifyCFG.cpp:8223\n      if (CB->isArgOperand(&Use)) {\n        unsigned ArgIdx = CB->getArgOperandNo(&Use);\n        // Passing null to a nonnnull+noundef argument is undefined.\n        if (isa<ConstantPointerNull>(C) &&\n            CB->getArgOperand(ArgIdx)->getType()->isPointerTy() &&\n            CB->paramHasNonNullAttr(ArgIdx, /*AllowUndefOrPoison=*/false))\n          return !PtrValueMayBeModified;\n        // Passing undef to a noundef argument is undefined.\n        if (isa<UndefValue>(C) && CB->isPassingUndefUB(ArgIdx))\n          return true;\n      }\n```\n\nI will modify the condition to check if the argument is a pointer type before calling `paramHasNonNullAttr`.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\nindex 245d0c4f073d..6fb5624857c4 100644\n--- a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n+++ b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n@@ -8224,6 +8224,7 @@ static bool passingValueIsAlwaysUndefined(Value *V, Instruction *I, bool PtrValu\n         unsigned ArgIdx = CB->getArgOperandNo(&Use);\n         // Passing null to a nonnnull+noundef argument is undefined.\n         if (isa<ConstantPointerNull>(C) &&\n+            CB->getArgOperand(ArgIdx)->getType()->isPointerTy() &&\n             CB->paramHasNonNullAttr(ArgIdx, /*AllowUndefOrPoison=*/false))\n           return !PtrValueMayBeModified;\n         // Passing undef to a noundef argument is undefined.\n"
+  ]
+}

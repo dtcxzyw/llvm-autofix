@@ -1,0 +1,31 @@
+{
+  "command": {
+    "issue": "121432",
+    "model": "gpt-5"
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/mswe.py\", line 344, in main\n    exit_status, result = agent.run(\n                          ^^^^^^^^^^\n  File \"/llvm-autofix-deps/py3_venv/lib/python3.12/site-packages/minisweagent/agents/default.py\", line 82, in run\n    self.step()\n  File \"/llvm-autofix/autofix/mswe.py\", line 286, in step\n    return super().step()\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix-deps/py3_venv/lib/python3.12/site-packages/minisweagent/agents/default.py\", line 91, in step\n    return self.get_observation(self.query())\n                                ^^^^^^^^^^^^\n  File \"/llvm-autofix-deps/py3_venv/lib/python3.12/site-packages/minisweagent/agents/default.py\", line 97, in query\n    response = self.model.query(self.messages)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/mswe.py\", line 154, in query\n    response = super().query(messages, **kwargs)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix-deps/py3_venv/lib/python3.12/site-packages/minisweagent/models/litellm_model.py\", line 71, in query\n    response = self._query(messages, **kwargs)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/mswe.py\", line 134, in _query\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 4981019,
+  "output_tokens": 38679,
+  "cached_tokens": 4881920,
+  "total_tokens": 5019698,
+  "chat_rounds": 225,
+  "total_time_sec": 901.4156177043915,
+  "trans_point": [
+    "<not-provided>",
+    "<not-provided>"
+  ],
+  "edit_points": [
+    [
+      "<not-provided>",
+      -1,
+      -1
+    ]
+  ],
+  "reason_thou": "<not-provided>",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp b/llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp\nindex cdb2c11ef046..157699053247 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp\n@@ -2670,11 +2670,22 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {\n       return replaceInstUsesWith(*II, Fabs);\n     }\n \n-    // Propagate sign argument through nested calls:\n-    // copysign Mag, (copysign ?, X) --> copysign Mag, X\n     Value *X;\n-    if (match(Sign, m_Intrinsic<Intrinsic::copysign>(m_Value(), m_Value(X))))\n-      return replaceOperand(*II, 1, X);\n+    // Propagate sign argument through nested calls with care:\n+    // copysign Mag, (copysign ?, X) --> copysign Mag, X\n+    // This is only safe if we are not introducing a possibly-NaN operand to an\n+    // outer copysign that has the no-nans fast-math flag. The inner copysign\n+    // (copysign ?, X) produces a non-NaN result regardless of X (its magnitude\n+    // comes from its first argument). Replacing it with X directly when the\n+    // outer call has nnan but the inner does not could expose a NaN operand to\n+    // the outer intrinsic and violate the nnan assumption, leading to poison in\n+    // verification.\n+    if (auto *InnerCI = dyn_cast<IntrinsicInst>(Sign))\n+      if (InnerCI->getIntrinsicID() == Intrinsic::copysign) {\n+        Value *InnerSign = InnerCI->getArgOperand(1);\n+        if (!(II->hasNoNaNs() && !InnerCI->hasNoNaNs()))\n+          return replaceOperand(*II, 1, InnerSign);\n+      }\n \n     // Clear sign-bit of constant magnitude:\n     // copysign -MagC, X --> copysign MagC, X\n"
+  ]
+}

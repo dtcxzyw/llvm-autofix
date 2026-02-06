@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "140442",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/140442-qwen3max-11251553.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Utils/LoopPeel.cpp b/llvm/lib/Transforms/Utils/LoopPeel.cpp\nindex c5c637ab6e20..7b10fd03208d 100644\n--- a/llvm/lib/Transforms/Utils/LoopPeel.cpp\n+++ b/llvm/lib/Transforms/Utils/LoopPeel.cpp\n@@ -1213,8 +1213,12 @@ bool llvm::peelLoop(Loop *L, unsigned PeelCount, bool PeelLast, LoopInfo *LI,\n   if (PeelLast) {\n     // Now adjust users of the original exit values by replacing them with the\n     // exit value from the peeled iteration.\n-    for (const auto &[P, E] : ExitValues)\n-      P->replaceAllUsesWith(VMap.lookup(E));\n+    for (const auto &[P, E] : ExitValues) {\n+      Value *NewVal = E;\n+      if (!isa<Constant>(E))\n+        NewVal = VMap.lookup(E);\n+      P->replaceAllUsesWith(NewVal);\n+    }\n     formLCSSA(*L, DT, LI, SE);\n   } else {\n     // Now adjust the phi nodes in the loop header to get their initial values\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 119635,
+  "output_tokens": 1354,
+  "cached_tokens": 17792,
+  "total_tokens": 120989,
+  "chat_rounds": 13,
+  "total_time_sec": 135.8613555431366,
+  "trans_point": [
+    "llvm/lib/IR/Value.cpp",
+    "llvm::Value::doRAUW",
+    516
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/LoopPeel.cpp",
+      1217,
+      1217
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs during loop peeling when trying to replace uses of a PHI node with a value from the VMap lookup. The assertion failure in Value::doRAUW indicates that we're attempting to replace uses with a null value, which is invalid.\n\n2. Analyzing `opt`'s Log: The log shows that the inner loop is completely unrolled first (trip count 1), then the outer loop is peeled with iteration count 1. The crash happens during the peeling of the outer loop when PeelLast=true.\n\n3. Root Cause Analysis: From the debugger analysis, we can see that:\n   - P is a PHI node: %.lcssa.lcssa = phi i32 [ 1, %inner.latch ]\n   - E is a constant value: i32 1\n   - VMap.lookup(E) returns null (Val = 0x0)\n\nThe issue is that when E is a Constant (like i32 1), it won't be present in the VMap because VMap only contains mappings for Instructions and other non-constant Values that were cloned during loop peeling. Constants don't need to be cloned since they are immutable and can be shared. However, the code at line 1217 assumes that VMap.lookup(E) will always return a valid non-null value.\n\nThe fix is to check if E is a Constant, and if so, use E directly instead of looking it up in VMap, since constants don't need mapping.\n\n4. Proposed Edit Point(s):\n   + Line 1217 in llvm/lib/Transforms/Utils/LoopPeel.cpp should be modified to handle the case where E is a Constant by using E directly, or to use VMap.lookup(E) only when E is not a Constant.\n\n5. Conclusion: The fix ensures that when replacing uses of exit PHI nodes during last-iteration peeling, constant values are used directly instead of attempting to look them up in the value map (which would return null). This prevents the assertion failure and allows the peeling transformation to complete successfully.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/LoopPeel.cpp b/llvm/lib/Transforms/Utils/LoopPeel.cpp\nindex c5c637ab6e20..7b10fd03208d 100644\n--- a/llvm/lib/Transforms/Utils/LoopPeel.cpp\n+++ b/llvm/lib/Transforms/Utils/LoopPeel.cpp\n@@ -1213,8 +1213,12 @@ bool llvm::peelLoop(Loop *L, unsigned PeelCount, bool PeelLast, LoopInfo *LI,\n   if (PeelLast) {\n     // Now adjust users of the original exit values by replacing them with the\n     // exit value from the peeled iteration.\n-    for (const auto &[P, E] : ExitValues)\n-      P->replaceAllUsesWith(VMap.lookup(E));\n+    for (const auto &[P, E] : ExitValues) {\n+      Value *NewVal = E;\n+      if (!isa<Constant>(E))\n+        NewVal = VMap.lookup(E);\n+      P->replaceAllUsesWith(NewVal);\n+    }\n     formLCSSA(*L, DT, LI, SE);\n   } else {\n     // Now adjust the phi nodes in the loop header to get their initial values\n"
+  ]
+}

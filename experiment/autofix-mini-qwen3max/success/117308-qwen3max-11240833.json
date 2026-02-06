@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "117308",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/117308-qwen3max-11240833.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex 56bfc8432cbb..5fdb83a8c787 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -122,6 +122,13 @@ static void addLocAccess(MemoryEffects &ME, const MemoryLocation &Loc,\n     return;\n \n   const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n+  // If getUnderlyingObjectAggressive returns null (e.g., due to cyclic PHIs),\n+  // conservatively treat as unidentified object.\n+  if (!UO) {\n+    ME |= MemoryEffects::argMemOnly(MR);\n+    ME |= MemoryEffects(IRMemLocation::Other, MR);\n+    return;\n+  }\n   if (isa<AllocaInst>(UO))\n     return;\n   if (isa<Argument>(UO)) {\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 417620,
+  "output_tokens": 2830,
+  "cached_tokens": 128128,
+  "total_tokens": 420450,
+  "chat_rounds": 33,
+  "total_time_sec": 243.26083421707153,
+  "trans_point": [
+    "llvm/lib/Transforms/IPO/FunctionAttrs.cpp",
+    "addLocAccess",
+    125
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/IPO/FunctionAttrs.cpp",
+      124,
+      126
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The crash occurs in `function-attrs` pass when trying to determine memory access attributes. The assertion failure happens at line 125 in `FunctionAttrs.cpp` where `isa<AllocaInst>(UO)` is called with a null pointer `UO`. This indicates that `getUnderlyingObjectAggressive()` returned null, which should never happen as it should always return a valid Value pointer.\n\n2. **Analyzing `opt`'s Log**: The backtrace shows that the crash occurs in `addLocAccess()` function when processing a memory location from a PHI node (`%phi8`). The debugger reveals that `Loc.Ptr` points to `%phi8`, which is a PHI node with incoming values `%phi` and `%phi16`. Both of these are themselves PHI nodes that form cycles in the CFG.\n\n3. **Root Cause Analysis**: The issue lies in `getUnderlyingObjectAggressive()`. When processing cyclic PHI nodes, the algorithm can end up with an empty worklist without ever setting the `Object` variable. In such cases, the function returns `Object` which remains `nullptr` (initialized on line 6856). This null return value then causes the assertion failure in `addLocAccess()` when trying to perform `isa<AllocaInst>(UO)`.\n\nLooking at the `getUnderlyingObjectAggressive()` implementation:\n- It initializes `Object = nullptr`\n- If all values processed are PHI nodes or select instructions, and they form cycles that get deduplicated by the `Visited` set, the loop can exit without ever setting `Object`\n- In this case, it returns `nullptr`\n\nHowever, the calling code in `addLocAccess()` assumes that `getUnderlyingObjectAggressive()` always returns a valid non-null Value pointer.\n\n4. **Proposed Edit Point(s)**\n   + The fix should be in `addLocAccess()` to handle the case where `getUnderlyingObjectAggressive()` returns null. Instead of crashing, we should conservatively treat this as an unidentified object and continue processing.\n   + Specifically, we need to add a null check after calling `getUnderlyingObjectAggressive()` before using the result in `isa<>` calls.\n\n5. **Conclusion**: The fix adds a null check after `getUnderlyingObjectAggressive()` to prevent the assertion failure. When the underlying object cannot be determined (returns null), we conservatively assume it's not an alloca and continue with the normal flow, which will treat it as an unidentified object and potentially mark it as accessing argument memory or other memory locations.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex 56bfc8432cbb..7a7d44592252 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -122,9 +122,11 @@ static void addLocAccess(MemoryEffects &ME, const MemoryLocation &Loc,\n     return;\n \n   const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n-  if (isa<AllocaInst>(UO))\n+  // If getUnderlyingObjectAggressive returns null (e.g., due to cyclic PHIs),\n+  // conservatively treat as unidentified object.\n+  if (UO && isa<AllocaInst>(UO))\n     return;\n-  if (isa<Argument>(UO)) {\n+  if (UO && isa<Argument>(UO)) {\n     ME |= MemoryEffects::argMemOnly(MR);\n     return;\n   }\n",
+    "diff --git a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\nindex 56bfc8432cbb..5fdb83a8c787 100644\n--- a/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n+++ b/llvm/lib/Transforms/IPO/FunctionAttrs.cpp\n@@ -122,6 +122,13 @@ static void addLocAccess(MemoryEffects &ME, const MemoryLocation &Loc,\n     return;\n \n   const Value *UO = getUnderlyingObjectAggressive(Loc.Ptr);\n+  // If getUnderlyingObjectAggressive returns null (e.g., due to cyclic PHIs),\n+  // conservatively treat as unidentified object.\n+  if (!UO) {\n+    ME |= MemoryEffects::argMemOnly(MR);\n+    ME |= MemoryEffects(IRMemLocation::Other, MR);\n+    return;\n+  }\n   if (isa<AllocaInst>(UO))\n     return;\n   if (isa<Argument>(UO)) {\n"
+  ]
+}

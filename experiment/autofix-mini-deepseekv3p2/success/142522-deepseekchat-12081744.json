@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "142522",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/142522-deepseekchat-12081744.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\nindex 245d0c4f073d..83011647a98f 100644\n--- a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n+++ b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n@@ -8223,12 +8223,18 @@ static bool passingValueIsAlwaysUndefined(Value *V, Instruction *I, bool PtrValu\n       if (CB->isArgOperand(&Use)) {\n         unsigned ArgIdx = CB->getArgOperandNo(&Use);\n         // Passing null to a nonnnull+noundef argument is undefined.\n-        if (isa<ConstantPointerNull>(C) &&\n-            CB->paramHasNonNullAttr(ArgIdx, /*AllowUndefOrPoison=*/false))\n-          return !PtrValueMayBeModified;\n+        if (isa<ConstantPointerNull>(C)) {\n+          Type *ArgTy = CB->getArgOperand(ArgIdx)->getType();\n+          if (ArgTy->isPointerTy() &&\n+              CB->paramHasNonNullAttr(ArgIdx, /*AllowUndefOrPoison=*/false))\n+            return !PtrValueMayBeModified;\n+        }\n         // Passing undef to a noundef argument is undefined.\n-        if (isa<UndefValue>(C) && CB->isPassingUndefUB(ArgIdx))\n-          return true;\n+        if (isa<UndefValue>(C)) {\n+          Type *ArgTy = CB->getArgOperand(ArgIdx)->getType();\n+          if (ArgTy->isPointerTy() && CB->isPassingUndefUB(ArgIdx))\n+            return true;\n+        }\n       }\n     }\n     // Div/Rem by zero is immediate UB\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 811539,
+  "output_tokens": 7673,
+  "cached_tokens": 778176,
+  "total_tokens": 819212,
+  "chat_rounds": 76,
+  "total_time_sec": 437.4552526473999,
+  "trans_point": [
+    "llvm/lib/IR/Instructions.cpp",
+    "llvm::CallBase::paramHasNonNullAttr",
+    446
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Utils/SimplifyCFG.cpp",
+      8226,
+      8228
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs in `CallBase::paramHasNonNullAttr` when checking if a vector of pointers (specifically `<2 x ptr>`) has non-null attributes. The assertion `getArgOperand(ArgNo)->getType()->isPointerTy()` fails because the argument type is a vector of pointers, not a single pointer. The function `passingValueIsAlwaysUndefined` is trying to determine if passing a null pointer (scalar) to a vector argument would cause undefined behavior, but it incorrectly assumes the argument is a scalar pointer.\n\n2. Analyzing `opt`'s Log: The backtrace shows the crash originates from `passingValueIsAlwaysUndefined` when processing a GEP that produces a vector of pointers (`<2 x ptr> %gep`). The function follows the use chain from a PHI node (which yields a scalar null pointer) to a GEP (which yields a vector of pointers) and then to a call instruction. At line 8226-8227, it checks if the constant is a `ConstantPointerNull` and if the call argument has non-null attribute. However, `paramHasNonNullAttr` is only defined for scalar pointer arguments, not for vectors of pointers.\n\n3. Root Cause Analysis: The issue is that `passingValueIsAlwaysUndefined` does not handle vector-of-pointer types. When the argument is a vector of pointers, the attribute check should consider the element type. However, `paramHasNonNullAttr` asserts that the argument type is a pointer type, which fails for vector types. The fix is to skip the non-null check for vector-of-pointer arguments because the non-null attribute does not apply to vectors (or we need to check the element type). Since the attribute system currently does not support non-null on vector pointers, we should avoid calling `paramHasNonNullAttr` when the argument type is not a scalar pointer.\n\n4. Proposed Edit Point(s): Modify the condition at lines 8226-8227 to only call `paramHasNonNullAttr` when the argument type is a pointer type (scalar). If it's a vector, we should check if the element type is a pointer and if the attribute applies? But the attribute is not defined for vectors. Safer to skip the check for vectors. The edit should be in `SimplifyCFG.cpp` around line 8226-8227. We'll add a check that the argument type is a pointer type before calling `paramHasNonNullAttr`. Additionally, we should also check for `isPassingUndefUB` similarly? That function may also have similar assumptions. However, the crash is at `paramHasNonNullAttr`. We'll guard both attribute checks.\n\n5. Conclusion: The fix ensures that `passingValueIsAlwaysUndefined` does not attempt to query pointer-specific attributes on non-pointer types (like vector of pointers). This prevents the assertion failure and allows the pass to continue safely. The behavior for scalar pointers remains unchanged.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\nindex 245d0c4f073d..83011647a98f 100644\n--- a/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n+++ b/llvm/lib/Transforms/Utils/SimplifyCFG.cpp\n@@ -8223,12 +8223,18 @@ static bool passingValueIsAlwaysUndefined(Value *V, Instruction *I, bool PtrValu\n       if (CB->isArgOperand(&Use)) {\n         unsigned ArgIdx = CB->getArgOperandNo(&Use);\n         // Passing null to a nonnnull+noundef argument is undefined.\n-        if (isa<ConstantPointerNull>(C) &&\n-            CB->paramHasNonNullAttr(ArgIdx, /*AllowUndefOrPoison=*/false))\n-          return !PtrValueMayBeModified;\n+        if (isa<ConstantPointerNull>(C)) {\n+          Type *ArgTy = CB->getArgOperand(ArgIdx)->getType();\n+          if (ArgTy->isPointerTy() &&\n+              CB->paramHasNonNullAttr(ArgIdx, /*AllowUndefOrPoison=*/false))\n+            return !PtrValueMayBeModified;\n+        }\n         // Passing undef to a noundef argument is undefined.\n-        if (isa<UndefValue>(C) && CB->isPassingUndefUB(ArgIdx))\n-          return true;\n+        if (isa<UndefValue>(C)) {\n+          Type *ArgTy = CB->getArgOperand(ArgIdx)->getType();\n+          if (ArgTy->isPointerTy() && CB->isPassingUndefUB(ArgIdx))\n+            return true;\n+        }\n       }\n     }\n     // Div/Rem by zero is immediate UB\n"
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "116691",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/116691-gpt5-12060632.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 918d7663548f..b62151489fac 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -6903,14 +6903,15 @@ void BoUpSLP::tryToVectorizeGatheredLoads(\n       }\n       // Mark masked gathers candidates as vectorized, if any.\n       for (unsigned Cnt : MaskedGatherVectorized) {\n-        ArrayRef<LoadInst *> Slice = ArrayRef(Loads).slice(Cnt, NumElts);\n+        size_t Len = std::min<unsigned>(NumElts, Loads.size() - Cnt);\n+        ArrayRef<LoadInst *> Slice = ArrayRef(Loads).slice(Cnt, Len);\n         ArrayRef<Value *> Values(\n             reinterpret_cast<Value *const *>(Slice.begin()), Slice.size());\n         Results.emplace_back(Values, LoadsState::ScatterVectorize);\n         VectorizedLoads.insert(Slice.begin(), Slice.end());\n         // If we vectorized initial block, no need to try to vectorize it again.\n         if (Cnt == StartIdx)\n-          StartIdx += NumElts;\n+          StartIdx += Slice.size();\n       }\n     }\n     for (LoadInst *LI : Loads) {\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 132158,
+  "output_tokens": 1969,
+  "cached_tokens": 90624,
+  "total_tokens": 134127,
+  "chat_rounds": 7,
+  "total_time_sec": 85.50906896591187,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "operator()",
+    6906
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      6905,
+      6914
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe opt crash is an assertion failure in ArrayRef::slice asserting N+M <= size(), triggered inside SLP vectorizer's tryToVectorizeGatheredLoads when processing masked gathered loads. This indicates an out-of-bounds slice request on an ArrayRef<LoadInst*>.\n\n2. Analyzing opt's Log:\nThe debug log shows the crash occurring after 'Trying to vectorize gathered loads' and while handling masked gathers. The backtrace points to lambdas inside BoUpSLP::tryToVectorizeGatheredLoads, specifically around line 6906 where the code marks masked gather candidates as vectorized. Earlier, slices of loads are created with a safe length using std::min(NumElts, E - Cnt). Later, when marking masked gathers, the code slices using a fixed NumElts without min, which can exceed the remaining element count near the array end.\n\n3. Root Cause Analysis:\nIn GetVectorizedRanges, the loop over Cnt creates 'Slice' as ArrayRef(Loads).slice(Cnt, std::min(NumElts, E - Cnt)). When LS==ScatterVectorize, it records Cnt in MaskedGatherVectorized. After the inner loop, it iterates MaskedGatherVectorized and constructs Slice using ArrayRef(Loads).slice(Cnt, NumElts). This second slice uses NumElts directly, which can be larger than Loads.size()-Cnt if the recorded slice near the end had fewer than NumElts elements. This violates the ArrayRef::slice bound check, causing the assertion.\nAdditionally, when updating StartIdx after marking as vectorized, it uses StartIdx += NumElts, which is also incorrect for the final partial slice and can desynchronize index tracking.\n\n4. Proposed Edit Point(s)\n- File: llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp, lines 6905-6914.\nReplace the construction of Slice and the StartIdx update to use the actual vectorized slice length rather than assuming NumElts.\n\nSuggested change:\n- Before: \n  ArrayRef<LoadInst *> Slice = ArrayRef(Loads).slice(Cnt, NumElts);\n  ArrayRef<Value *> Values(\n      reinterpret_cast<Value *const *>(Slice.begin()), Slice.size());\n  Results.emplace_back(Values, LoadsState::ScatterVectorize);\n  VectorizedLoads.insert(Slice.begin(), Slice.end());\n  if (Cnt == StartIdx)\n    StartIdx += NumElts;\n\n- After:\n  size_t Len = std::min<unsigned>(NumElts, Loads.size() - Cnt);\n  ArrayRef<LoadInst *> Slice = ArrayRef(Loads).slice(Cnt, Len);\n  ArrayRef<Value *> Values(\n      reinterpret_cast<Value *const *>(Slice.begin()), Slice.size());\n  Results.emplace_back(Values, LoadsState::ScatterVectorize);\n  VectorizedLoads.insert(Slice.begin(), Slice.end());\n  if (Cnt == StartIdx)\n    StartIdx += Slice.size();\n\nThis ensures the slice is always within bounds and the StartIdx is correctly advanced by the actual number of elements vectorized.\n\n5. Conclusion:\nThe crash is due to an out-of-bounds ArrayRef slice when marking masked gather candidates as vectorized, caused by using a fixed NumElts rather than the actual remaining length. By bounding the slice length with std::min(NumElts, Loads.size() - Cnt) and updating StartIdx by Slice.size(), we prevent the assertion failure and maintain correct indexing and bookkeeping for masked gather vectorization.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 918d7663548f..b62151489fac 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -6903,14 +6903,15 @@ void BoUpSLP::tryToVectorizeGatheredLoads(\n       }\n       // Mark masked gathers candidates as vectorized, if any.\n       for (unsigned Cnt : MaskedGatherVectorized) {\n-        ArrayRef<LoadInst *> Slice = ArrayRef(Loads).slice(Cnt, NumElts);\n+        size_t Len = std::min<unsigned>(NumElts, Loads.size() - Cnt);\n+        ArrayRef<LoadInst *> Slice = ArrayRef(Loads).slice(Cnt, Len);\n         ArrayRef<Value *> Values(\n             reinterpret_cast<Value *const *>(Slice.begin()), Slice.size());\n         Results.emplace_back(Values, LoadsState::ScatterVectorize);\n         VectorizedLoads.insert(Slice.begin(), Slice.end());\n         // If we vectorized initial block, no need to try to vectorize it again.\n         if (Cnt == StartIdx)\n-          StartIdx += NumElts;\n+          StartIdx += Slice.size();\n       }\n     }\n     for (LoadInst *LI : Loads) {\n"
+  ]
+}

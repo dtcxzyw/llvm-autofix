@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "111042",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/111042-gpt5-11251605.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\nindex 0d092b9c10ac..ccab47a87f7f 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n@@ -2157,6 +2157,14 @@ void VPBranchOnMaskRecipe::execute(VPTransformState &State) {\n \n void VPPredInstPHIRecipe::execute(VPTransformState &State) {\n   assert(State.Lane && \"Predicated instruction PHI works per instance.\");\n+\n+  // If only the first lane is used by all users of this definition, avoid\n+  // generating per-lane scalars for lanes > 0. This ensures we keep exactly\n+  // one scalar per part recorded for this VPValue, which is required when\n+  // querying with NeedsScalar=true.\n+  if (vputils::onlyFirstLaneUsed(this) && !State.Lane->isFirstLane())\n+    return;\n+\n   Instruction *ScalarPredInst =\n       cast<Instruction>(State.get(getOperand(0), *State.Lane));\n   BasicBlock *PredicatedBB = ScalarPredInst->getParent();\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 1916083,
+  "output_tokens": 82145,
+  "cached_tokens": 1820928,
+  "total_tokens": 1998228,
+  "chat_rounds": 55,
+  "total_time_sec": 2155.474133014679,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/VPlan.cpp",
+    "llvm::VPTransformState::get",
+    258
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp",
+      2158,
+      2201
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe loop-vectorizer crashes with an assertion in VPTransformState::get(VPValue*, bool) that fires when a client requests a single scalar per part (NeedsScalar=true) for a VPValue that already has multiple per-lane scalar values cached. The specific assertion verifies that when onlyFirstLaneUsed(Def) is true, there must be exactly one scalar recorded (the first lane) for that Def. The reproducer constructs a predicated instruction feeding a phi/select (VPBlend) whose users only consume the first lane, but the VPlan execution generates scalars for all lanes for the VPPredInstPHIRecipe, violating the assertion.\n\n2. Analyzing opt's Log:\n- The debug-only=vplan trace shows a replicated, predicated udiv, with VPPredInstPHIRecipes merging values inside predicated regions: pred.udiv.if/pred.udiv.continue blocks. Later, during VPBlendRecipe::execute, it queries inputs using State.get(..., OnlyFirstLaneUsed) where OnlyFirstLaneUsed = vputils::onlyFirstLaneUsed(this) on the VPBlend.\n- The crash happens in VPTransformState::get when NeedsScalar=true for a Def that is a VPPredInstPHIRecipe (from debugger: Def->getDefiningRecipe()->getVPDefID() = 26, which maps to VPPredInstPHIRecipe).\n- The assertion condition includes !vputils::onlyFirstLaneUsed(Def) || (hasScalarValue(Def, lane0) && Data.VPV2Scalars[Def].size() == 1). We violated this because onlyFirstLaneUsed(Def)==true but multiple lanes were populated for Def.\n\n3. Root Cause Analysis:\n- VPPredInstPHIRecipe::execute is executed in a replicator region with State.Lane set for each lane. It unconditionally creates and caches a scalar phi for the current lane (State.set(this, Phi, *State.Lane)) when its operand has no vector value. This happens for all lanes 0..VF-1. Later, a user (VPBlend) determines only first lane is needed (vputils::onlyFirstLaneUsed(this) == true) and calls State.get(..., NeedsScalar=true). This requires that the producer\u2019s value be available as a single scalar (first lane only). However, because VPPredInstPHIRecipe already produced scalars for multiple lanes, the assertion fires.\n- Other recipes that can produce per-lane values already honor onlyFirstLaneUsed and limit generation to the first lane (see VPScalarIVStepsRecipe::execute and VPInstruction::generate paths). VPPredInstPHIRecipe::execute was missing this guard.\n\n4. Proposed Edit Point(s)\n- File: llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp, function VPPredInstPHIRecipe::execute.\n- Add a guard to honor vputils::onlyFirstLaneUsed(this) and skip generating per-lane phis for lanes > 0. This ensures that if all users only use the first lane, the recipe records exactly one scalar (lane 0), satisfying the assertion in VPTransformState::get.\n\nSuggested patch (conceptual):\n\nvoid VPPredInstPHIRecipe::execute(VPTransformState &State) {\n  assert(State.Lane && \"Predicated instruction PHI works per instance.\");\n  // If only the first lane is used by all users, avoid generating per-lane\n  // scalars for lanes > 0. This keeps a single scalar per part, as required\n  // by VPTransformState::get when NeedsScalar=true.\n  if (vputils::onlyFirstLaneUsed(this) && !State.Lane->isFirstLane())\n    return;\n  ... existing code ...\n}\n\n- This change mirrors the approach used in other recipes to restrict codegen based on onlyFirstLaneUsed.\n\n5. Conclusion:\nThe crash is caused by VPPredInstPHIRecipe unconditionally generating per-lane scalars even when downstream users demand only the first lane. Adding a guard to skip lane>0 generation when onlyFirstLaneUsed(this) is true keeps the producer consistent with consumers\u2019 expectations and satisfies VPTransformState::get()\u2019s assertion, fixing the abort in the provided reproducer.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\nindex 0d092b9c10ac..ccab47a87f7f 100644\n--- a/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VPlanRecipes.cpp\n@@ -2157,6 +2157,14 @@ void VPBranchOnMaskRecipe::execute(VPTransformState &State) {\n \n void VPPredInstPHIRecipe::execute(VPTransformState &State) {\n   assert(State.Lane && \"Predicated instruction PHI works per instance.\");\n+\n+  // If only the first lane is used by all users of this definition, avoid\n+  // generating per-lane scalars for lanes > 0. This ensures we keep exactly\n+  // one scalar per part recorded for this VPValue, which is required when\n+  // querying with NeedsScalar=true.\n+  if (vputils::onlyFirstLaneUsed(this) && !State.Lane->isFirstLane())\n+    return;\n+\n   Instruction *ScalarPredInst =\n       cast<Instruction>(State.get(getOperand(0), *State.Lane));\n   BasicBlock *PredicatedBB = ScalarPredInst->getParent();\n"
+  ]
+}

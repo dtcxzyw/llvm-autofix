@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "118030",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/118030-gem25pro-12130914.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 949083,
+  "output_tokens": 11360,
+  "cached_tokens": 788445,
+  "total_tokens": 972321,
+  "chat_rounds": 47,
+  "total_time_sec": 263.90225172042847,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "operator()",
+    17802
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      17788,
+      17792
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe LLVM SLP Vectorizer is crashing with an assertion failure `isa<To>(Val)` inside `llvm::cast`. This means the code is attempting to cast an `llvm::Value*` to an `llvm::Instruction*`, but the value is of an incompatible type (e.g., a function argument, a constant).\n\n### 2. Analyzing `opt`'s Log\n\nThe `opt` log shows the vectorizer is processing a set of `phi` nodes in the `if.end7` basic block. One of these is:\n`%a.4 = phi i32 [ 0, %t ], [ %conv57, %t.u_crit_edge ], [ %bf.cast2910, %while.body ]`\nOne of the incoming values for this `phi` node is `%conv57`, which is an `i32` argument to the function `@test`. Function arguments are `llvm::Argument`s, which are a subclass of `llvm::Value` but not `llvm::Instruction`.\n\nThe crash occurs within `collectValuesToDemote`, a function responsible for analyzing the costs and properties of values in the vectorization tree. This function iterates over the operands of the instructions it's trying to vectorize.\n\n### 3. Root Cause Analysis\n\nThe backtrace points to a lambda function inside `collectValuesToDemote` at `SLPVectorizer.cpp:17802`. However, due to inlining and compiler optimizations, the line number in the backtrace can be misleading. Looking at the surrounding code, there is a lambda named `IsInstruction` that is used to validate operands:\n\n```cpp\n// llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp around line 17785\nauto IsInstruction = [&](Value *V) {\n  if (!V)\n    return true;\n  auto *I = cast<Instruction>(V); // Unsafe cast!\n  return isValidElementType(I->getType());\n};\n```\n\nThis lambda is called via `std::all_of` on the operands of the `phi` nodes. When it encounters the function argument `%conv57`, the `cast<Instruction>(V)` fails because `V` is an `Argument`, not an `Instruction`, leading to the assertion failure.\n\nThe fix is to guard the cast with an `isa<Instruction>` check. If the value is not an instruction, the lambda should return `false` to indicate that this operand kind is not suitable for this particular analysis path.\n\n### 4. Proposed Edit Point(s)\n\nThe edit is to modify the `IsInstruction` lambda in `collectValuesToDemote` to make it safe.\n\n**File**: `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp`\n**Original Lines (approx. 17788-17789)**:\n```cpp\n      auto *I = cast<Instruction>(V);\n      return isValidElementType(I->getType());\n```\n\n**Proposed Change**:\n```cpp\n      if (!isa<Instruction>(V))\n        return false;\n      auto *I = cast<Instruction>(V);\n      return isValidElementType(I->getType());\n```\n\nThis change ensures that we only attempt to cast `Value`s that are confirmed to be `Instruction`s.\n\n### 5. Conclusion\n\nThe crash is a classic bug of assuming a `Value`'s subtype without verification. By adding the `isa<Instruction>` check, we make the analysis in `collectValuesToDemote` more robust, allowing it to correctly handle `phi` nodes with non-instruction operands like function arguments. This resolves the crash and enables the SLP vectorizer to proceed.",
+  "test_traj": []
+}

@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "140994",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/140994-deepseekchat-12081429.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 804, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 4181866,
+  "output_tokens": 19091,
+  "cached_tokens": 4067776,
+  "total_tokens": 4200957,
+  "chat_rounds": 112,
+  "total_time_sec": 1895.331124305725,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+    "llvm::InstCombinerImpl::visitSelectInst",
+    3883
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+      3885,
+      3886
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The bug is that a select instruction without fast math flags is being transformed to have fast math flags (nnan ninf nsz) incorrectly. This happens when canonicalizing `(X ugt Y) ? X : Y -> (X ole Y) ? Y : X`. The transformation propagates fast math flags from the FCmp to the new select, but the original select doesn't have those flags. This causes a semantic change when `nsz` (no signed zeros) is present: with `nsz`, `minnum(-0.0, +0.0)` can return either -0.0 or +0.0, but without `nsz`, it must return -0.0. The reproducer shows that with `x = +0.0`, the original code returns +0.0 (since `select (fcmp ult +0.0, 255.0), +0.0, 255.0` chooses +0.0), but after transformation to `minnum` with `nsz`, it returns -0.0.\n\n2. Analyzing `opt`'s Log: The log shows the transformation sequence:\n   - Original: `select i1 %inner_cmp, half %x, half 0xH5BF8` (no FMF)\n   - First transformation: `select nnan ninf nsz i1 %inner_cmp.inv, half 0xH5BF8, half %x` (adds FMF from FCmp)\n   - Second transformation: `call nnan ninf nsz half @llvm.minnum.f16(half %x, half 0xH5BF8)` (propagates FMF to minnum)\n   The first transformation incorrectly adds FMF.\n\n3. Root Cause Analysis: In `visitSelectInst` at lines 3880-3887, when canonicalizing unordered comparisons by swapping select operands, the code uses `Builder.CreateSelectFMF(NewCond, FalseVal, TrueVal, FCmp)`. The `FCmp` argument is used as the FMF source, but FMF should propagate from the select, not the fcmp (as noted by the FIXME comment). Since the original select has no FMF, the new select should also have no FMF.\n\n4. Proposed Edit Point(s): Change line 3886 to pass `&SI` (the original select) instead of `FCmp` as the FMF source:\n```cpp\nValue *NewSel = Builder.CreateSelectFMF(NewCond, FalseVal, TrueVal, &SI);\n```\nThis ensures the new select inherits FMF from the original select, not from the FCmp.\n\n5. Conclusion: The fix corrects the propagation of fast math flags in the select canonicalization transformation. After the fix, the select will not incorrectly gain `nsz` flag, preventing the wrong sign of zero in minnum conversion.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex a791fc5db669..1781b56c3ccc 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -3883,7 +3883,7 @@ Instruction *InstCombinerImpl::visitSelectInst(SelectInst &SI) {\n         Value *NewCond = Builder.CreateFCmpFMF(InvPred, Cmp0, Cmp1, FCmp,\n                                                FCmp->getName() + \".inv\");\n         Value *NewSel =\n-            Builder.CreateSelectFMF(NewCond, FalseVal, TrueVal, FCmp);\n+            Builder.CreateSelectFMF(NewCond, FalseVal, TrueVal, &SI);\n         return replaceInstUsesWith(SI, NewSel);\n       }\n     }\n",
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\nindex a791fc5db669..9764789cf01c 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp\n@@ -3880,10 +3880,10 @@ Instruction *InstCombinerImpl::visitSelectInst(SelectInst &SI) {\n       if (FCmp->hasOneUse() && FCmpInst::isUnordered(Pred)) {\n         FCmpInst::Predicate InvPred = FCmp->getInversePredicate();\n         // FIXME: The FMF should propagate from the select, not the fcmp.\n-        Value *NewCond = Builder.CreateFCmpFMF(InvPred, Cmp0, Cmp1, FCmp,\n+        Value *NewCond = Builder.CreateFCmpFMF(InvPred, Cmp0, Cmp1, &SI,\n                                                FCmp->getName() + \".inv\");\n         Value *NewSel =\n-            Builder.CreateSelectFMF(NewCond, FalseVal, TrueVal, FCmp);\n+            Builder.CreateSelectFMF(NewCond, FalseVal, TrueVal, &SI);\n         return replaceInstUsesWith(SI, NewSel);\n       }\n     }\n"
+  ]
+}

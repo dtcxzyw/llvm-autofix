@@ -1,0 +1,38 @@
+{
+  "command": {
+    "issue": "137797",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/137797-gem25pro-12141945.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 361847,
+  "output_tokens": 11368,
+  "cached_tokens": 259765,
+  "total_tokens": 386481,
+  "chat_rounds": 32,
+  "total_time_sec": 244.61366295814514,
+  "trans_point": [
+    "llvm/lib/IR/Verifier.cpp",
+    "llvm::VerifierPass::run",
+    7814
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      5180,
+      5180
+    ],
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      5193,
+      5193
+    ]
+  ],
+  "reason_thou": "The user has encountered a crash in the `slp-vectorizer` pass, which manifests as a dominance error in the Verifier pass that runs after it. This indicates that the `slp-vectorizer` is generating malformed LLVM IR.\n\n### 1. Understanding the Issue ###\n\nThe error message `Instruction does not dominate all uses!` points to a fundamental rule violation in LLVM's Static Single Assignment (SSA) form. An instruction's definition must be reachable on all paths from the entry of the function to any of its uses. The verifier has found an instruction (`%4 = insertelement ...`) that is used by another instruction (`%2 = shufflevector ...`) where this dominance property does not hold.\n\n### 2. Analyzing `opt`'s Log ###\n\nThe `opt` log shows the crash occurs after the `slp-vectorizer` pass has run. The Scalar Evolution analysis output doesn't immediately reveal the problem but provides context about the loop structure. The key takeaway is that the `slp-vectorizer` is the pass that introduces the invalid IR.\n\n### 3. Root Cause Analysis ###\n\nBy inspecting the state of the program at the crash point using the debugger, we can analyze the generated (but not yet committed) IR. The `slp-vectorizer` attempts to vectorize a group of instructions, including the PHI nodes `%phi6` and `%phi7` in basic block `bb5`.\n\nThe vectorizer creates a new vector PHI node in `bb5` to represent the vectorized result of `%phi6` and `%phi7`. This new PHI node has two incoming vector values. One of these incoming vectors is constructed using `insertelement` and `shufflevector` instructions.\n\nThe problem arises because the `slp-vectorizer` incorrectly places these builder instructions. It uses the insertion point of the original scalar instructions being vectorized as the location for the new vector instructions. In this case, the scalar instructions `%or4` and `%or` are located inside the loop block `bb1`. However, the vectorized PHI node and its uses are in `bb5`. Since `bb1` does not dominate `bb5` (in fact, `bb5` dominates `bb1`'s successor edge), the newly created instructions in `bb1` are not visible to their uses in `bb5`, leading to the dominance error.\n\nThe core of the issue lies in the `BoUpSLP::vectorizeTree()` function. When creating the incoming vector for a PHI node, it should place the builder instructions (like `insertelement` and `shufflevector`) in the correct predecessor block corresponding to the PHI's incoming edge, not at the location of the original scalar operand.\n\n### 4. Proposed Edit Point(s) ###\n\nThe fix is to adjust the insertion point within `BoUpSLP::vectorizeTree()` before building the incoming vector for a PHI node. The insertion point should be set to the end of the corresponding predecessor basic block.\n\n**File**: `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp`\n\n```cpp\n// llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp:5180\n    // The insertion point of the new PHI is going to be the beginning of the\n    // phi-block. We have to make sure that the chained vectors are computed\n    // before the new PHI.\n    Builder.SetInsertPoint(PH->getParent()->getFirstNonPHI());\n```\n\n**Edit Point 1**: `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp` from line 5180 to 5180.\n\n```cpp\n// llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp:5180\n    // The insertion point of the new PHI is going to be the beginning of the\n    // phi-block. We have to make sure that the chained vectors are computed\n    // before the new PHI.\n    BasicBlock *PHParent = PH->getParent();\n    Builder.SetInsertPoint(PHParent->getFirstNonPHI());\n```\n\n**File**: `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp`\n\n```cpp\n// llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp:5193\n      Value *V = vectorizeOperand(PH, I);\n      NewPHI->addIncoming(V, PH->getIncomingBlock(I));\n    }\n```\n\n**Edit Point 2**: `llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp` from line 5193 to 5193.\n\n```cpp\n// llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp:5193\n      BasicBlock *IncomingBB = PH->getIncomingBlock(I);\n      Builder.SetInsertPoint(IncomingBB->getTerminator());\n      Value *V = vectorizeOperand(PH, I);\n      NewPHI->addIncoming(V, IncomingBB);\n      Builder.SetInsertPoint(PHParent->getFirstNonPHI());\n    }\n```\n\n### 5. Conclusion ###\n\nThe proposed change corrects the logic for placing instructions that construct incoming values for vectorized PHI nodes. By setting the insertion point to the terminator of the predecessor block, we ensure that the definitions of these values dominate their use in the PHI node, resolving the verifier error. This fix makes the `slp-vectorizer` more robust when dealing with vectorization across basic blocks, particularly in the presence of loops and complex control flow.",
+  "test_traj": []
+}

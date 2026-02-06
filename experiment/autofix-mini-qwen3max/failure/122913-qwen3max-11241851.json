@@ -1,0 +1,40 @@
+{
+  "command": {
+    "issue": "122913",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/122913-qwen3max-11241851.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 808, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 627, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 467, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 323, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 4993246,
+  "output_tokens": 11456,
+  "cached_tokens": 2447104,
+  "total_tokens": 5004702,
+  "chat_rounds": 77,
+  "total_time_sec": 1734.7947525978088,
+  "trans_point": [
+    "llvm/lib/Analysis/ScalarEvolution.cpp",
+    "llvm::ScalarEvolution::getRangeRef",
+    6653
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Analysis/ScalarEvolution.cpp",
+      15340,
+      15342
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs due to infinite recursion in the LoopGuards::collectFromPHI function when processing a PHI node with cyclic dependencies. The PHI node %2 depends on %3, and %3 (add i32 %2, 1) depends back on %2, creating a cycle that causes endless recursive calls between getSCEV, createSCEV, and loop guard collection functions.\n\n2. Analyzing `opt`'s Log: The log shows that ScalarEvolution is attempting to classify the PHI expression `{0,+,1}<nuw><nsw><%bb1>`, which indicates it recognizes this as an add recurrence. However, the loop guard collection mechanism is being invoked during SCEV computation, leading to the infinite recursion observed in the stack trace.\n\n3. Root Cause Analysis: The LoopGuards::collectFromPHI function lacks protection against infinite recursion when processing PHI nodes that have cyclic dependencies. While it uses VisitedBlocks to prevent revisiting the same basic block, it doesn't prevent the SCEV computation from creating value-level cycles. When SE.getSCEV(Phi.getIncomingValue(IncomingIdx)) is called on line 15356 for an incoming value that depends on the PHI itself, it triggers another round of SCEV computation that eventually calls collectFromPHI again, creating infinite recursion.\n\n4. Proposed Edit Point(s): Add a recursion depth limit check at the beginning of collectFromPHI to prevent excessive recursion. The function already has a Depth parameter that is incremented when making recursive calls, but it's not being used to limit recursion. Adding a reasonable depth limit (e.g., 32) will prevent infinite recursion while still allowing legitimate deep analyses.\n\n5. Conclusion: This fix prevents the infinite recursion crash by limiting the depth of recursive calls in the loop guard collection logic. It maintains the correctness of the analysis for normal cases while protecting against pathological inputs with cyclic PHI dependencies.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Analysis/ScalarEvolution.cpp b/llvm/lib/Analysis/ScalarEvolution.cpp\nindex 7673c3548175..8efc2f116d5c 100644\n--- a/llvm/lib/Analysis/ScalarEvolution.cpp\n+++ b/llvm/lib/Analysis/ScalarEvolution.cpp\n@@ -15338,6 +15338,10 @@ void ScalarEvolution::LoopGuards::collectFromPHI(\n     const PHINode &Phi, SmallPtrSetImpl<const BasicBlock *> &VisitedBlocks,\n     SmallDenseMap<const BasicBlock *, LoopGuards> &IncomingGuards,\n     unsigned Depth) {\n+  // Prevent infinite recursion by limiting the depth of recursive calls.\n+  // This can happen with cyclic PHI dependencies.\n+  if (Depth > 32)\n+    return;\n   if (!SE.isSCEVable(Phi.getType()))\n     return;\n \n",
+    "diff --git a/llvm/lib/Analysis/ScalarEvolution.cpp b/llvm/lib/Analysis/ScalarEvolution.cpp\nindex 7673c3548175..ca25bcda20b0 100644\n--- a/llvm/lib/Analysis/ScalarEvolution.cpp\n+++ b/llvm/lib/Analysis/ScalarEvolution.cpp\n@@ -15338,6 +15338,10 @@ void ScalarEvolution::LoopGuards::collectFromPHI(\n     const PHINode &Phi, SmallPtrSetImpl<const BasicBlock *> &VisitedBlocks,\n     SmallDenseMap<const BasicBlock *, LoopGuards> &IncomingGuards,\n     unsigned Depth) {\n+  // Prevent infinite recursion by limiting the depth of recursive calls.\n+  // This can happen with cyclic PHI dependencies.\n+  if (Depth > 16)\n+    return;\n   if (!SE.isSCEVable(Phi.getType()))\n     return;\n \n",
+    "diff --git a/llvm/lib/Analysis/ScalarEvolution.cpp b/llvm/lib/Analysis/ScalarEvolution.cpp\nindex 7673c3548175..0b8c75819eaf 100644\n--- a/llvm/lib/Analysis/ScalarEvolution.cpp\n+++ b/llvm/lib/Analysis/ScalarEvolution.cpp\n@@ -15338,6 +15338,10 @@ void ScalarEvolution::LoopGuards::collectFromPHI(\n     const PHINode &Phi, SmallPtrSetImpl<const BasicBlock *> &VisitedBlocks,\n     SmallDenseMap<const BasicBlock *, LoopGuards> &IncomingGuards,\n     unsigned Depth) {\n+  // Prevent infinite recursion by limiting the depth of recursive calls.\n+  // This can happen with cyclic PHI dependencies.\n+  if (Depth >= 8)\n+    return;\n   if (!SE.isSCEVable(Phi.getType()))\n     return;\n \n",
+    "diff --git a/llvm/lib/Analysis/ScalarEvolution.cpp b/llvm/lib/Analysis/ScalarEvolution.cpp\nindex 7673c3548175..824f39c009d7 100644\n--- a/llvm/lib/Analysis/ScalarEvolution.cpp\n+++ b/llvm/lib/Analysis/ScalarEvolution.cpp\n@@ -15338,6 +15338,10 @@ void ScalarEvolution::LoopGuards::collectFromPHI(\n     const PHINode &Phi, SmallPtrSetImpl<const BasicBlock *> &VisitedBlocks,\n     SmallDenseMap<const BasicBlock *, LoopGuards> &IncomingGuards,\n     unsigned Depth) {\n+  // Prevent infinite recursion by limiting the depth of recursive calls.\n+  // This can happen with cyclic PHI dependencies.\n+  if (Depth >= 4)\n+    return;\n   if (!SE.isSCEVable(Phi.getType()))\n     return;\n \n",
+    "diff --git a/llvm/lib/Analysis/ScalarEvolution.cpp b/llvm/lib/Analysis/ScalarEvolution.cpp\nindex 7673c3548175..8abd3f800fa0 100644\n--- a/llvm/lib/Analysis/ScalarEvolution.cpp\n+++ b/llvm/lib/Analysis/ScalarEvolution.cpp\n@@ -15338,6 +15338,10 @@ void ScalarEvolution::LoopGuards::collectFromPHI(\n     const PHINode &Phi, SmallPtrSetImpl<const BasicBlock *> &VisitedBlocks,\n     SmallDenseMap<const BasicBlock *, LoopGuards> &IncomingGuards,\n     unsigned Depth) {\n+  // Prevent infinite recursion by limiting the depth of recursive calls.\n+  // This can happen with cyclic PHI dependencies.\n+  if (Depth >= 1)\n+    return;\n   if (!SE.isSCEVable(Phi.getType()))\n     return;\n \n",
+    "diff --git a/llvm/lib/Analysis/ScalarEvolution.cpp b/llvm/lib/Analysis/ScalarEvolution.cpp\nindex 7673c3548175..ca25bcda20b0 100644\n--- a/llvm/lib/Analysis/ScalarEvolution.cpp\n+++ b/llvm/lib/Analysis/ScalarEvolution.cpp\n@@ -15338,6 +15338,10 @@ void ScalarEvolution::LoopGuards::collectFromPHI(\n     const PHINode &Phi, SmallPtrSetImpl<const BasicBlock *> &VisitedBlocks,\n     SmallDenseMap<const BasicBlock *, LoopGuards> &IncomingGuards,\n     unsigned Depth) {\n+  // Prevent infinite recursion by limiting the depth of recursive calls.\n+  // This can happen with cyclic PHI dependencies.\n+  if (Depth > 16)\n+    return;\n   if (!SE.isSCEVable(Phi.getType()))\n     return;\n \n"
+  ]
+}

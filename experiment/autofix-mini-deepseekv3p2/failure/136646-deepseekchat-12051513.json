@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "136646",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/136646-deepseekchat-12051513.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 804, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 4997110,
+  "output_tokens": 15228,
+  "cached_tokens": 4953984,
+  "total_tokens": 5012338,
+  "chat_rounds": 342,
+  "total_time_sec": 2295.709084033966,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+    "llvm::InstCombinerImpl::visitSelectInst",
+    3941
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineSelect.cpp",
+      2796,
+      2804
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The transformation incorrectly folds `select (fcmp ole X, 0.0), (0.0 - X), X` to `fabs(X)` without considering NaN handling. When X is a signaling NaN (SNaN), the original select yields the SNaN (since fcmp ole returns false for NaN, so select picks X, which is SNaN). The fabs intrinsic clears the sign bit of NaN, turning SNaN into a quiet NaN (QNaN) with sign bit cleared. This changes the NaN payload (sign bit) and may affect exception behavior. The transformation is only valid when we know NaNs cannot occur (nnan) or when the sign bit of NaN is irrelevant (which is not guaranteed). The fsub pattern also flips the sign bit of NaN when selected (if fcmp unordered true). However, the pattern uses `m_PosZeroFP()` which ensures the zero is positive, but still the sign bit of NaN matters.\n\n2. Analyzing `opt`'s Log: The log shows the transformation occurs in `foldSelectWithFCmpToFabs`. The select has no fast-math flags (no nnan, nsz). The fcmp is `ole` (ordered less or equal). For NaN, ordered comparisons return false, so select picks X (the SNaN). The fabs would produce a different NaN (sign bit cleared). This is a mismatch.\n\n3. Root Cause Analysis: The function `foldSelectWithFCmpToFabs` at lines 2796-2804 handles the pattern `match(TrueVal, m_FSub(m_PosZeroFP(), m_Specific(X)))`. It checks predicates OLE or ULE (for Swap false) and OGT or UGT (for Swap true). However, it does not require any fast-math flags (nnan, nsz). The comment at line 2776-2777 says \"We need fast-math-flags (nsz) or fsub with +0.0 (not fneg) for this to work.\" But the code does not enforce nnan. For unordered predicates (ULE, UGT), NaN compares true, leading to selecting TrueVal (0.0 - X) which flips the sign bit of NaN (since fsub with zero may propagate NaN sign? Actually 0.0 - SNaN yields QNaN with sign bit flipped? The result is a quiet NaN with sign bit opposite of input? The spec says subtraction of zero does not change NaN payload except sign bit may be flipped? The fabs clears sign bit. So unordered predicates also need nnan.\n\nThus the transformation must require `nnan` (and possibly `nsz` for signed zero). The existing check for nsz/nnan is only for the fneg pattern (line 2840). The fsub pattern should also require nnan (and maybe nsz).\n\n4. Proposed Edit Point(s): Modify lines 2796-2804 to add a check for `SI.hasNoNaNs()` (and possibly `SI.hasNoSignedZeros()`). Since the pattern uses positive zero, signed zero may be okay, but rounding modes could affect zero sign. Safer to require nsz as well. However, the comment says \"We need fast-math-flags (nsz) or fsub with +0.0 (not fneg) for this to work.\" That suggests nsz is not required for fsub with positive zero because positive zero ensures zero sign is positive. But rounding mode could still produce -0.0? The subtraction 0.0 - X with rounding toward negative could produce -0.0 when X is +0.0. That's a corner case. We'll require nsz as well to be safe.\n\nWe'll add a condition before the transformation: `if (!SI.hasNoNaNs() || !SI.hasNoSignedZeros()) continue;`\n\n5. Conclusion: The fix ensures the transformation only applies when fast-math flags nnan and nsz are present, preserving correctness for NaN and signed zero cases.",
+  "test_traj": []
+}

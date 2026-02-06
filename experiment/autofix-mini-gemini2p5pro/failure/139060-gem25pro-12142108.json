@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "139060",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/139060-gem25pro-12142108.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 449496,
+  "output_tokens": 15749,
+  "cached_tokens": 352364,
+  "total_tokens": 488761,
+  "chat_rounds": 45,
+  "total_time_sec": 396.70967149734497,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+    "llvm::LoopVectorizationPlanner::computeBestVF",
+    7667
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/LoopVectorize.cpp",
+      4211,
+      4217
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe vectorizer is aborting due to an assertion failure in `LoopVectorizationPlanner::computeBestVF`. This assertion is a consistency check designed to ensure that the new VPlan-based cost model and the older, legacy cost model agree on the optimal Vectorization Factor (VF).\n\nThe assertion is:\n```cpp\nassert((BestFactor.Width == LegacyVF.Width || BestPlan.hasEarlyExit() ||\n        planContainsAdditionalSimplifications(getPlanFor(BestFactor.Width), ...) ||\n        planContainsAdditionalSimplifications(getPlanFor(LegacyVF.Width), ...)) &&\n       \" VPlan cost model and legacy cost model disagreed\");\n```\n\nThis means the two models have chosen different VFs, and the discrepancy is not explained by the allowed exceptions (early-exit loops or extra VPlan optimizations), pointing to a fundamental disagreement in how they assess the cost of vectorizing this specific loop.\n\n### 2. Analyzing `opt`'s Log\n\nThe Scalar Evolution analysis provides a crucial clue:\n```\n%for = phi i32 [ 4, %entry ], [ %iv, %loop ]\n-->  %for U: [0,9) S: [0,9)  Exits: <<Unknown>>  LoopDispositions: { %loop: Variant }\n```\nSCEV correctly identifies `%for` as \"Variant\". This is because it's a first-order recurrence: its value in the current iteration (`%iv`) depends on the induction variable from the *previous* iteration. This is different from a standard induction or reduction recurrence.\n\nThe core of the issue is how the two cost models evaluate the profitability of vectorizing this specific type of recurrence. The assertion failure implies one model decided to vectorize (VF > 1) while the other decided not to (VF = 1).\n\n### 3. Root Cause Analysis\n\nThe disagreement stems from how the legacy cost model handles first-order recurrences. To vectorize the `%for` PHI, the vectorizer must \"scalarize\" the dependency. This involves generating code to get the value of `%iv` from the last lane of the previous vector iteration and using it as the first lane for the `%for` vector in the current iteration. This is typically done with `extractelement` and `insertelement` instructions, which have a cost.\n\nThe legacy cost model, specifically in `LoopVectorizationCostModel::getRecurrenceCost`, contains logic to estimate the cost of this scalarization. A key part of this logic is a profitability heuristic:\n\n```cpp\n// llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\n\n// This is a first-order recurrence. This will be implemented by vector\n// extracting the last scalar value of the VF-1 elements and then vector\n// inserting the new value to the beginning of the vector.\nif (Phi->hasOneUse()) {\n  // If the PHI has only one use, we can't scalarize it.\n  // TODO: We should be able to scalarize it.\n  return Cost->getImpossibleCost();\n}\n```\nThe code previously had a check that would deem this operation too expensive if the recurrence PHI node (`%for`) had only one user. In the provided reproducer, `%for` is only used by the `sub` instruction, so it has exactly one use. Consequently, the legacy cost model assigned a very high (effectively infinite) cost, forcing `LegacyVF.Width` to be 1 (i.e., do not vectorize).\n\nThe newer VPlan-based model, however, correctly estimates a finite cost for the necessary shuffle/insert/extract operations and determines that vectorization is profitable, selecting a `BestFactor.Width` greater than 1.\n\nThis discrepancy\u2014legacy model refusing to vectorize due to the single-use heuristic, and the VPlan model agreeing to\u2014is the direct cause of the assertion failure. The heuristic in the legacy model was overly pessimistic. The fix is to remove this overly restrictive single-use check from the legacy cost model to bring its behavior in line with the VPlan model for this case.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to adjust the legacy cost model in `LoopVectorizationCostModel::getRecurrenceCost` to correctly cost the scalarization of a first-order recurrence, even when it has only one use. We should remove the logic that assigns an infinite cost in the single-use case.\n\n[[4211, 4217, \"llvm/lib/Transforms/Vectorize/LoopVectorize.cpp\"]]\n\n### 5. Conclusion\n\nBy removing the pessimistic `if (Phi->hasOneUse())` check from the legacy cost model's handling of first-order recurrences, we allow it to calculate a realistic, finite cost for the operation. This makes its costing behavior consistent with the VPlan model for this scenario, resolving the disagreement and fixing the assertion failure. The loop will then be correctly vectorized.",
+  "test_traj": []
+}

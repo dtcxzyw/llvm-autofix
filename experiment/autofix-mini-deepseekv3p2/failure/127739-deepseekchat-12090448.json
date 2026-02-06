@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "127739",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/127739-deepseekchat-12090448.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 804, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 4996719,
+  "output_tokens": 22178,
+  "cached_tokens": 4898304,
+  "total_tokens": 5018897,
+  "chat_rounds": 193,
+  "total_time_sec": 1439.9775743484497,
+  "trans_point": [
+    "llvm/lib/IR/Instructions.cpp",
+    "llvm::ExtractElementInst::ExtractElementInst",
+    1654
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Scalar/Scalarizer.cpp",
+      1086,
+      1095
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The crash occurs because the Scalarizer pass is trying to create an ExtractElement instruction on a struct type value. The backtrace shows that in Scatterer::operator[], we call Builder.CreateExtractElement(V, Frag * VS.NumPacked, ...) where V is a struct type { <3 x i32>, <3 x i1> } (the result of llvm.uadd.with.overflow.v3i32). ExtractElement expects a vector type operand, not a struct. This happens because visitExtractValueInst is processing an ExtractValue from a struct-of-vectors, but the Scatterer is incorrectly set up with VS.SplitTy = i32 (the element type of the vector) rather than the struct type. The Scatterer is created with VS derived from the vector type inside the struct, but V is the struct itself.\n\n2. Analyzing `opt`'s Log: The crash is at the first transformation point when trying to create ExtractElement. The debugger shows that V->getType() is a struct with two elements: <3 x i32> and <3 x i1>. VS.SplitTy is i32, VS.VecTy is <3 x i32>. The Scatterer assumes V is a vector (or pointer to vector) but it's actually a struct.\n\n3. Root Cause Analysis: In visitExtractValueInst, line 1082 extracts VecType = cast<FixedVectorType>(OpTy->getContainedType(0)). This gets the vector type from the struct. Then getVectorSplit(VecType) returns a VS for that vector type. Then scatter(&EVI, Op, *VS) is called where Op is the struct value. The scatter function expects V to be a vector or pointer to vector (as per comment on line 469), but here it's a struct. The Scatterer constructor doesn't validate this, and later in operator[] it tries to create ExtractElement assuming V is a vector.\n\nThe issue is that visitExtractValueInst should handle struct-of-vectors differently: it should first extract the vector from the struct, then scatter that vector. Currently it tries to scatter the struct directly.\n\n4. Proposed Edit Point(s): The fix is in visitExtractValueInst. Instead of scattering the struct Op, we should first extract the vector at index 0 (since we only care about the top-level index), then scatter that vector. The code already extracts Index = EVI.getIndices()[0], but uses it only for the second ExtractValue. We need to use it to get the vector from the struct before scattering.\n\nEdit lines 1086-1095 in Scalarizer.cpp:\n- Before scattering, extract the vector from the struct at Index.\n- Scatter that vector instead of the struct.\n- Then for each fragment, extract value from the fragment struct.\n\n5. Conclusion: The fix ensures that when scalarizing ExtractValue from a struct-of-vectors, we first extract the vector element from the struct, then scatter that vector. This matches the assumption that Scatterer works on vectors, not structs. The change will prevent the illegal ExtractElement on struct type.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Scalar/Scalarizer.cpp b/llvm/lib/Transforms/Scalar/Scalarizer.cpp\nindex 2b27150112ad..18b8a8b04b5b 100644\n--- a/llvm/lib/Transforms/Scalar/Scalarizer.cpp\n+++ b/llvm/lib/Transforms/Scalar/Scalarizer.cpp\n@@ -1084,14 +1084,16 @@ bool ScalarizerVisitor::visitExtractValueInst(ExtractValueInst &EVI) {\n   if (!VS)\n     return false;\n   IRBuilder<> Builder(&EVI);\n-  Scatterer Op0 = scatter(&EVI, Op, *VS);\n   assert(!EVI.getIndices().empty() && \"Make sure an index exists\");\n   // Note for our use case we only care about the top level index.\n   unsigned Index = EVI.getIndices()[0];\n-  for (unsigned OpIdx = 0; OpIdx < Op0.size(); ++OpIdx) {\n-    Value *ResElem = Builder.CreateExtractValue(\n-        Op0[OpIdx], Index, EVI.getName() + \".elem\" + Twine(Index));\n-    Res.push_back(ResElem);\n+  // First extract the vector from the struct at the given index.\n+  Value *Vec = Builder.CreateExtractValue(Op, Index,\n+                                          Op->getName() + \".extract\" + Twine(Index));\n+  // Scatter the extracted vector.\n+  Scatterer VecScatter = scatter(&EVI, Vec, *VS);\n+  for (unsigned OpIdx = 0; OpIdx < VecScatter.size(); ++OpIdx) {\n+    Res.push_back(VecScatter[OpIdx]);\n   }\n \n   gather(&EVI, Res, *VS);\n",
+    "diff --git a/llvm/lib/Transforms/Scalar/Scalarizer.cpp b/llvm/lib/Transforms/Scalar/Scalarizer.cpp\nindex 2b27150112ad..18b8a8b04b5b 100644\n--- a/llvm/lib/Transforms/Scalar/Scalarizer.cpp\n+++ b/llvm/lib/Transforms/Scalar/Scalarizer.cpp\n@@ -1084,14 +1084,16 @@ bool ScalarizerVisitor::visitExtractValueInst(ExtractValueInst &EVI) {\n   if (!VS)\n     return false;\n   IRBuilder<> Builder(&EVI);\n-  Scatterer Op0 = scatter(&EVI, Op, *VS);\n   assert(!EVI.getIndices().empty() && \"Make sure an index exists\");\n   // Note for our use case we only care about the top level index.\n   unsigned Index = EVI.getIndices()[0];\n-  for (unsigned OpIdx = 0; OpIdx < Op0.size(); ++OpIdx) {\n-    Value *ResElem = Builder.CreateExtractValue(\n-        Op0[OpIdx], Index, EVI.getName() + \".elem\" + Twine(Index));\n-    Res.push_back(ResElem);\n+  // First extract the vector from the struct at the given index.\n+  Value *Vec = Builder.CreateExtractValue(Op, Index,\n+                                          Op->getName() + \".extract\" + Twine(Index));\n+  // Scatter the extracted vector.\n+  Scatterer VecScatter = scatter(&EVI, Vec, *VS);\n+  for (unsigned OpIdx = 0; OpIdx < VecScatter.size(); ++OpIdx) {\n+    Res.push_back(VecScatter[OpIdx]);\n   }\n \n   gather(&EVI, Res, *VS);\n"
+  ]
+}

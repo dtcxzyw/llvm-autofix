@@ -1,0 +1,41 @@
+{
+  "command": {
+    "issue": "117157",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/117157-deepseekchat-12071424.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Analysis/MemorySSAUpdater.cpp b/llvm/lib/Analysis/MemorySSAUpdater.cpp\nindex ecfecb03c375..96317be2789d 100644\n--- a/llvm/lib/Analysis/MemorySSAUpdater.cpp\n+++ b/llvm/lib/Analysis/MemorySSAUpdater.cpp\n@@ -486,7 +486,7 @@ void MemorySSAUpdater::fixupDefs(const SmallVectorImpl<WeakVH> &Vars) {\n     for (const auto *S : successors(NewDef->getBlock())) {\n       if (auto *MP = MSSA->getMemoryAccess(S))\n         setMemoryPhiValueForBlock(MP, NewDef->getBlock(), NewDef);\n-      else\n+      else if (MSSA->DT->dominates(NewDef->getBlock(), S))\n         Worklist.push_back(S);\n     }\n \n@@ -501,6 +501,8 @@ void MemorySSAUpdater::fixupDefs(const SmallVectorImpl<WeakVH> &Vars) {\n                \"Should have already handled phi nodes!\");\n         // We are now this def's defining access, make sure we actually dominate\n         // it\n+        (void)NewDef;\n+        (void)FirstDef;\n         assert(MSSA->dominates(NewDef, FirstDef) &&\n                \"Should have dominated the new access\");\n \n@@ -521,7 +523,8 @@ void MemorySSAUpdater::fixupDefs(const SmallVectorImpl<WeakVH> &Vars) {\n           // processed.  FIXME: Double check this\n           if (!Seen.insert(S).second)\n             continue;\n-          Worklist.push_back(S);\n+          if (MSSA->DT->dominates(NewDef->getBlock(), S))\n+            Worklist.push_back(S);\n         }\n       }\n     }\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 4411998,
+  "output_tokens": 18168,
+  "cached_tokens": 4330944,
+  "total_tokens": 4430166,
+  "chat_rounds": 178,
+  "total_time_sec": 1078.3395874500275,
+  "trans_point": [
+    "llvm/lib/Analysis/MemorySSAUpdater.cpp",
+    "llvm::MemorySSAUpdater::fixupDefs",
+    504
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Analysis/MemorySSAUpdater.cpp",
+      504,
+      505
+    ],
+    [
+      "llvm/lib/Analysis/MemorySSAUpdater.cpp",
+      524,
+      526
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The assertion `MSSA->dominates(NewDef, FirstDef)` fails because `NewDef` (a MemoryPhi in block `loop2`) does not dominate `FirstDef` (a MemoryDef in block `loop0.latch`). The algorithm in `fixupDefs` processes each Var in the input list, pushing successors of the Var's block onto a worklist, then iteratively processes those blocks. However, it assumes that the Var dominates all blocks in the worklist, which is not guaranteed when there are multiple predecessors to a block (e.g., `loop0.latch` has predecessors `loop1.exit` and `loop2`). The phi in `loop2` does not dominate `loop0.latch` because there is a path from entry through `loop1.exit` to `loop0.latch` that bypasses `loop2`.\n\n2. **Analyzing `opt`'s Log**: The log shows that LICM is promoting stores out of loops, and during that process, it inserts new MemoryDefs and MemoryPhis. The crash occurs when trying to fix up definitions after inserting a phi. The stack trace indicates that the first transformation point is in `MemorySSAUpdater::fixupDefs`. The `opt` output also indicates that the loop structure is complex with multiple exits and nested loops.\n\n3. **Root Cause Analysis**: The root cause is that `fixupDefs` incorrectly assumes that the `NewDef` (the current Var) dominates all blocks reachable from its successors. This assumption holds only when the block has a single predecessor or when the Var is placed in a block that dominates all paths to the successor. In the reproducer, `loop2` does not dominate `loop0.latch`. The algorithm should only propagate the definition to blocks that are dominated by `NewDef`. The current worklist algorithm does not check dominance before adding successors.\n\n4. **Proposed Edit Points**:\n   - In `fixupDefs`, before adding a successor block to the worklist, we should verify that `NewDef` dominates that successor block. If not, we should not add it because the definition does not reach that block via all paths.\n   - Additionally, the assertion at lines 504-505 should be removed because it is not always true. However, the assertion is there to catch bugs; we should instead ensure the condition holds by filtering the worklist.\n   - Specifically, at lines 524-526, where we add successor blocks to the worklist, we should add a dominance check.\n\n   Edit point 1: Remove the assertion lines 504-505 (or replace with a conditional check).\n   Edit point 2: Modify the successor handling to only push dominated blocks.\n\n   Let's examine the exact lines:\n   - Lines 504-505: `assert(MSSA->dominates(NewDef, FirstDef) && \"Should have dominated the new access\");`\n   - Lines 524-526:\n```\nif (!Seen.insert(S).second)\n  continue;\nWorklist.push_back(S);\n```\n   Change to:\n```\nif (!Seen.insert(S).second)\n  continue;\nif (MSSA->dominates(NewDef, S))\n  Worklist.push_back(S);\n```\n   This ensures we only propagate to dominated blocks.\n\n5. **Conclusion**: The fix ensures that the worklist only contains blocks dominated by the new definition, preventing the illegal dominance assumption. The assertion is removed because it is not always valid. The algorithm will still compute correct defining accesses via `getPreviousDef`. This should resolve the crash while maintaining correctness.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Analysis/MemorySSAUpdater.cpp b/llvm/lib/Analysis/MemorySSAUpdater.cpp\nindex ecfecb03c375..cfd20df5bbfc 100644\n--- a/llvm/lib/Analysis/MemorySSAUpdater.cpp\n+++ b/llvm/lib/Analysis/MemorySSAUpdater.cpp\n@@ -486,7 +486,7 @@ void MemorySSAUpdater::fixupDefs(const SmallVectorImpl<WeakVH> &Vars) {\n     for (const auto *S : successors(NewDef->getBlock())) {\n       if (auto *MP = MSSA->getMemoryAccess(S))\n         setMemoryPhiValueForBlock(MP, NewDef->getBlock(), NewDef);\n-      else\n+      else if (MSSA->dominates(NewDef, S))\n         Worklist.push_back(S);\n     }\n \n@@ -501,6 +501,8 @@ void MemorySSAUpdater::fixupDefs(const SmallVectorImpl<WeakVH> &Vars) {\n                \"Should have already handled phi nodes!\");\n         // We are now this def's defining access, make sure we actually dominate\n         // it\n+        (void)NewDef;\n+        (void)FirstDef;\n         assert(MSSA->dominates(NewDef, FirstDef) &&\n                \"Should have dominated the new access\");\n \n@@ -521,7 +523,8 @@ void MemorySSAUpdater::fixupDefs(const SmallVectorImpl<WeakVH> &Vars) {\n           // processed.  FIXME: Double check this\n           if (!Seen.insert(S).second)\n             continue;\n-          Worklist.push_back(S);\n+          if (MSSA->dominates(NewDef, S))\n+            Worklist.push_back(S);\n         }\n       }\n     }\n",
+    "diff --git a/llvm/lib/Analysis/MemorySSAUpdater.cpp b/llvm/lib/Analysis/MemorySSAUpdater.cpp\nindex ecfecb03c375..96317be2789d 100644\n--- a/llvm/lib/Analysis/MemorySSAUpdater.cpp\n+++ b/llvm/lib/Analysis/MemorySSAUpdater.cpp\n@@ -486,7 +486,7 @@ void MemorySSAUpdater::fixupDefs(const SmallVectorImpl<WeakVH> &Vars) {\n     for (const auto *S : successors(NewDef->getBlock())) {\n       if (auto *MP = MSSA->getMemoryAccess(S))\n         setMemoryPhiValueForBlock(MP, NewDef->getBlock(), NewDef);\n-      else\n+      else if (MSSA->DT->dominates(NewDef->getBlock(), S))\n         Worklist.push_back(S);\n     }\n \n@@ -501,6 +501,8 @@ void MemorySSAUpdater::fixupDefs(const SmallVectorImpl<WeakVH> &Vars) {\n                \"Should have already handled phi nodes!\");\n         // We are now this def's defining access, make sure we actually dominate\n         // it\n+        (void)NewDef;\n+        (void)FirstDef;\n         assert(MSSA->dominates(NewDef, FirstDef) &&\n                \"Should have dominated the new access\");\n \n@@ -521,7 +523,8 @@ void MemorySSAUpdater::fixupDefs(const SmallVectorImpl<WeakVH> &Vars) {\n           // processed.  FIXME: Double check this\n           if (!Seen.insert(S).second)\n             continue;\n-          Worklist.push_back(S);\n+          if (MSSA->DT->dominates(NewDef->getBlock(), S))\n+            Worklist.push_back(S);\n         }\n       }\n     }\n"
+  ]
+}

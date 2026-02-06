@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "115575",
+    "model": "deepseek-chat",
+    "driver": "openai-generic",
+    "stats": "/tmp/115575-deepseekchat-12041105.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 04ea12ef0f12..dfecb8325c73 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -968,6 +968,11 @@ bool VectorCombine::scalarizeBinopOrCmp(Instruction &I) {\n          (ScalarTy->isIntegerTy() || ScalarTy->isFloatingPointTy() ||\n           ScalarTy->isPointerTy()) &&\n          \"Unexpected types for insert element into binop or cmp\");\n+  // If the insertion index is out-of-bounds, the insertelement yields poison.\n+  // Bail out to avoid illegal extractelement from constant vectors.\n+  uint64_t NumElts = cast<VectorType>(VecTy)->getElementCount().getKnownMinValue();\n+  if (Index >= NumElts)\n+    return false;\n \n   unsigned Opcode = I.getOpcode();\n   InstructionCost ScalarOpCost, VectorOpCost;\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 1053733,
+  "output_tokens": 12880,
+  "cached_tokens": 986368,
+  "total_tokens": 1066613,
+  "chat_rounds": 70,
+  "total_time_sec": 1892.613344669342,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+    "(anonymous namespace)::VectorCombine::scalarizeBinopOrCmp",
+    1015
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+      1008,
+      1011
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue: The transformation incorrectly scalarizes a vector division where one operand is an insert element with an out-of-bounds index (3) into a 2-element vector. According to the LLVM language reference, insertelement with an index that exceeds the vector length yields poison. In the source, %ins = insertelement <2 x i8> poison, i8 %x, i32 3 results in a poison vector because index 3 is out of bounds. The vector division with a constant vector <5,2> then yields poison (since poison op anything = poison). The transformation incorrectly extracts element at index 3 from the constant vector VecC1 (<5,2>) via ConstantExpr::getExtractElement, which is undefined behavior because index 3 is out of bounds for a 2-element vector. This results in poison being used as the second operand to the scalar division, making the scalar division have a poison divisor, which triggers undefined behavior (UB) when %x is poison (as shown in the counterexample). The source had no UB (just poison results), but the target introduces UB.\n\n2. Analyzing `opt`'s Log: The debug log shows that IsConst1 is true (V1 is null), Index0=3, Index1=0, Index=IsConst0?Index1:Index0 = Index0 = 3. At line 1011, the code extracts element at Index (3) from VecC1, which is illegal.\n\n3. Root Cause Analysis: The function scalarizeBinopOrCmp does not validate that the insertion index is within bounds of the vector type before extracting a scalar element from the constant vector. The match patterns accept any constant index, and the extraction assumes the index is valid. However, insertelement with out-of-bounds index yields poison, so the whole vector operand is poison. The transformation should bail out when the insertion index is out of bounds because the vector is poison and scalarization is not safe. Additionally, the extraction from the constant vector at that same out-of-bounds index is invalid.\n\n4. Proposed Edit Point(s): We need to add a check that the insertion index is less than the vector element count. This should be done after determining Index and before extracting from constant vectors. The fix should be placed around line 963 where Index is computed, or before the extraction at lines 1008-1011. We'll add a check using VecTy's element count.\n\n5. Conclusion: The fix ensures that scalarization only proceeds when the insertion index is within bounds, preventing illegal extraction and preserving semantics. The edit point is lines 1008-1011, but we need to add the check earlier, perhaps after line 963.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 04ea12ef0f12..dfecb8325c73 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -968,6 +968,11 @@ bool VectorCombine::scalarizeBinopOrCmp(Instruction &I) {\n          (ScalarTy->isIntegerTy() || ScalarTy->isFloatingPointTy() ||\n           ScalarTy->isPointerTy()) &&\n          \"Unexpected types for insert element into binop or cmp\");\n+  // If the insertion index is out-of-bounds, the insertelement yields poison.\n+  // Bail out to avoid illegal extractelement from constant vectors.\n+  uint64_t NumElts = cast<VectorType>(VecTy)->getElementCount().getKnownMinValue();\n+  if (Index >= NumElts)\n+    return false;\n \n   unsigned Opcode = I.getOpcode();\n   InstructionCost ScalarOpCost, VectorOpCost;\n"
+  ]
+}

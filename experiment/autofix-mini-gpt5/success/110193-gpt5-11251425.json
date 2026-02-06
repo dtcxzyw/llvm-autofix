@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "110193",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/110193-gpt5-11251425.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 48a8627ab63e..17f6a668dda6 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -10342,9 +10342,14 @@ BoUpSLP::getEntryCost(const TreeEntry *E, ArrayRef<Value *> VectorizedVals,\n         // resized.\n         if (!UnaryInstruction::isCast(E->getOpcode()) && E->Idx != 0 &&\n             (E->getOpcode() != Instruction::Load ||\n-             !E->UserTreeIndices.empty())) {\n+             !E->UserTreeIndices.empty()) &&\n+            !E->UserTreeIndices.empty()) {\n           const EdgeInfo &EI = E->UserTreeIndices.front();\n-          if ((EI.UserTE->getOpcode() != Instruction::Select ||\n+          // EdgeIdx may be UINT_MAX for synthetic/gather relationships without\n+          // a concrete operand index. In such cases, skip the type resizing\n+          // logic that relies on accessing the parent's operand list.\n+          if (EI.EdgeIdx != UINT_MAX &&\n+              (EI.UserTE->getOpcode() != Instruction::Select ||\n                EI.EdgeIdx != 0) &&\n               It != MinBWs.end()) {\n             auto UserBWIt = MinBWs.find(EI.UserTE);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 672085,
+  "output_tokens": 16137,
+  "cached_tokens": 550016,
+  "total_tokens": 688222,
+  "chat_rounds": 22,
+  "total_time_sec": 306.1142828464508,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::TreeEntry::getOperand",
+    3247
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      10343,
+      10356
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs in TreeEntry::getOperand(unsigned OpIdx) with OpIdx = 4294967295 (UINT_MAX). This happens during cost computation in BoUpSLP::getEntryCost(). The assertion OpIdx < Operands.size() rightfully fires because UINT_MAX is a sentinel value used in EdgeInfo (EdgeIdx default) to indicate 'no valid operand index'. Passing it to getOperand is therefore invalid. The assertion is correct; earlier logic should have prevented using such an EdgeIdx.\n\n2. Analyzing opt's Log:\nThe log shows successful tree construction and scheduling for several bundles (shl/or/select/icmp chains). Costing proceeds until it hits the assertion while calculating costs for the tree (\"Calculated costs for Tree\" line printed just before crashing). The failing path is inside the GetCostDiff lambda in getEntryCost(). This code attempts to adjust vectorization cost based on the parent/user node's operand types (minimum bit-width resizing logic). It blindly indexes EI.UserTE->getOperand(EI.EdgeIdx) assuming EdgeIdx is valid. For some gather/scalar reuse patterns (like trivial zero chains in the reproducer), an EdgeInfo with EdgeIdx == UINT_MAX is stored. This matches existing uses elsewhere (e.g. special-casing gather nodes in getGatherShuffledSingleRegisterEntry()).\n\n3. Root Cause Analysis:\nEdgeInfo::EdgeIdx == UINT_MAX denotes an edge without a specific operand position (e.g. synthetic/gather or special external user relationship). In getEntryCost(), the resizing logic:\n  const EdgeInfo &EI = E->UserTreeIndices.front();\n  Type *UserScalarTy = EI.UserTE->getOperand(EI.EdgeIdx).front()->getType();\nexecutes unconditionally once prior guards pass, without verifying EI.EdgeIdx != UINT_MAX. When EI.EdgeIdx == UINT_MAX, this invokes TreeEntry::getOperand(UINT_MAX), triggering the assertion. The reproducer creates a degenerate chain where a node with MinBWs entry and a user recorded via EdgeInfo lacks a concrete operand index, exposing the bug.\n\n4. Proposed Edit Point(s):\nAdd a guard in BoUpSLP::getEntryCost() before dereferencing EI.EdgeIdx. Only attempt the user operand type adjustment if EI.EdgeIdx is a valid operand index (i.e., EI.EdgeIdx != UINT_MAX and EI.UserTE is non-null). This prevents passing UINT_MAX to getOperand(). Also incorporate the guard into the existing if-condition to avoid unnecessary nesting. Provide a clarifying comment explaining why UINT_MAX must be skipped.\n\nEdit lines 10343-10356 (within getEntryCost):\nOriginal snippet logic:\n  const EdgeInfo &EI = E->UserTreeIndices.front();\n  if ((EI.UserTE->getOpcode() != Instruction::Select || EI.EdgeIdx != 0) && It != MinBWs.end()) {\n    auto UserBWIt = MinBWs.find(EI.UserTE);\n    Type *UserScalarTy = EI.UserTE->getOperand(EI.EdgeIdx).front()->getType();\n    ...\nReplace with guarded version:\n  const EdgeInfo &EI = E->UserTreeIndices.front();\n  // EdgeIdx may be UINT_MAX for synthetic/gather relationships; skip resizing logic in that case.\n  if (EI.EdgeIdx != UINT_MAX &&\n      (EI.UserTE->getOpcode() != Instruction::Select || EI.EdgeIdx != 0) &&\n      It != MinBWs.end()) {\n    auto UserBWIt = MinBWs.find(EI.UserTE);\n    Type *UserScalarTy = EI.UserTE->getOperand(EI.EdgeIdx).front()->getType();\n    ...\nThis prevents invalid operand access. No other semantic changes are needed.\n\n5. Conclusion:\nThe fix adds a necessary guard against using a sentinel EdgeIdx (UINT_MAX) as an operand index during cost estimation. This preserves the assertion's integrity and prevents crashes for trees containing gather/special edges. The expected effect is that the reproducer no longer aborts, and costing proceeds normally (possibly skipping the resizing adjustment for such nodes). This aligns with existing patterns handling EdgeIdx == UINT_MAX elsewhere in the SLP vectorizer.\n",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex 48a8627ab63e..17f6a668dda6 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -10342,9 +10342,14 @@ BoUpSLP::getEntryCost(const TreeEntry *E, ArrayRef<Value *> VectorizedVals,\n         // resized.\n         if (!UnaryInstruction::isCast(E->getOpcode()) && E->Idx != 0 &&\n             (E->getOpcode() != Instruction::Load ||\n-             !E->UserTreeIndices.empty())) {\n+             !E->UserTreeIndices.empty()) &&\n+            !E->UserTreeIndices.empty()) {\n           const EdgeInfo &EI = E->UserTreeIndices.front();\n-          if ((EI.UserTE->getOpcode() != Instruction::Select ||\n+          // EdgeIdx may be UINT_MAX for synthetic/gather relationships without\n+          // a concrete operand index. In such cases, skip the type resizing\n+          // logic that relies on accessing the parent's operand list.\n+          if (EI.EdgeIdx != UINT_MAX &&\n+              (EI.UserTE->getOpcode() != Instruction::Select ||\n                EI.EdgeIdx != 0) &&\n               It != MinBWs.end()) {\n             auto UserBWIt = MinBWs.find(EI.UserTE);\n"
+  ]
+}

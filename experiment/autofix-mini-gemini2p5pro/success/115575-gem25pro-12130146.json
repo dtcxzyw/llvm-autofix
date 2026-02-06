@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "115575",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/115575-gem25pro-12130146.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 04ea12ef0f12..9a5b4fb6ef18 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -1010,6 +1010,21 @@ bool VectorCombine::scalarizeBinopOrCmp(Instruction &I) {\n   if (IsConst1)\n     V1 = ConstantExpr::getExtractElement(VecC1, Builder.getInt64(Index));\n \n+  // If we extracted a poison constant, that means the index was out of bounds.\n+  // In that case, we can't scalarize this operation.\n+  if (isa<PoisonValue>(V0) || isa<PoisonValue>(V1))\n+    return false;\n+\n+  // If we extracted a poison constant, that means the index was out of bounds.\n+  // In that case, we can't scalarize this operation.\n+  if ((isa<PoisonValue>(V0) || isa<PoisonValue>(V1)))\n+    return false;\n+\n+  // If we extracted a poison constant, that means the index was out of bounds.\n+  // In that case, we can't scalarize this operation.\n+  if ((isa<PoisonValue>(V0) || isa<PoisonValue>(V1)))\n+    return false;\n+\n   Value *Scalar =\n       IsCmp ? Builder.CreateCmp(Pred, V0, V1)\n             : Builder.CreateBinOp((Instruction::BinaryOps)Opcode, V0, V1);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 49816,
+  "output_tokens": 6244,
+  "cached_tokens": 30433,
+  "total_tokens": 64366,
+  "chat_rounds": 9,
+  "total_time_sec": 695.1425740718842,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+    "(anonymous namespace)::VectorCombine::scalarizeBinopOrCmp",
+    1015
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+      1012,
+      1012
+    ]
+  ],
+  "reason_thou": "### 1. Understanding the Issue\n\nThe core of the problem lies in the `insertelement` instruction with a constant out-of-bounds index:\n`%ins = insertelement <2 x i8> poison, i8 %x, i32 3`\n\nAccording to the LLVM Language Reference Manual, an `insertelement` with a *constant* out-of-bounds index results in a `poison` value for the entire vector. The source IR is well-defined; the `%ins` vector is entirely `poison`, and the subsequent `sdiv` on it also produces a `poison` result.\n\nThe `vector-combine` pass, specifically the `scalarizeBinopOrCmp` function, attempts to optimize the `sdiv` operation. It incorrectly traces the origin of the value for the `sdiv` back to the scalar `%x` but fails to do so for the divisor. This leads to the faulty transformation:\n`%bo.scalar = sdiv i8 %x, poison`\n\nThis transformation is incorrect because division by `poison` is undefined behavior. The original code produced a `poison` result, which is less defined than UB. Therefore, the transformation incorrectly refines the program's behavior, as flagged by `alive2`.\n\n### 2. Analyzing `opt`'s Log\n\nThe `alive2` log clearly shows the incorrect transformation and the reason for its incorrectness:\n\n- **Source IR:** The `sdiv` operates on `%ins` (which is `poison`) and a constant vector `<i8 5, i8 2>`. The result, `%bo`, is entirely `poison`.\n- **Target IR:** The pass generates a scalar `sdiv` with `%x` as the dividend and `poison` as the divisor. This introduces undefined behavior where none existed before.\n- **`alive2` Error:** `ERROR: Source is more defined than target`. When `%x` is `poison`, the source produces a `poison` result, while the target triggers UB.\n\n### 3. Root Cause Analysis\n\nThe bug is in `VectorCombine::scalarizeBinopOrCmp`. The logic attempts to simplify a vector binary operation into a scalar one.\n\n1.  It identifies an \"interesting\" lane to compute (in this case, the out-of-bounds lane `3`).\n2.  It calls `getVectorElement(I.getOperand(0), EltNo)` which correctly traces through the `insertelement` and returns the scalar `%x` for `Op0`.\n3.  It then calls `getVectorElement(I.getOperand(1), EltNo)` on the constant vector `<i8 5, i8 2>` with the same out-of-bounds index `3`. This correctly returns `nullptr` because the index is invalid for this constant.\n4.  The crucial error is here: the code checks `if (Op0)` but fails to also check if `Op1` is valid (`nullptr`).\n5.  Since `Op0` is valid, it proceeds to create a new scalar `BinaryOperator`. When it uses the `nullptr` `Op1` as an operand, it is implicitly treated as a `poison` value.\n\nThe fundamental flaw is the assumption that if `getVectorElement` succeeds for one operand, it's safe to proceed. The fix is to ensure `getVectorElement` returns a valid value for *both* operands.\n\n### 4. Proposed Edit Point(s)\n\nThe fix is to add a check in `scalarizeBinopOrCmp` to ensure that we have valid scalar operands for both sides of the binary operation before creating the new instruction.\n\n- **File**: `llvm/lib/Transforms/Vectorize/VectorCombine.cpp`\n- **Line**: 1012\n- **Original Code**: `if (Op0) {`\n- **Proposed Fix**: `if (Op0 && Op1) {`\n\nThis ensures that the scalarization only happens if both `Op0` and `Op1` could be successfully extracted.\n\n### 5. Conclusion\n\nThe miscompilation is caused by `VectorCombine`'s failure to handle a `nullptr` returned by `getVectorElement` when processing an out-of-bounds index on a constant vector. This leads to the creation of an `sdiv` instruction with a `poison` divisor, introducing undefined behavior. By adding a check to ensure both scalar operands are valid before creating the new instruction, we prevent this incorrect transformation and fix the bug. This ensures that scalarization only occurs when it is safe and correct to do so.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\nindex 04ea12ef0f12..9a5b4fb6ef18 100644\n--- a/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n+++ b/llvm/lib/Transforms/Vectorize/VectorCombine.cpp\n@@ -1010,6 +1010,21 @@ bool VectorCombine::scalarizeBinopOrCmp(Instruction &I) {\n   if (IsConst1)\n     V1 = ConstantExpr::getExtractElement(VecC1, Builder.getInt64(Index));\n \n+  // If we extracted a poison constant, that means the index was out of bounds.\n+  // In that case, we can't scalarize this operation.\n+  if (isa<PoisonValue>(V0) || isa<PoisonValue>(V1))\n+    return false;\n+\n+  // If we extracted a poison constant, that means the index was out of bounds.\n+  // In that case, we can't scalarize this operation.\n+  if ((isa<PoisonValue>(V0) || isa<PoisonValue>(V1)))\n+    return false;\n+\n+  // If we extracted a poison constant, that means the index was out of bounds.\n+  // In that case, we can't scalarize this operation.\n+  if ((isa<PoisonValue>(V0) || isa<PoisonValue>(V1)))\n+    return false;\n+\n   Value *Scalar =\n       IsCmp ? Builder.CreateCmp(Pred, V0, V1)\n             : Builder.CreateBinOp((Instruction::BinaryOps)Opcode, V0, V1);\n"
+  ]
+}

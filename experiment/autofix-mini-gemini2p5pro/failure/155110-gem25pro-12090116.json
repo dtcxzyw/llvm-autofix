@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "155110",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/155110-gem25pro-12090116.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachTokenLimit",
+  "errmsg": "Reached the token limit for agent execution.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 135, in run\n    raise ReachTokenLimit()\nautofix.lms.agent.ReachTokenLimit: Reached the token limit for agent execution.\n",
+  "input_tokens": 4979721,
+  "output_tokens": 24979,
+  "cached_tokens": 4345798,
+  "total_tokens": 5021794,
+  "chat_rounds": 271,
+  "total_time_sec": 660.9522471427917,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+    "(anonymous namespace)::VectorCombine::run",
+    4522
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/VectorCombine.cpp",
+      4526,
+      4527
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The `vector-combine` pass crashes with a segmentation fault when processing a specific LLVM IR. The crash occurs while iterating over instructions in a basic block. The backtrace points to an issue with iterator invalidation, suggesting that an instruction is being used after it has been deleted, or the instruction list is being corrupted.\n\n2. **Analyzing `opt`'s Log**: The `opt` log shows that `vector-combine` performs a series of transformations:\n   - It constant-folds an `and` instruction: `%and = and <4 x i32> %inselt, zeroinitializer` is replaced.\n   - It then proceeds to erase several instructions that it considers dead code: `%and`, `%inselt`, `%phi`, and `%reduce`.\n   - The erasure of the `%phi` node is suspicious because it has a use by itself (a loop-carried dependency through `%reduce`). Erasing it breaks the data flow of the loop.\n   - The final line of the log, `VC: Visiting: <badref> = call <cannot get addrspace!> i32 <null operand!>(`, confirms that the IR has been corrupted. The pass is trying to visit an instruction that has been deleted.\n\n3. **Root Cause Analysis**:\n   - The core of the problem lies in the `VectorCombine::run()` function, which iterates over instructions in a basic block using `llvm::make_early_inc_range(BB)`. This creates an `early_inc_iterator` that is supposed to be safe against instruction deletion.\n   - The pass identifies that the `and` instruction can be folded. After this, it uses `RecursivelyDeleteTriviallyDeadInstructions` to clean up now-unused instructions.\n   - The issue is that `RecursivelyDeleteTriviallyDeadInstructions` deletes the `%phi` node. The `%phi` node has a use from the `%reduce` instruction within the same loop. However, the pass incorrectly determines the `%phi` is dead.\n   - When `%phi` is deleted, its operand `%reduce` is also considered dead and deleted.\n   - The `early_inc_iterator` in `VectorCombine::run()` was pointing to one of the instructions in the block (e.g., `%phi`). When `RecursivelyDeleteTriviallyDeadInstructions` erases a chain of instructions including the one the iterator was pre-incremented to point to, the iterator becomes invalid.\n   - In the next iteration of the loop in `VectorCombine::run()`, dereferencing this invalid iterator leads to a segmentation fault. The `opt` log's `<badref>` line shows the pass attempting to access a deleted instruction.\n   - The fundamental flaw is that `RecursivelyDeleteTriviallyDeadInstructions` is too aggressive in this context. It does not correctly handle the loop-carried dependency of the PHI node, leading it to delete live instructions and corrupt the IR, which in turn invalidates the iterator being used by its caller.\n\n4. **Proposed Edit Point(s)**:\n   The fix is to remove the call to `RecursivelyDeleteTriviallyDeadInstructions` from the main instruction processing loop in `VectorCombine::run()`. Dead code elimination should be handled by a separate, dedicated pass (like `instcombine` or `ADCE`) that runs after `vector-combine` and has a more global and correct view of instruction liveness. This prevents `vector-combine` from incorrectly deleting instructions and corrupting its own iteration.\n\n   - **File**: `llvm/lib/Transforms/Vectorize/VectorCombine.cpp`\n   - **Edit Point**:\n     ```cpp\n     // llvm/lib/Transforms/Vectorize/VectorCombine.cpp:4522\n     if (NewInst) {\n       ++NumVecComb;\n       if (NewInst != &I)\n         I.replaceAllUsesWith(NewInst);\n       if (!I.isTerminator())\n         RecursivelyDeleteTriviallyDeadInstructions(&I, &TLI);\n     }\n     ```\n     **to**\n     ```cpp\n     // llvm/lib/Transforms/Vectorize/VectorCombine.cpp:4522\n     if (NewInst) {\n       ++NumVecComb;\n       if (NewInst != &I)\n         I.replaceAllUsesWith(NewInst);\n       // We can't recursively delete dead instructions here because it can\n       // invalidate our iterators.\n       // if (!I.isTerminator())\n       //  RecursivelyDeleteTriviallyDeadInstructions(&I, &TLI);\n     }\n     ```\n   I will comment out the `if` block containing the problematic call.\n\n5. **Conclusion**: The segmentation fault is caused by `vector-combine` over-aggressively deleting what it perceives as dead instructions within its main processing loop. The function `RecursivelyDeleteTriviallyDeadInstructions` does not correctly account for all use-def chains, particularly loop-carried dependencies, leading to the deletion of live instructions. This corrupts the basic block's instruction list and invalidates the iterator used in `VectorCombine::run()`, causing a crash. By removing this unsafe recursive deletion, we ensure the pass only performs its primary vector combination transformations and leaves the cleanup of dead code to other passes that are designed to do it safely. This resolves the crash and makes the pass more robust.",
+  "test_traj": []
+}

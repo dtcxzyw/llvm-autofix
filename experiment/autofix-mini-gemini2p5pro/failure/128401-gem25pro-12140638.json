@@ -1,0 +1,33 @@
+{
+  "command": {
+    "issue": "128401",
+    "model": "gemini-2.5-pro",
+    "driver": "openai-generic",
+    "stats": "/tmp/128401-gem25pro-12140638.json",
+    "debug": true
+  },
+  "patch": null,
+  "error": "ReachToolBudget",
+  "errmsg": "Tools [edit] are out of budget.",
+  "traceback": "Traceback (most recent call last):\n  File \"/llvm-autofix/autofix/main.py\", line 802, in main\n    stats.patch = autofix(\n                  ^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 629, in autofix\n    return run_mini_agent(\n           ^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 469, in run_mini_agent\n    return patch_and_fix(\n           ^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 325, in patch_and_fix\n    return agent.run(\n           ^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 159, in run\n    result = self._handle_tool_call(answer_content, tool_call_handler)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/lms/generic.py\", line 261, in _handle_tool_call\n    cont_exec, result = tool_call_handler(tool_name, tool_args_text, result)\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/llvm-autofix/autofix/main.py\", line 317, in tool_call_callback\n    ensure_tools_available(agent, [\"test\", \"edit\"])\n  File \"/llvm-autofix/autofix/main.py\", line 214, in ensure_tools_available\n    raise ReachToolBudget(f\"Tools [{', '.join(unavailable_tools)}] are out of budget.\")\nReachToolBudget: Tools [edit] are out of budget.\n",
+  "input_tokens": 729721,
+  "output_tokens": 10270,
+  "cached_tokens": 517462,
+  "total_tokens": 752892,
+  "chat_rounds": 34,
+  "total_time_sec": 266.61639738082886,
+  "trans_point": [
+    "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+    "llvm::slpvectorizer::BoUpSLP::isGatherShuffledEntry",
+    13878
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      11231,
+      11232
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The `slp-vectorizer` crashes due to an assertion failure in `isGatherShuffledEntry`. This function expects its input `TreeEntry` to be a root, an extract, a splat, or a set of identical values. The failing case provides a `TreeEntry` that is a mix of constants and poison values, which doesn't satisfy any of these conditions.\n\n2. **Analyzing `opt`'s Log**: The log shows the vectorizer attempting to cost a complex tree of PHI nodes. The crash occurs when calculating the cost of the incoming values from the `%pre` block for a specific PHI bundle (`TreeEntry` 3). This bundle of incoming values consists of `i8 0` and `poison`.\n\n3. **Root Cause Analysis**: The root cause is a faulty check in `BoUpSLP::getEntryCost`. When processing the incoming values for a PHI node bundle, the code checks if the *first* scalar is a constant (`isa<Constant>(IncomingScalars[0])`). If it is, it assumes all scalars are constants and calls `getConstantSplatCost`. This assumption is incorrect for the reproducer, where the bundle contains both constants and `poison` values. `getConstantSplatCost` is not designed to handle this mixed case and eventually calls `isGatherShuffledEntry` with an invalid `TreeEntry`, triggering the assertion.\n\n4. **Proposed Edit Point(s)**: The fix is to replace the simplistic check with a more robust one that verifies *all* incoming scalars are constants before proceeding down the constant-costing path.\n\n   ```cpp\n   // llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp:11231\n   // FROM:\n   if (isa<Constant>(IncomingScalars[0])) {\n     Cost += getConstantSplatCost(IncomingScalars, TE, VF, TTI, TLI);\n   // TO:\n   if (all_of(IncomingScalars, [](Value *V) { return isa<Constant>(V); })) {\n     Cost += getConstantSplatCost(IncomingScalars, TE, VF, TTI, TLI);\n   ```\n\n5. **Conclusion**: By ensuring that we only enter the constant-costing logic when all incoming values are indeed constants, we avoid the incorrect path that leads to the assertion failure. This makes the cost analysis for PHI nodes more robust and correctly handles cases with mixed constant and non-constant (`poison`) incoming values.",
+  "test_traj": []
+}

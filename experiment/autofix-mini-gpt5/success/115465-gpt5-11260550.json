@@ -1,0 +1,36 @@
+{
+  "command": {
+    "issue": "115465",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/115465-gpt5-11260550.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\nindex 454fe5a91d37..39c36178275b 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\n@@ -2903,8 +2903,9 @@ Instruction *InstCombinerImpl::visitShuffleVectorInst(ShuffleVectorInst &SVI) {\n   if (match(RHS, m_Constant())) {\n     if (auto *SI = dyn_cast<SelectInst>(LHS)) {\n       // We cannot do this fold for elementwise select since ShuffleVector is\n-      // not elementwise.\n-      if (SI->getCondition()->getType()->isIntegerTy()) {\n+      // not elementwise. Only safe if the shuffle extracts exclusively from LHS.\n+      if (SI->getCondition()->getType()->isIntegerTy() &&\n+          (isShuffleExtractingFromLHS(SVI, Mask) || match(RHS, m_Poison()))) {\n         if (Instruction *I = FoldOpIntoSelect(SVI, SI))\n           return I;\n       }\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 132879,
+  "output_tokens": 6077,
+  "cached_tokens": 87296,
+  "total_tokens": 138956,
+  "chat_rounds": 14,
+  "total_time_sec": 609.1377744674683,
+  "trans_point": [
+    "llvm/lib/Transforms/InstCombine/InstructionCombining.cpp",
+    "llvm::InstCombinerImpl::FoldOpIntoSelect",
+    1726
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp",
+      2903,
+      2911
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe transformation moves a shufflevector that uses a select (on LHS) to instead select between two shuffles (FoldOpIntoSelect). This is poison-unsafe because select with a poison condition yields poison for the entire result, while the original \"shuffle(select, ConstRHS, Mask)\" can produce some defined lanes sourced from the RHS constant even if the LHS (select) is poison. Thus, the transform increases poison, as shown by Alive2.\n\n2. Analyzing opt's Log:\nThe first transformation is in visitShuffleVectorInst, where FoldOpIntoSelect is invoked for a shuffle whose RHS is a constant and LHS is a select with integer condition:\n- Old: %shuf = shufflevector %sel, ConstRHS, Mask\n- New: %shuf = select %cmp, shufflevector %y, ConstRHS, Mask, ConstFoldedFalseArm\nAlive2 shows a counterexample with %cmp = poison where the source has defined elements (1,3) s coming from RHS, but the target is entirely poison because the select consumes poison condition.\n\n3. Root Cause Analysis:\nFoldOpIntoSelect is being applied to a non-elementwise operation (shufflevector with a mask that reads elements from both operands). The comment in the code even warns \"We cannot do this fold for elementwise select since ShuffleVector is not elementwise.\" Despite that, the fold is still performed whenever RHS is constant and the LHS is a select with integer condition. This is only safe if the shuffle mask references only the LHS (i.e., it is effectively elementwise on LHS). If the mask references RHS elements, the operation can \"mask away\" poison coming from LHS/select and yield defined values. Moving select after the shuffle reintroduces poison propagation from the condition and is thus incorrect.\n\n4. Proposed Edit Point(s):\n- File: llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\n- Lines: 2903-2911\n- Change: Guard the FoldOpIntoSelect for shuffle/select by ensuring it's only applied when the mask extracts exclusively from LHS. This keeps the transformation within the elementwise-safe case. Use the existing helper isShuffleExtractingFromLHS(SVI, Mask).\n\nOriginal:\n  if (match(RHS, m_Constant())) {\n    if (auto *SI = dyn_cast<SelectInst>(LHS)) {\n      // We cannot do this fold for elementwise select since ShuffleVector is\n      // not elementwise.\n      if (SI->getCondition()->getType()->isIntegerTy()) {\n        if (Instruction *I = FoldOpIntoSelect(SVI, SI))\n          return I;\n      }\n    }\n    ...\n  }\n\nReplacement:\n  if (match(RHS, m_Constant())) {\n    if (auto *SI = dyn_cast<SelectInst>(LHS)) {\n      // We cannot do this fold for elementwise select since ShuffleVector is\n      // not elementwise. Only safe if the shuffle extracts exclusively from LHS.\n      if (SI->getCondition()->getType()->isIntegerTy() &&\n          isShuffleExtractingFromLHS(SVI, Mask)) {\n        if (Instruction *I = FoldOpIntoSelect(SVI, SI))\n          return I;\n      }\n    }\n    ...\n  }\n\nThis change ensures we only perform the fold when Mask references LHS-only elements (< LHSWidth), which makes the shuffle behave elementwise with respect to LHS and avoids the poison-hiding behavior from RHS constants.\n\n5. Conclusion:\nBy restricting the FoldOpIntoSelect transformation for shuffle/select to cases where the mask extracts solely from the LHS, we prevent incorrect poison propagation changes. The fix preserves correctness in scenarios where RHS contributes defined elements under poison conditions, as in the provided reproducer, and maintains the intended optimization where it is safe.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\nindex 454fe5a91d37..9e112a731442 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\n@@ -2903,8 +2903,9 @@ Instruction *InstCombinerImpl::visitShuffleVectorInst(ShuffleVectorInst &SVI) {\n   if (match(RHS, m_Constant())) {\n     if (auto *SI = dyn_cast<SelectInst>(LHS)) {\n       // We cannot do this fold for elementwise select since ShuffleVector is\n-      // not elementwise.\n-      if (SI->getCondition()->getType()->isIntegerTy()) {\n+      // not elementwise. Only safe if the shuffle extracts exclusively from LHS.\n+      if (SI->getCondition()->getType()->isIntegerTy() &&\n+          isShuffleExtractingFromLHS(SVI, Mask)) {\n         if (Instruction *I = FoldOpIntoSelect(SVI, SI))\n           return I;\n       }\n",
+    "diff --git a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\nindex 454fe5a91d37..39c36178275b 100644\n--- a/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\n+++ b/llvm/lib/Transforms/InstCombine/InstCombineVectorOps.cpp\n@@ -2903,8 +2903,9 @@ Instruction *InstCombinerImpl::visitShuffleVectorInst(ShuffleVectorInst &SVI) {\n   if (match(RHS, m_Constant())) {\n     if (auto *SI = dyn_cast<SelectInst>(LHS)) {\n       // We cannot do this fold for elementwise select since ShuffleVector is\n-      // not elementwise.\n-      if (SI->getCondition()->getType()->isIntegerTy()) {\n+      // not elementwise. Only safe if the shuffle extracts exclusively from LHS.\n+      if (SI->getCondition()->getType()->isIntegerTy() &&\n+          (isShuffleExtractingFromLHS(SVI, Mask) || match(RHS, m_Poison()))) {\n         if (Instruction *I = FoldOpIntoSelect(SVI, SI))\n           return I;\n       }\n"
+  ]
+}

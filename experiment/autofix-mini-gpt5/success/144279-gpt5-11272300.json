@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "144279",
+    "model": "gpt-5",
+    "driver": "openai-generic",
+    "stats": "/tmp/144279-gpt5-11272300.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Analysis/ConstantFolding.cpp b/llvm/lib/Analysis/ConstantFolding.cpp\nindex 2b7a438a9ef0..5f83ec10fe24 100644\n--- a/llvm/lib/Analysis/ConstantFolding.cpp\n+++ b/llvm/lib/Analysis/ConstantFolding.cpp\n@@ -443,7 +443,7 @@ bool ReadDataFromGlobal(Constant *C, uint64_t ByteOffset, unsigned char *CurPtr,\n     const APInt &Val = CI->getValue();\n     unsigned IntBytes = unsigned(CI->getBitWidth()/8);\n \n-    for (unsigned i = 0; i != BytesLeft && ByteOffset != IntBytes; ++i) {\n+    for (unsigned i = 0; i != BytesLeft && ByteOffset < IntBytes; ++i) {\n       unsigned n = ByteOffset;\n       if (!DL.isLittleEndian())\n         n = IntBytes - n - 1;\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 30257,
+  "output_tokens": 3683,
+  "cached_tokens": 11648,
+  "total_tokens": 33940,
+  "chat_rounds": 5,
+  "total_time_sec": 110.3946578502655,
+  "trans_point": [
+    "llvm/lib/Analysis/ConstantFolding.cpp",
+    "(anonymous namespace)::ReadDataFromGlobal",
+    450
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Analysis/ConstantFolding.cpp",
+      446,
+      452
+    ]
+  ],
+  "reason_thou": "1. Understanding the Issue:\nThe crash occurs during instsimplify when folding a load from a constant initializer. Specifically, the reproducer loads an i8 from a GEP that points to byte offset 6 of a global struct { i40, i8 } with initializer { i40 0, i8 1 }. The instsimplify pass attempts to constant-fold the load, which leads into ConstantFolding.cpp's ReadDataFromGlobal(). The assertion in APInt::extractBits indicates an attempt to extract bits beyond the bitwidth of the APInt (40 bits).\n\n2. Analyzing opt's Log:\nThe backtrace shows the first transformation occurs inside ReadDataFromGlobal(), called via FoldReinterpretLoadFromConst -> ConstantFoldLoadFromConstPtr -> simplifyLoadInst. The debug state at frame 2 shows:\n- C is a ConstantInt of type i40 with value 0.\n- ByteOffset = 6\n- IntBytes = 5 (40 bits / 8)\n- DataLayout is little-endian.\n- BytesLeft = 1.\nThe code path is in the ConstantInt branch of ReadDataFromGlobal.\n\n3. Root Cause Analysis:\nIn the ConstantInt branch, the loop is:\n  for (unsigned i = 0; i != BytesLeft && ByteOffset != IntBytes; ++i) {\n    unsigned n = ByteOffset;\n    if (!DL.isLittleEndian())\n      n = IntBytes - n - 1;\n    CurPtr[i] = Val.extractBits(8, n * 8).getZExtValue();\n    ++ByteOffset;\n  }\nHere, the guard uses 'ByteOffset != IntBytes', which permits ByteOffset > IntBytes to enter the loop. In the reproducer, ByteOffset is 6 while IntBytes is 5, so the condition is true and the loop executes with n = 6, leading to extractBits(8, 48) on a 40-bit APInt, triggering the assertion. The correct semantics are to read only while ByteOffset < IntBytes. Any offset beyond the integer's allocated size should be treated as out-of-bounds for this element (i.e., no bytes to read, and since CurPtr is zero-initialized, returning true is fine). This off-by-one/inequality bug causes the illegal extract.\n\n4. Proposed Edit Point(s):\n- File: llvm/lib/Analysis/ConstantFolding.cpp, lines 446-452.\nChange the loop condition from 'ByteOffset != IntBytes' to 'ByteOffset < IntBytes'. This ensures we only extract bits within the valid range of the integer constant.\n\nBefore:\n  for (unsigned i = 0; i != BytesLeft && ByteOffset != IntBytes; ++i) {\n    unsigned n = ByteOffset;\n    if (!DL.isLittleEndian())\n      n = IntBytes - n - 1;\n    CurPtr[i] = Val.extractBits(8, n * 8).getZExtValue();\n    ++ByteOffset;\n  }\n\nAfter:\n  for (unsigned i = 0; i != BytesLeft && ByteOffset < IntBytes; ++i) {\n    unsigned n = ByteOffset;\n    if (!DL.isLittleEndian())\n      n = IntBytes - n - 1;\n    CurPtr[i] = Val.extractBits(8, n * 8).getZExtValue();\n    ++ByteOffset;\n  }\n\nThis change prevents attempting to read bytes beyond the available bytes of the integer constant, aligning with the earlier struct/vector handling that already bounds reads by element size.\n\n5. Conclusion:\nThe assertion arises from an incorrect loop guard in ReadDataFromGlobal for ConstantInt, allowing out-of-bounds byte extraction when ByteOffset > IntBytes. Changing the condition to ByteOffset < IntBytes fixes the crash by restricting reads to the valid byte range. This will allow instsimplify's constant folding to either read valid bytes or return zero for padding/out-of-range cases, avoiding UB and assertions.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Analysis/ConstantFolding.cpp b/llvm/lib/Analysis/ConstantFolding.cpp\nindex 2b7a438a9ef0..5f83ec10fe24 100644\n--- a/llvm/lib/Analysis/ConstantFolding.cpp\n+++ b/llvm/lib/Analysis/ConstantFolding.cpp\n@@ -443,7 +443,7 @@ bool ReadDataFromGlobal(Constant *C, uint64_t ByteOffset, unsigned char *CurPtr,\n     const APInt &Val = CI->getValue();\n     unsigned IntBytes = unsigned(CI->getBitWidth()/8);\n \n-    for (unsigned i = 0; i != BytesLeft && ByteOffset != IntBytes; ++i) {\n+    for (unsigned i = 0; i != BytesLeft && ByteOffset < IntBytes; ++i) {\n       unsigned n = ByteOffset;\n       if (!DL.isLittleEndian())\n         n = IntBytes - n - 1;\n"
+  ]
+}

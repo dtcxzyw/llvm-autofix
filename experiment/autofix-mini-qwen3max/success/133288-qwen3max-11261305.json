@@ -1,0 +1,35 @@
+{
+  "command": {
+    "issue": "133288",
+    "model": "qwen3-max",
+    "driver": "openai-generic",
+    "stats": "/tmp/133288-qwen3max-11261305.json",
+    "debug": true
+  },
+  "patch": "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex f29fb6780253..0c43977c5bec 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -13359,8 +13359,10 @@ InstructionCost BoUpSLP::getSpillCost() {\n       if (Op->isGather()) {\n         assert(Entry->getOpcode() == Instruction::PHI &&\n                \"Expected phi node only.\");\n-        OpParent = cast<PHINode>(Entry->getMainOp())\n-                       ->getIncomingBlock(Op->UserTreeIndex.EdgeIdx);\n+        PHINode *Phi = cast<PHINode>(Entry->getMainOp());\n+        if (Op->UserTreeIndex.EdgeIdx >= Phi->getNumIncomingValues())\n+          continue;\n+        OpParent = Phi->getIncomingBlock(Op->UserTreeIndex.EdgeIdx);\n         OpLastInst = OpParent->getTerminator();\n         for (Value *V : Op->Scalars) {\n           auto *Inst = dyn_cast<Instruction>(V);\n",
+  "error": null,
+  "errmsg": null,
+  "traceback": null,
+  "input_tokens": 347049,
+  "output_tokens": 1976,
+  "cached_tokens": 97920,
+  "total_tokens": 349025,
+  "chat_rounds": 26,
+  "total_time_sec": 193.30562710762024,
+  "trans_point": [
+    "llvm/include/llvm/IR/BasicBlock.h",
+    "llvm::BasicBlock::getTerminator",
+    241
+  ],
+  "edit_points": [
+    [
+      "llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp",
+      13362,
+      13364
+    ]
+  ],
+  "reason_thou": "1. **Understanding the Issue**: The crash occurs in `getSpillCost()` when trying to access the terminator of a BasicBlock that has an invalid pointer value (0x81). This happens when the SLP vectorizer processes PHI nodes with insufficient incoming values.\n\n2. **Analyzing `opt`'s Log**: The debug log shows the SLP vectorizer is attempting to vectorize a bundle containing PHI nodes. Specifically, it's processing `%phi = phi i32 [ 0, %bb4 ]` which has only one incoming value from block `%bb4`. However, the code assumes there are multiple incoming blocks and tries to access an incoming block at index `Op->UserTreeIndex.EdgeIdx` which is 1, but the PHI node only has one operand (index 0).\n\n3. **Root Cause Analysis**: The issue is in the `getSpillCost()` function around lines 13362-13364. When processing gather operations for PHI nodes, the code retrieves the incoming block using `Op->UserTreeIndex.EdgeIdx` without validating that this index is within the bounds of the PHI node's actual incoming values. In this case, the PHI node `%phi` has only 1 incoming value (so valid indices are 0), but `EdgeIdx` is 1, causing `getIncomingBlock(1)` to return an invalid/corrupted pointer (0x81), which then causes a segmentation fault when `getTerminator()` is called on it.\n\n4. **Proposed Edit Point(s)**\n   + The fix should add a bounds check before accessing the incoming block of a PHI node. We need to ensure that `Op->UserTreeIndex.EdgeIdx` is less than the number of incoming values in the PHI node before calling `getIncomingBlock()`.\n\n5. **Conclusion**: The fix adds a safety check to prevent accessing out-of-bounds incoming blocks in PHI nodes during spill cost calculation. This will prevent the segmentation fault and allow the SLP vectorizer to handle malformed or edge-case PHI nodes gracefully.",
+  "test_traj": [
+    "diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\nindex f29fb6780253..0c43977c5bec 100644\n--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n+++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp\n@@ -13359,8 +13359,10 @@ InstructionCost BoUpSLP::getSpillCost() {\n       if (Op->isGather()) {\n         assert(Entry->getOpcode() == Instruction::PHI &&\n                \"Expected phi node only.\");\n-        OpParent = cast<PHINode>(Entry->getMainOp())\n-                       ->getIncomingBlock(Op->UserTreeIndex.EdgeIdx);\n+        PHINode *Phi = cast<PHINode>(Entry->getMainOp());\n+        if (Op->UserTreeIndex.EdgeIdx >= Phi->getNumIncomingValues())\n+          continue;\n+        OpParent = Phi->getIncomingBlock(Op->UserTreeIndex.EdgeIdx);\n         OpLastInst = OpParent->getTerminator();\n         for (Value *V : Op->Scalars) {\n           auto *Inst = dyn_cast<Instruction>(V);\n"
+  ]
+}
