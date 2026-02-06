@@ -1,0 +1,78 @@
+import json
+import os
+import sys
+
+import autofix.llvm.llvm_helper as llvm_helper
+
+max_build_jobs = os.cpu_count()
+
+
+def verify_issue(issue):
+  path = os.path.join(llvm_helper.dataset_dir, issue)
+  with open(path) as f:
+    data = json.load(f)
+  if data.get("verified", False):
+    return
+  print(data["issue"]["title"])
+  base_commit = data["base_commit"]
+  llvm_helper.reset(base_commit)
+  print("Stage 1 build")
+  res, log = llvm_helper.build(max_build_jobs)
+  if not res:
+    print(log)
+    raise RuntimeError("Failed to build")
+  bug_type = data["bug_type"]
+  print("Stage 1 verify")
+  res, log = llvm_helper.verify_test_group(
+    repro=True, input=data["tests"], type=bug_type
+  )
+  if not res:
+    print(json.dumps(log, indent=2))
+    raise RuntimeError("Failed to reproduce")
+  llvm_helper.apply(data["patch"])
+  print("Stage 2 build")
+  res, log = llvm_helper.build(max_build_jobs)
+  if not res:
+    print(log)
+    raise RuntimeError("Failed to build")
+  print("Stage 2 verify")
+  res, log = llvm_helper.verify_test_group(
+    repro=False, input=data["tests"], type=bug_type
+  )
+  if not res:
+    print(json.dumps(llvm_helper.get_first_failed_test(log), indent=2))
+    raise RuntimeError("Failed to fix")
+  print("Stage 2 lit check")
+  res, log = llvm_helper.verify_lit(
+    test_commit=data.get("test_commit", data["hints"]["fix_commit"]),
+    dirs=data["lit_test_dir"],
+    max_test_jobs=max_build_jobs,
+    test_commit_checkout_changed_files_only=data.get(
+      "test_commit_checkout_changed_files_only", False
+    ),
+  )
+  if not res:
+    print(log)
+    raise RuntimeError("Lit check failure")
+  data["verified"] = True
+
+  with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+
+
+task_list = []
+if len(sys.argv) == 2:
+  task_list = [sys.argv[1] + ".json"]
+else:
+  for name in os.listdir(llvm_helper.dataset_dir):
+    if name.endswith(".json"):
+      task_list.append(name)
+task_list.sort()
+
+for idx, task in enumerate(task_list):
+  print("Verifying", idx + 1, task.removesuffix(".json"))
+  try:
+    verify_issue(task)
+  except Exception as e:
+    print("Failed:", e)
