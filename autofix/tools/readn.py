@@ -11,7 +11,7 @@ class ReadNTool(FuncToolBase, LlvmDirMixin):
 
   def spec(self) -> FuncToolSpec:
     return FuncToolSpec(
-      f"read{self.n}",
+      "read",
       f"Read the next {self.n} lines of content of a file starting a specific line.",
       [
         FuncToolSpec.Param(

@@ -12,7 +12,7 @@ class GrepNTool(FuncToolBase):
 
   def spec(self) -> FuncToolSpec:
     return FuncToolSpec(
-      f"grep{self.n}",
+      "grep",
       f"Print lines that match a specified pattern in the llvm/ directory. This is exactly the same `grep` command in Linux, but with results being sorted alphabetically, and only returns {self.n} results starting from a given index.",
       [
         FuncToolSpec.Param(

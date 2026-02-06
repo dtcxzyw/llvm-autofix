@@ -12,7 +12,7 @@ class FindNTool(FuncToolBase, LlvmDirMixin):
 
   def spec(self) -> FuncToolSpec:
     return FuncToolSpec(
-      f"find{self.n}",
+      "find",
       f"Find all files following a specified pattern (e.g., `src/**/*.cpp`, `**/*.h`) in the specified directory. The results will be sorted alphabetically and only {self.n} results will be returned starting from a given index.",
       [
         FuncToolSpec.Param(

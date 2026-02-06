@@ -337,10 +337,10 @@ def patch_and_fix(
     # TODO: Remove the hardcoded tool names
     [
       # Exlore codebase tools
-      f"list{MAX_ROLS_PER_TC}",
-      f"read{MAX_ROLS_PER_TC}",
-      f"find{MAX_ROLS_PER_TC}",
-      f"rg{MAX_ROLS_PER_TC}",
+      "list",
+      "read",
+      "find",
+      "ripgrep",
       "code",
       # Documentation tools
       "docs",
@@ -425,10 +425,10 @@ def run_mini_agent(
     # TODO: Remove the hardcoded tool names
     [
       # Explore codebase tools
-      f"list{MAX_ROLS_PER_TC}",
-      f"read{MAX_ROLS_PER_TC}",
-      f"find{MAX_ROLS_PER_TC}",
-      f"rg{MAX_ROLS_PER_TC}",
+      "list",
+      "read",
+      "find",
+      "ripgrep",
       "code",
       # Documentation tools
       "docs",

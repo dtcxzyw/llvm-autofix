@@ -11,7 +11,7 @@ class ListNTool(FuncToolBase, LlvmDirMixin):
 
   def spec(self) -> FuncToolSpec:
     return FuncToolSpec(
-      f"list{self.n}",
+      "list",
       f"List up to {self.n} contents of a directory. All contents of the directory will be sorted alphabetically and only up to {self.n} of them are returned starting from a given index.",
       [
         FuncToolSpec.Param(
