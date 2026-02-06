@@ -4,7 +4,7 @@ from autofix.lms.tool import FuncToolCallException
 
 
 class LlvmDirMixin:
-  def check_llvm_dir(self, subdir: str) -> Path:
+  def check_llvm_dir(self, subdir: str, should_exist=True) -> Path:
     """
     Check if the given directory is a subdirectory of the llvm/ directory.
     Raises FuncToolCallException if the directory is not valid.
@@ -18,13 +18,15 @@ class LlvmDirMixin:
       raise FuncToolCallException(
         "The directory path must be relative to the llvm/ directory. Please provide a valid relative path."
       )
+    if not should_exist:
+      return full_path
     if not full_path.exists():
       raise FuncToolCallException(f"The directory {subdir} does not exist.")
     if not full_path.is_dir():
       raise FuncToolCallException(f"The path {subdir} is not a directory.")
     return full_path
 
-  def check_llvm_file(self, file: str) -> Path:
+  def check_llvm_file(self, file: str, should_exist=True) -> Path:
     """
     Check if the given file is a valid file in the llvm directory.
     Raises FuncToolCallException if the file is not valid.
@@ -38,6 +40,8 @@ class LlvmDirMixin:
       raise FuncToolCallException(
         "The file path must be relative to the llvm/ directory. Please provide a valid relative path."
       )
+    if not should_exist:
+      return full_path
     if not full_path.exists():
       raise FuncToolCallException(f"The file {file} does not exist.")
     if not full_path.is_file():
