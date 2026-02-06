@@ -2,7 +2,7 @@ from autofix.llvm.debugger import DebuggerBase
 from autofix.lms.tool import FuncToolBase, FuncToolCallException, FuncToolSpec
 
 
-class DebuggerTool(FuncToolBase):
+class DebugTool(FuncToolBase):
   def __init__(self, debugger: DebuggerBase):
     self.debugger = debugger
 
