@@ -32,12 +32,12 @@ from autofix.tools.docs import DocsTool
 from autofix.tools.edit import EditTool
 from autofix.tools.eval import EvalTool
 from autofix.tools.findn import FindNTool
-from autofix.tools.grepn import GrepNTool
 from autofix.tools.langref import LangRefTool
 from autofix.tools.listn import ListNTool
 from autofix.tools.preview import PreviewTool
 from autofix.tools.readn import ReadNTool
 from autofix.tools.reset import ResetTool
+from autofix.tools.ripgrepn import RipgrepNTool
 from autofix.tools.stop import StopTool
 from autofix.tools.test import TestTool
 
@@ -340,7 +340,7 @@ def patch_and_fix(
       f"list{MAX_ROLS_PER_TC}",
       f"read{MAX_ROLS_PER_TC}",
       f"find{MAX_ROLS_PER_TC}",
-      f"grep{MAX_ROLS_PER_TC}",
+      f"rg{MAX_ROLS_PER_TC}",
       "code",
       # Documentation tools
       "docs",
@@ -428,7 +428,7 @@ def run_mini_agent(
       f"list{MAX_ROLS_PER_TC}",
       f"read{MAX_ROLS_PER_TC}",
       f"find{MAX_ROLS_PER_TC}",
-      f"grep{MAX_ROLS_PER_TC}",
+      f"rg{MAX_ROLS_PER_TC}",
       "code",
       # Documentation tools
       "docs",
@@ -588,7 +588,7 @@ def get_tool_list(fixenv: Environment, llvm: LLVM, debugger: DebuggerBase):
   return [
     # General tools
     (FindNTool(llvm_dir, n=MAX_ROLS_PER_TC), MAX_TCS_GET_CONTEXT),
-    (GrepNTool(llvm_dir, n=MAX_ROLS_PER_TC), MAX_TCS_GET_CONTEXT),
+    (RipgrepNTool(llvm_dir, n=MAX_ROLS_PER_TC), MAX_TCS_GET_CONTEXT),
     (ListNTool(llvm_dir, n=MAX_ROLS_PER_TC), MAX_TCS_GET_CONTEXT),
     (ReadNTool(llvm_dir, n=MAX_ROLS_PER_TC), MAX_TCS_GET_CONTEXT),
     # FIXME: Redesign the format of the edit tool to avoid the mismatch due to whitespaces

@@ -16,6 +16,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         wget \
         zip \
         unzip \
+        ripgrep \
         # We use Python 3.12 as the gdb in Ubuntu 24.04 is using the version.
         python3.12 \
         python3.12-dev \
