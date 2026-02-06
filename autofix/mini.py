@@ -27,7 +27,7 @@ from autofix.llvm.llvm_helper import (
 )
 from autofix.lms.agent import AgentBase
 from autofix.tools.code import CodeTool
-from autofix.tools.debugger import DebuggerTool
+from autofix.tools.debug import DebugTool
 from autofix.tools.docs import DocsTool
 from autofix.tools.edit import EditTool
 from autofix.tools.eval import EvalTool
@@ -603,7 +603,7 @@ def get_tool_list(fixenv: Environment, llvm: LLVM, debugger: DebuggerBase):
     (PreviewTool(fixenv), MAX_TCS_EDIT_AND_TEST),
     (TestTool(fixenv, ALLOW_MODIFY_ASSERTS), MAX_TCS_EDIT_AND_TEST),
     # Debugging tools
-    (DebuggerTool(debugger), MAX_TCS_GET_CONTEXT),
+    (DebugTool(debugger), MAX_TCS_GET_CONTEXT),
     (EvalTool(debugger), MAX_TCS_GET_CONTEXT),
     # Stop the agent process
     (StopTool(llvm_dir, MIN_EDIT_POINT_LINES), MAX_TCS_GET_CONTEXT),
