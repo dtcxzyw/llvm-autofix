@@ -4,7 +4,29 @@ from subprocess import CalledProcessError
 
 from autofix.lms.tool import FuncToolBase, FuncToolCallException, FuncToolSpec
 from autofix.tools.llvm_mixins import LlvmDirMixin
-from autofix.utils import cmdline
+from autofix.utils import bashlex, cmdline
+
+# TODO: add other tools that do not require permission
+FORBIDDEN_TOOLS = [
+  "which",
+  "sudo",
+  "rm",
+  "curl",
+  "wget",
+  "git",
+  "ssh",
+  "scp",
+  "ftp",
+  "telnet",
+  "ping",
+  "traceroute",
+  "nslookup",
+  "dig",
+  "nmap",
+  "apt",
+  "apt-get",
+  "dpkg",
+]
 
 
 class BashTool(FuncToolBase, LlvmDirMixin):
@@ -39,6 +61,11 @@ class BashTool(FuncToolBase, LlvmDirMixin):
       raise FuncToolCallException(
         "No command provided. Please specify the bash command to execute."
       )
+
+    # Check for forbidden tools in the command to prevent unauthorized actions.
+    for cmd in bashlex.get_commands(command):
+      if cmd in FORBIDDEN_TOOLS:
+        raise FuncToolCallException("You do not have permission to use tool {subtool}")
 
     # We use 'bash -c' to ensure full shell support (pipes, redirects, etc.)
     bash_cmd = f"bash -c {shlex.quote(command)}"
