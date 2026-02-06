@@ -14,7 +14,7 @@ show_usage() {
     echo "Usage: $0 <agent_name> [-D <model_driver>] [-m <model_name>] [-o <logs_dir>] [-R] [--help]"
     echo "  <agent_name>  Specify the agent name (autofix.mini or autofix.mswe)"
     echo "  -B    Specify the benchmark name (live or full; default: live)"
-    echo "  -D    Specify the model driver (openai, openai-generic, or anthropic; default: openai-generic)"
+    echo "  -D    Specify the model driver (openai or anthropic; default: openai)"
     echo "  -m    Specify the model name (default: gpt-5)"
     echo "  -o    Specify directory saving logs (default: benchout/)"
     echo "  -R    Reset everything otherwise continue from last benchmarking state (default: false)"
@@ -39,7 +39,7 @@ if [[ "$AGENT_NAME" != "autofix.mini" && "$AGENT_NAME" != "autofix.mswe" ]]; the
     exit 1
 fi
 
-MODEL_DRIVER="openai-generic"
+MODEL_DRIVER="openai"
 MODEL_NAME="gpt-5"
 BENCH_NAME="live"
 LOGGING_DIR="$LLVM_AUTOFIX_HOME_DIR/benchout"
@@ -58,8 +58,8 @@ while [[ $# -gt 0 ]]; do
             ;;
         -D|--model-driver)
             MODEL_DRIVER="$2"
-            if [[ "$MODEL_DRIVER" != "openai" && "$MODEL_DRIVER" != "openai-generic" && "$MODEL_DRIVER" != "anthropic" ]]; then
-                echo "Error: MODEL_DRIVER must be one of 'openai', 'openai-generic', or 'anthropic'"
+            if [[ "$MODEL_DRIVER" != "openai" && "$MODEL_DRIVER" != "anthropic" ]]; then
+                echo "Error: MODEL_DRIVER must be one of 'openai' or 'anthropic'"
                 exit 1
             fi
             shift 2

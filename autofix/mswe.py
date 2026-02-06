@@ -33,9 +33,9 @@ from autofix.lms.agent import ReachRoundLimit, ReachTokenLimit
 from autofix.lms.tool import FuncToolCallException
 from autofix.mini import (
   ADDITIONAL_CMAKE_FLAGS,
+  AGENT_MAX_CHAT_ROUNDS,
+  AGENT_MAX_CONSUMED_TOKENS,
   ALLOW_MODIFY_ASSERTS,
-  MAX_CHAT_ROUNDS,
-  MAX_CONSUMED_TOKENS,
   MAX_TCS_EDIT_AND_TEST,
   NoAvailablePatchFound,
   ReachToolBudget,
@@ -110,7 +110,7 @@ class MyModel(LitellmModel):
         "api_key": os.environ.get("LLVM_AUTOFIX_LM_API_KEY"),
         "temperature": 0,
         "top_p": 0.95,
-        "max_tokens": 4096,
+        "max_completion_tokens": 4096,
         "drop_params": True,
       },
       cost_tracking="ignore_errors",  # Ignore cost tracking errors, we have our own
@@ -186,7 +186,9 @@ class MyAgent(DefaultAgent):
   def __init__(self, model: Model, stats: RunStats, workdir: str) -> None:
     super().__init__(
       model=MyModel(
-        model=model, token_limit=MAX_CONSUMED_TOKENS, round_limit=MAX_CHAT_ROUNDS
+        model=model,
+        token_limit=AGENT_MAX_CONSUMED_TOKENS,
+        round_limit=AGENT_MAX_CHAT_ROUNDS,
       ),
       env=MyEnvironment(cwd=workdir),
       # IMPORTANT: Configurations except for `agent` should be configured programmatically.

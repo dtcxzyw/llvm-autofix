@@ -47,8 +47,12 @@ from autofix.tools.test import TestTool
 
 # We restrict the agent to chat at most 500 rounds for each run
 # and consume at most 5 million tokens among all runs.
-MAX_CHAT_ROUNDS = 500
-MAX_CONSUMED_TOKENS = 5_000_000
+AGENT_TEMPERATURE = 0
+AGENT_TOP_P = 0.95
+AGENT_MAX_COMPLETION_TOKENS = 8092
+AGENT_REASONINT_EFFORT = "NOT_GIVEN"
+AGENT_MAX_CHAT_ROUNDS = 500
+AGENT_MAX_CONSUMED_TOKENS = 5_000_000
 # We give context gathering tools more budget and restrict the models
 # to be careful and think twice when they are editing and testing.
 MAX_TCS_GET_CONTEXT = 250
@@ -350,7 +354,6 @@ def patch_and_fix(
     ],
     response_handler=response_callback,
     tool_call_handler=tool_call_callback,
-    round_limit=MAX_CHAT_ROUNDS,
   )
 
 
@@ -438,7 +441,6 @@ def run_mini_agent(
     ],
     response_handler=response_handler,
     tool_call_handler=tool_call_handler,
-    round_limit=MAX_CHAT_ROUNDS,
   )
 
   # Parse the response to get potential edit points
@@ -666,7 +668,7 @@ def parse_args():
     type=str,
     default="openai",
     help="The LLM api to use (default: openai).",
-    choices=["openai", "anthropic", "openai-generic"],
+    choices=["openai", "anthropic"],
   )
   parser.add_argument(
     "--stats",
@@ -704,23 +706,24 @@ def main():
   if args.driver == "openai":
     from autofix.lms.openai import OpenAIAgent
 
-    agent = OpenAIAgent(
-      args.model, token_limit=MAX_CONSUMED_TOKENS, debug_mode=args.debug
-    )
+    agent_class = OpenAIAgent
   elif args.driver == "anthropic":
     from autofix.lms.anthropic import ClaudeAgent
 
-    agent = ClaudeAgent(
-      args.model, token_limit=MAX_CONSUMED_TOKENS, debug_mode=args.debug
-    )
-  elif args.driver == "openai-generic":
-    from autofix.lms.openai_generic import GenericOpenAIAgent
-
-    agent = GenericOpenAIAgent(
-      args.model, token_limit=MAX_CONSUMED_TOKENS, debug_mode=args.debug
-    )
+    agent = ClaudeAgent
   else:
     panic(f"Unsupported LLM driver: {args.driver}")
+
+  agent = agent_class(
+    args.model,
+    temperature=AGENT_TEMPERATURE,
+    top_p=AGENT_TOP_P,
+    max_copmletion_tokens=AGENT_MAX_COMPLETION_TOKENS,
+    reasoning_effort=AGENT_REASONINT_EFFORT,
+    token_limit=AGENT_MAX_CONSUMED_TOKENS,
+    round_limit=AGENT_MAX_CHAT_ROUNDS,
+    debug_mode=args.debug,
+  )
 
   # Set up saved statistics and output
   stats_path = None

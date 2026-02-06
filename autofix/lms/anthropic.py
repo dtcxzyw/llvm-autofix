@@ -4,13 +4,19 @@ import json
 import os
 from typing import List
 
-from anthropic import NOT_GIVEN, Anthropic
+from anthropic import Anthropic, omit
+from tenacity import (
+  retry,
+  stop_after_attempt,
+  wait_random_exponential,
+)  # for exponential backoff
 
 from autofix.lms.agent import (
   AgentBase,
   ChatMessageMessage,
   ReachRoundLimit,
   ReachTokenLimit,
+  ReasoningEffort,
   ResponseHandler,
   ToolUseHandler,
 )
@@ -21,31 +27,44 @@ class ClaudeAgent(AgentBase):
     self,
     model: str,
     *,
-    temperature=0,
-    top_k=50,
-    top_p=0.95,
-    max_tokens=4096,
-    token_limit=-1,
-    debug_mode=False,
+    temperature: float = 0,
+    top_p: float = 0.95,
+    max_copmletion_tokens: int = 8092,
+    reasoning_effort: ReasoningEffort = "NOT_GIVEN",
+    token_limit: int = -1,
+    round_limit: int = -1,
+    debug_mode: bool = False,
   ):
     super().__init__(
       model,
       temperature=temperature,
-      top_k=top_k,
       top_p=top_p,
-      max_tokens=max_tokens,
+      max_copmletion_tokens=max_copmletion_tokens,
+      reasoning_effort=reasoning_effort,
       token_limit=token_limit,
+      round_limit=round_limit,
       debug_mode=debug_mode,
     )
-    token = os.environ.get("LLVM_AUTOFIX_LM_API_KEY")
-    self.client = Anthropic(api_key=token)
+    if self.reasoning_effort == "NOT_GIVEN":
+      self.reasoning_effort = omit
+      self.thinking = omit
+    elif self.reasoning_effort == "none":
+      self.thinking = "disabled"
+    else:
+      self.thinking = "adaptive"
+    api_key = os.environ.get("LLVM_AUTOFIX_LM_API_KEY")
+    base_url = os.environ.get("LLVM_AUTOFIX_LM_API_ENDPOINT") or None
+    self.client = Anthropic(api_key=api_key, base_url=base_url)
+
+  @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(3))
+  def _completion_with_backoff(self, **kwargs):
+    return self.client.messages.create(**kwargs)
 
   def run(
     self,
     activated_tools: List[str],
     response_handler: ResponseHandler,
     tool_call_handler: ToolUseHandler,
-    round_limit: int = -1,
   ) -> str:
     messages = []
     for message in self.history:
@@ -56,26 +75,28 @@ class ClaudeAgent(AgentBase):
             "content": message.content,
           }
         )
-    curr_round = -1
-    while round_limit <= 0 or curr_round < round_limit - 1:
-      curr_round += 1
-      self.chat_stats["chat_rounds"] += 1
+    while self.round_limit <= 0 or self.chat_stats["chat_rounds"] <= self.round_limit:
       self.console.print(
-        f"Executing round #{curr_round}, chat statistics so far: {self.chat_stats}"
+        f"Executing round #{self.chat_stats['chat_rounds']}, chat statistics so far: {self.chat_stats}"
       )
+      self.chat_stats["chat_rounds"] += 1
       if self.token_limit > 0 and self.chat_stats["total_tokens"] >= self.token_limit:
         raise ReachTokenLimit()
       remaining_tools = self._get_remaining_tools_from(activated_tools)
-      response = self.client.messages.create(
+      response = self._completion_with_backoff(
         model=self.model,
         messages=messages,
         temperature=self.temperature,
         top_p=self.top_p,
-        max_tokens=self.max_tokens,
+        max_tokens=self.max_completion_tokens,
+        thinking=self.thinking,
         tools=(
-          [tool.spec().render_in_claude_format() for tool in remaining_tools]
-          or NOT_GIVEN
+          [tool.spec().render_in_claude_format() for tool in remaining_tools] or omit
         ),
+        tool_choice={
+          "type": "auto",
+          "disable_parallel_tool_use": True,
+        },
       )
       self.chat_stats["input_tokens"] += response.usage.input_tokens
       self.chat_stats["cached_tokens"] += response.usage.cache_read_input_tokens
@@ -128,5 +149,5 @@ class ClaudeAgent(AgentBase):
           )
         else:
           return content
-    if curr_round == round_limit - 1:
-      raise ReachRoundLimit()
+
+    raise ReachRoundLimit()

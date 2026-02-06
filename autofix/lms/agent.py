@@ -59,27 +59,46 @@ class ReachTokenLimit(StopIteration):
     super().__init__("Reached the token limit for agent execution.")
 
 
+ReasoningEffort = Literal[
+  "NOT_GIVEN", "none", "minimal", "low", "medium", "high", "xhigh"
+]
+
+
 class AgentBase:
   def __init__(
     self,
     model: str,
     *,
-    temperature=0,
-    top_k=50,
-    top_p=0.95,
-    max_tokens=4096,
-    token_limit=-1,
-    debug_mode=False,
+    temperature: float = 0,  # Higher temperature means more randomness
+    top_p: float = 0.95,  # Top cumulative probability for nucleus sampling
+    max_copmletion_tokens: int = 8092,  # Max completion tokens (including reasoning and tool calls)
+    reasoning_effort: ReasoningEffort = "NOT_GIVEN",  # Reasoning effort level: NOT_GIVEN, none, minimal, low, medium, high, and xhigh
+    token_limit: int = -1,  # Max total tokens (including input and output) for the entire conversation.
+    round_limit: int = -1,  # Max rounds of conversation (one round includes one assistant message and tool calls)
+    debug_mode: bool = False,
   ):
     self.model = model
     self.history = []
     self.temperature = temperature
-    self.top_k = top_k
     self.top_p = top_p
-    self.max_tokens = max_tokens
+    self.max_copmletion_tokens = max_copmletion_tokens
+    self.reasoning_effort = reasoning_effort
+    assert reasoning_effort in [
+      "NOT_GIVEN",
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ], (
+      f"Invalid reasoning_effort: {reasoning_effort}; "
+      f"must be one of NOT_GIVEN, none, minimal, low, medium, high, and xhigh."
+    )
     self.tools = ToolRegistry()
     self.debug_mode = debug_mode
     self.token_limit = token_limit
+    self.round_limit = round_limit
     self.chat_stats = {
       "chat_rounds": 0,
       "input_tokens": 0,
@@ -112,10 +131,9 @@ class AgentBase:
     activated_tools: List[str],
     response_handler: ResponseHandler,
     tool_call_handler: ToolUseHandler,
-    round_limit: int = -1,
   ) -> str:
     """
-    Call to LLMs and execute all function calls until the model stops or reaches the round limit.
+    Call to LLMs and execute all function calls until the model stops.
     """
     ...
 
