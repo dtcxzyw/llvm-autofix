@@ -1,7 +1,3 @@
-# Implementation of OpenAI-compatible agents (Chat Completions API).
-# Unlike the OpenAIAgent, this agent does not use the native OpenAI API for tool calling.
-# Instead, it uses system prompts to describe the tools.
-
 import os
 from typing import Dict, List, Tuple
 
@@ -11,7 +7,7 @@ from autofix.lms.agent import ReasoningEffort
 from autofix.lms.generic import GenericAgent
 
 
-class OpenAIGenericAgent(GenericAgent):
+class GPTGenericAgent(GenericAgent):
   def __init__(
     self,
     model: str,
