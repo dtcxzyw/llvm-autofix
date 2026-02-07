@@ -3,6 +3,12 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Callable, List, Literal, Tuple, Union
 
+from tenacity import (
+  retry,
+  stop_after_attempt,
+  wait_random_exponential,
+)  # for exponential backoff
+
 from autofix.base.console import get_boxed_console
 from autofix.llvm.llvm_helper import remove_path_from_output
 from autofix.lms.tool import FuncToolBase, ToolRegistry
@@ -201,3 +207,14 @@ class AgentBase:
       )
     )
     return remaining
+
+  @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(3))
+  def _completion_api_with_backoff(self, **kwargs):
+    return self._completion_api(**kwargs)
+
+  @abstractmethod
+  def _completion_api(self, **kwargs):
+    """
+    Call the provider API to get the completion.
+    """
+    ...

@@ -5,11 +5,6 @@ import os
 from typing import List
 
 from openai import NOT_GIVEN, OpenAI
-from tenacity import (
-  retry,
-  stop_after_attempt,
-  wait_random_exponential,
-)  # for exponential backoff
 
 from autofix.lms.agent import (
   AgentBase,
@@ -92,10 +87,6 @@ class OpenAIAgent(AgentBase):
 
     return messages
 
-  @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(3))
-  def _completion_with_backoff(self, **kwargs):
-    return self.client.chat.completions.create(**kwargs)
-
   def run(
     self,
     activated_tools: List[str],
@@ -109,8 +100,9 @@ class OpenAIAgent(AgentBase):
       self.chat_stats["chat_rounds"] += 1
       if self.token_limit > 0 and self.chat_stats["total_tokens"] >= self.token_limit:
         raise ReachTokenLimit()
+
       remaining_tools = self._get_remaining_tools_from(activated_tools)
-      completion = self._completion_with_backoff(
+      completion = self._completion_api_with_backoff(
         model=self.model,
         messages=self.render_message_list(),
         temperature=self.temperature,
@@ -125,6 +117,7 @@ class OpenAIAgent(AgentBase):
         parallel_tool_calls=False,
       )
 
+      # Update tokens that we have consumed
       if completion.usage:
         self.chat_stats["input_tokens"] += completion.usage.prompt_tokens
         if completion.usage.prompt_tokens_details:
@@ -164,3 +157,6 @@ class OpenAIAgent(AgentBase):
         self.append_function_tool_call_output(call_id=tool_call.id, result=result)
 
     raise ReachRoundLimit()
+
+  def _completion_api(self, **kwargs):
+    return self.client.chat.completions.create(**kwargs)

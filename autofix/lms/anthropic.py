@@ -5,11 +5,6 @@ import os
 from typing import List
 
 from anthropic import Anthropic, omit
-from tenacity import (
-  retry,
-  stop_after_attempt,
-  wait_random_exponential,
-)  # for exponential backoff
 
 from autofix.lms.agent import (
   AgentBase,
@@ -56,10 +51,6 @@ class ClaudeAgent(AgentBase):
     base_url = os.environ.get("LLVM_AUTOFIX_LM_API_ENDPOINT") or None
     self.client = Anthropic(api_key=api_key, base_url=base_url)
 
-  @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(3))
-  def _completion_with_backoff(self, **kwargs):
-    return self.client.messages.create(**kwargs)
-
   def run(
     self,
     activated_tools: List[str],
@@ -82,8 +73,9 @@ class ClaudeAgent(AgentBase):
       self.chat_stats["chat_rounds"] += 1
       if self.token_limit > 0 and self.chat_stats["total_tokens"] >= self.token_limit:
         raise ReachTokenLimit()
+
       remaining_tools = self._get_remaining_tools_from(activated_tools)
-      response = self._completion_with_backoff(
+      response = self._completion_api_with_backoff(
         model=self.model,
         messages=messages,
         temperature=self.temperature,
@@ -98,6 +90,8 @@ class ClaudeAgent(AgentBase):
           "disable_parallel_tool_use": True,
         },
       )
+
+      # Update tokens that we have consumed
       self.chat_stats["input_tokens"] += response.usage.input_tokens
       self.chat_stats["cached_tokens"] += response.usage.cache_read_input_tokens
       self.chat_stats["output_tokens"] += response.usage.output_tokens
@@ -105,6 +99,7 @@ class ClaudeAgent(AgentBase):
         response.usage.input_tokens + response.usage.output_tokens
       )
       messages.append({"role": "assistant", "content": response.content})
+
       if response.stop_reason == "tool_use":
         for content in response.content:
           if content.type == "text":
@@ -152,3 +147,6 @@ class ClaudeAgent(AgentBase):
           return content
 
     raise ReachRoundLimit()
+
+  def _completion_api(self, **kwargs):
+    return self.client.messages.create(**kwargs)
