@@ -65,7 +65,9 @@ class BashTool(FuncToolBase, LlvmDirMixin):
     # Check for forbidden tools in the command to prevent unauthorized actions.
     for cmd in bashlex.get_commands(command):
       if cmd in FORBIDDEN_TOOLS:
-        raise FuncToolCallException("You do not have permission to use tool {subtool}")
+        raise FuncToolCallException(
+          f"You do not have permission to use command `{cmd}`."
+        )
 
     # We use 'bash -c' to ensure full shell support (pipes, redirects, etc.)
     bash_cmd = f"bash -c {shlex.quote(command)}"
@@ -80,8 +82,8 @@ class BashTool(FuncToolBase, LlvmDirMixin):
       # Check the length of the output, if is too long, we retain
       # the header and footer and truncate the middle part.
       if len(output) > self.max_output_length:
-        header = output[:500]  # Keep the first 500 characters
-        footer = output[-500:]  # Keep the last 500 characters
+        header = output[: self.max_output_length // 2]  # Keep the first half characters
+        footer = output[-self.max_output_length // 2 :]  # Keep the last half characters
         output = header + "\n...[output truncated]...\n" + footer
       return output
     except CalledProcessError as e:

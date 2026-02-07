@@ -278,7 +278,7 @@ class MyAgent(DefaultAgent):
     for subtool in bashlex.get_commands(tool):
       if subtool in FORBIDDEN_TOOLS:
         return {
-          "output": f"Error: You do not have permission to use tool {subtool}",
+          "output": f"Error: You do not have permission to use command `{subtool}`.",
           "returncode": 1,
         }
     if tool == "submit-patch":
