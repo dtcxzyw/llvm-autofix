@@ -366,7 +366,7 @@ def main():
     if not agent.fixenv.use_entire_regression_test_suite:
       console.print("Post-validating the generated patch ...")
       agent.fixenv.use_entire_regression_test_suite = True
-      passed, errmsg = agent.fixenv.check_regression()
+      passed, errmsg = agent.fixenv.check_midend()
       if passed:
         passed, errmsg = agent.fixenv.check_regression_diff()
       agent.fixenv.use_entire_regression_test_suite = False

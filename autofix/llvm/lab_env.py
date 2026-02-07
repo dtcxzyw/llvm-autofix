@@ -120,6 +120,9 @@ class Environment:
     )
 
   def check_fast(self):
+    """
+    Run the reproducer test(s) only.
+    """
     with TimeCompensationGuard(self):
       self.fast_check_count += 1
       res, reason = self.build()
@@ -133,7 +136,10 @@ class Environment:
       self.fast_check_pass = True
       return (True, log)
 
-  def check_regression(self):
+  def check_midend(self):
+    """
+    Run the middle-end regression (Transforms/ and Analysis/) tests.
+    """
     with TimeCompensationGuard(self):
       self.full_check_count += 1
       res, reason = self.build()
@@ -153,6 +159,9 @@ class Environment:
   # Please disable ASLR and compile LLVM with -DLLVM_ABI_BREAKING_CHECKS=FORCE_OFF
   # to ensure deterministic output.
   def check_regression_diff(self, seeds_dir: Optional[str] = None):
+    """
+    Run the regression tests and check the output bitcode with llvm-diff.
+    """
     with open("/proc/sys/kernel/randomize_va_space", "r") as f:
       if int(f.read().strip()) != 0:
         print("Warning: ASLR is enabled. Please disable it for deterministic output.")
@@ -225,7 +234,10 @@ class Environment:
         return (True, "success")
       return (False, f"failure ({valid_count}/{len(gold_result)})")
 
-  def check_full(self):
+  def check_pass(self):
+    """
+    Run the pass-specific regression tests.
+    """
     with TimeCompensationGuard(self):
       self.full_check_count += 1
       res, reason = self.build()

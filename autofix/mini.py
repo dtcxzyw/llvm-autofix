@@ -912,7 +912,7 @@ def main():
       if not env.use_entire_regression_test_suite:
         console.print("Post-validating the generated patch ...")
         env.use_entire_regression_test_suite = True
-        passed, errmsg = env.check_regression()
+        passed, errmsg = env.check_midend()
         if passed:
           passed, errmsg = env.check_regression_diff()
         env.use_entire_regression_test_suite = False

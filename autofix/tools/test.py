@@ -87,7 +87,7 @@ class TestTool(FuncToolBase):
         f"{changes}"
         "--------"
       )
-    res, log = self.env.check_full()
+    res, log = self.env.check_pass()
     if res:
       return "<success>"
     return "FAILURE\n\n" + (self.normalize_feedback(log))

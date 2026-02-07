@@ -2,6 +2,7 @@
 
 llvm-autofix is a research project focused on automatically repairing LLVM bugs and systematically evaluating an agent’s capability to resolve LLVM issues. The current scope is limited to issues in LLVM's middle-end. It includes:
 
++ [llvm tooling](./autofix/llvm): A collection of agent-friendly LLVM tool wrappers for agents.
 + [llvm-bench (live)](./bench): A continuously updated benchmark containing the latest LLVM middle-end issues.
 + [llvm-autofix-mini](./autofix): A minimal, proof-of-concept agent designed to fix LLVM middle-end issues.
 
