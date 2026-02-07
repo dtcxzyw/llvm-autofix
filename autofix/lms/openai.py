@@ -31,7 +31,7 @@ class OpenAIAgent(AgentBase):
     *,
     temperature: float = 0,
     top_p: float = 0.95,
-    max_copmletion_tokens: int = 8092,
+    max_completion_tokens: int = 8092,
     reasoning_effort: ReasoningEffort = "NOT_GIVEN",
     token_limit: int = -1,
     round_limit: int = -1,
@@ -41,7 +41,7 @@ class OpenAIAgent(AgentBase):
       model,
       temperature=temperature,
       top_p=top_p,
-      max_copmletion_tokens=max_copmletion_tokens,
+      max_completion_tokens=max_completion_tokens,
       reasoning_effort=reasoning_effort,
       token_limit=token_limit,
       round_limit=round_limit,
@@ -115,7 +115,7 @@ class OpenAIAgent(AgentBase):
         messages=self.render_message_list(),
         temperature=self.temperature,
         top_p=self.top_p,
-        max_copmletion_tokens=self.max_copmletion_tokens,
+        max_completion_tokens=self.max_completion_tokens,
         reasoning_effort=self.reasoning_effort,
         tools=(
           [tool.spec().render_in_openai_format() for tool in remaining_tools]
@@ -139,8 +139,8 @@ class OpenAIAgent(AgentBase):
       if not response.tool_calls:
         # Handle normal response
         self.append_assistant_message(response.content)
-        flag, content = response_handler(response.content)
-        if flag:
+        cont_exec, content = response_handler(response.content)
+        if cont_exec:
           self.append_user_message(content)
           continue
         else:
@@ -157,8 +157,9 @@ class OpenAIAgent(AgentBase):
         )
         arguments = json.loads(args)
         result = self.perform_tool_call(name, arguments)
-        flag, result = tool_call_handler(name, args, result)
-        if not flag:
+        cont_exec, result = tool_call_handler(name, args, result)
+        if not cont_exec:
+          self.append_user_message(result)
           return result
         self.append_function_tool_call_output(call_id=tool_call.id, result=result)
 

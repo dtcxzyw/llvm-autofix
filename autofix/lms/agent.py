@@ -71,7 +71,7 @@ class AgentBase:
     *,
     temperature: float = 0,  # Higher temperature means more randomness
     top_p: float = 0.95,  # Top cumulative probability for nucleus sampling
-    max_copmletion_tokens: int = 8092,  # Max completion tokens (including reasoning and tool calls)
+    max_completion_tokens: int = 8092,  # Max completion tokens (including reasoning and tool calls)
     reasoning_effort: ReasoningEffort = "NOT_GIVEN",  # Reasoning effort level: NOT_GIVEN, none, minimal, low, medium, high, and xhigh
     token_limit: int = -1,  # Max total tokens (including input and output) for the entire conversation.
     round_limit: int = -1,  # Max rounds of conversation (one round includes one assistant message and tool calls)
@@ -81,7 +81,7 @@ class AgentBase:
     self.history = []
     self.temperature = temperature
     self.top_p = top_p
-    self.max_copmletion_tokens = max_copmletion_tokens
+    self.max_completion_tokens = max_completion_tokens
     self.reasoning_effort = reasoning_effort
     assert reasoning_effort in [
       "NOT_GIVEN",

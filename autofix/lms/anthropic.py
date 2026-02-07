@@ -29,7 +29,7 @@ class ClaudeAgent(AgentBase):
     *,
     temperature: float = 0,
     top_p: float = 0.95,
-    max_copmletion_tokens: int = 8092,
+    max_completion_tokens: int = 8092,
     reasoning_effort: ReasoningEffort = "NOT_GIVEN",
     token_limit: int = -1,
     round_limit: int = -1,
@@ -39,7 +39,7 @@ class ClaudeAgent(AgentBase):
       model,
       temperature=temperature,
       top_p=top_p,
-      max_copmletion_tokens=max_copmletion_tokens,
+      max_completion_tokens=max_completion_tokens,
       reasoning_effort=reasoning_effort,
       token_limit=token_limit,
       round_limit=round_limit,
@@ -120,8 +120,9 @@ class ClaudeAgent(AgentBase):
               arguments=args_text,
             )
             result = self.perform_tool_call(name, args)
-            flag, result = tool_call_handler(name, args_text, result)
-            if not flag:
+            cont_exec, result = tool_call_handler(name, args_text, result)
+            if not cont_exec:
+              self.append_user_message(result)
               return result
             self.append_function_tool_call_output(call_id=call_id, result=result)
             messages.append(
@@ -138,8 +139,8 @@ class ClaudeAgent(AgentBase):
             )
       elif response.stop_reason == "stop_sequence":
         self.append_assistant_message(response.content[0].text)
-        flag, content = response_handler(response.content[0].text)
-        if flag:
+        cont_exec, content = response_handler(response.content[0].text)
+        if cont_exec:
           self.append_user_message(content)
           messages.append(
             {

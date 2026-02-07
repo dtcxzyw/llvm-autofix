@@ -718,7 +718,7 @@ def main():
     args.model,
     temperature=AGENT_TEMPERATURE,
     top_p=AGENT_TOP_P,
-    max_copmletion_tokens=AGENT_MAX_COMPLETION_TOKENS,
+    max_completion_tokens=AGENT_MAX_COMPLETION_TOKENS,
     reasoning_effort=AGENT_REASONINT_EFFORT,
     token_limit=AGENT_MAX_CONSUMED_TOKENS,
     round_limit=AGENT_MAX_CHAT_ROUNDS,
