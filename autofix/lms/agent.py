@@ -9,9 +9,9 @@ from tenacity import (
   wait_random_exponential,
 )  # for exponential backoff
 
-from autofix.base.console import get_boxed_console
 from autofix.llvm.llvm_helper import remove_path_from_output
 from autofix.lms.tool import FuncToolBase, ToolRegistry
+from autofix.utils.console import get_boxed_console
 
 
 @dataclass
