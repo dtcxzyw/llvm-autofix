@@ -10,44 +10,38 @@ fi
 USER_WORKING_DIR=$(pwd)
 cd $LLVM_AUTOFIX_HOME_DIR
 
+BENCH_DIR=$LLVM_AUTOFIX_HOME_DIR/bench
+
 show_usage() {
-    echo "Usage: $0 <agent_name> [-D <model_driver>] [-m <model_name>] [-o <logs_dir>] [-R] [--help]"
-    echo "  <agent_name>  Specify the agent name (autofix.mini or autofix.mswe)"
-    echo "  -B    Specify the benchmark name (live or full; default: live)"
-    echo "  -D    Specify the model driver (openai, anthropic, or openai_generic; default: openai_generic)"
+    echo "Usage: $0 [-A <agent_name>] [-B <bench_name>] [-m <model_name>] [-D <model_driver>] [-o <logs_dir>] [-R] [-C] [-h]"
     echo "  -m    Specify the model name (default: gpt-5)"
-    echo "  -o    Specify directory saving logs (default: benchout/)"
+    echo "  -D    Specify the model API driver (openai or anthropic; default: openai)"
+    echo "  -A    Specify the agent name (autofix.mini or autofix.mswe)"
+    echo "  -B    Specify the benchmark name (live or full; default: live)"
+    echo "  -o    Specify directory saving logs (default: benchout)"
     echo "  -R    Reset everything otherwise continue from last benchmarking state (default: false)"
     echo "  -C    Clean build directories after running each issue (default: false)"
     echo "  -h    Show this help message"
 }
 
-# Get current directory (bench/ directory)
-BENCH_DIR=$LLVM_AUTOFIX_HOME_DIR/bench
-
-# Parse options and arguments
-if [ $# -lt 1 ]; then
-    echo "Error: agent_name is required as a positional argument"
-    show_usage
-    exit 1
-fi
-
-AGENT_NAME="$1"
-shift
-if [[ "$AGENT_NAME" != "autofix.mini" && "$AGENT_NAME" != "autofix.mswe" ]]; then
-    echo "Error: agent_name must be either 'autofix.mini' or 'autofix.mswe'"
-    exit 1
-fi
-
-MODEL_DRIVER="openai_generic"
+AGENT_NAME="autofix.mini"
+MODEL_DRIVER="openai"
 MODEL_NAME="gpt-5"
 BENCH_NAME="live"
-LOGGING_DIR="$LLVM_AUTOFIX_HOME_DIR/benchout"
+LOGGING_DIR="$USER_WORKING_DIR/benchout"
 RESET_FLAG="0"
 CLEAN_FLAG="0"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -A|--agent)
+            AGENT_NAME="$2"
+            if [[ "$AGENT_NAME" != "autofix.mini" && "$AGENT_NAME" != "autofix.mswe" ]]; then
+                echo "Error: Agent name must be either 'autofix.mini' or 'autofix.mswe'"
+                exit 1
+            fi
+            shift 2
+            ;;
         -B|--benchmark)
             BENCH_NAME="$2"
             shift 2
@@ -58,7 +52,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         -D|--model-driver)
             MODEL_DRIVER="$2"
-            if [[ "$MODEL_DRIVER" != "openai" && "$MODEL_DRIVER" != "openai_generic" && "$MODEL_DRIVER" != "anthropic" ]]; then
+            if [[ "$MODEL_DRIVER" != "openai" && "$MODEL_DRIVER" != "anthropic" ]]; then
                 echo "Error: MODEL_DRIVER must be one of 'openai' or 'anthropic'"
                 exit 1
             fi
@@ -223,6 +217,7 @@ fix_issue() {
 
 # Main benchmark execution
 echo "Starting benchmark ..."
+echo "==============================================="
 echo "  Agent: $AGENT_NAME"
 echo "  Model: $MODEL_NAME ($MODEL_DRIVER)"
 echo "  Reset: $RESET_FLAG"
@@ -233,6 +228,19 @@ echo "  Failure logs will be saved to: $FAILURE_DIR"
 echo "  Total issues to process: ${#ISSUE_LIST[@]}"
 echo "  Processed issues file: $PROCESSED_ISSUES_FILE"
 echo "==============================================="
+
+# Ask the user to double-check the information before proceeding, yes to continue, no to exit
+echo
+echo "Please double-check the above information."
+read -p "Do you want to proceed? (y/n) " -r REPLY
+echo
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Benchmark aborted by user."
+    exit 0
+fi
+
+echo "yes"
+exit 1
 
 success_count=0
 failure_count=0
@@ -271,7 +279,7 @@ done
 end_time=$(date +%s)
 duration=$((end_time - start_time))
 
-echo "========================================"
+echo "==============================================="
 echo "Benchmark completed!"
 echo "Total issues in list: ${#ISSUE_LIST[@]}"
 echo "Skipped (already processed): $skipped_count"

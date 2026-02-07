@@ -1,7 +1,6 @@
-# Implementation of Claude-based agents.
-
 import json
 import os
+import warnings
 from typing import List
 
 from anthropic import Anthropic, omit
@@ -17,6 +16,7 @@ from autofix.lms.agent import (
 )
 
 
+@warnings.deprecated("Use ClaudeGenericAgent instead")
 class ClaudeAgent(AgentBase):
   def __init__(
     self,

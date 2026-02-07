@@ -1,7 +1,6 @@
-# Implementation of OpenAI-compatible agents (Chat Completions API).
-
 import json
 import os
+import warnings
 from typing import List
 
 from openai import NOT_GIVEN, OpenAI
@@ -19,7 +18,8 @@ from autofix.lms.agent import (
 )
 
 
-class OpenAIAgent(AgentBase):
+@warnings.deprecated("Use GPTGenericAgent instead")
+class GPTAgent(AgentBase):
   def __init__(
     self,
     model: str,

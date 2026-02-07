@@ -666,9 +666,9 @@ def parse_args():
   parser.add_argument(
     "--driver",
     type=str,
-    default="openai_generic",
-    help="The LLM api to use (default: openai).",
-    choices=["openai", "anthropic", "openai_generic"],
+    default="openai",
+    help="The LLM API driver to use (default: openai).",
+    choices=["openai", "anthropic"],
   )
   parser.add_argument(
     "--stats",
@@ -704,19 +704,15 @@ def main():
 
   # Set up used LLMs and agents
   if args.driver == "openai":
-    from autofix.lms.openai import OpenAIAgent
+    from autofix.lms.openai_generic import GPTGenericAgent
 
-    agent_class = OpenAIAgent
+    agent_class = GPTGenericAgent
   elif args.driver == "anthropic":
-    from autofix.lms.anthropic import ClaudeAgent
+    from autofix.lms.anthropic_generic import ClaudeGenericAgent
 
-    agent = ClaudeAgent
-  elif args.driver == "openai_generic":
-    from autofix.lms.openai_generic import OpenAIGenericAgent
-
-    agent_class = OpenAIGenericAgent
+    agent = ClaudeGenericAgent
   else:
-    panic(f"Unsupported LLM driver: {args.driver}")
+    panic(f"Unsupported LLM API driver: {args.driver}")
 
   agent = agent_class(
     args.model,
