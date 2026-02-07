@@ -16,7 +16,6 @@ from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models.litellm_model import LitellmModel
 from minisweagent.run.utils.save import save_traj
 
-from autofix.base.console import get_boxed_console
 from autofix.llvm.lab_env import Environment as FixEnvironment
 from autofix.llvm.llvm_helper import (
   get_first_failed_test,
@@ -44,6 +43,7 @@ from autofix.mini import (
 from autofix.tools.bash import FORBIDDEN_TOOLS
 from autofix.tools.test import TestTool
 from autofix.utils import bashlex
+from autofix.utils.console import get_boxed_console
 
 # TODO: remove duplicates with main.py
 console = get_boxed_console(debug_mode=False)

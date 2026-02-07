@@ -8,7 +8,6 @@ from tempfile import NamedTemporaryFile
 from typing import List, Optional, Tuple
 
 from autofix import prompts
-from autofix.base.console import get_boxed_console
 from autofix.llvm.debugger import DebuggerBase, StackTrace
 from autofix.llvm.gdb_support import GDB
 from autofix.llvm.lab_env import Environment
@@ -41,6 +40,7 @@ from autofix.tools.readn import ReadNTool
 from autofix.tools.reset import ResetTool
 from autofix.tools.ripgrepn import RipgrepNTool
 from autofix.tools.test import TestTool
+from autofix.utils.console import get_boxed_console
 
 # - ===============================================
 # - Agent configurations

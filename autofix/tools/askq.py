@@ -1,5 +1,5 @@
-from autofix.base.console import get_boxed_console
 from autofix.lms.tool import FuncToolBase, FuncToolSpec
+from autofix.utils.console import get_boxed_console
 
 
 class AskQuestionTool(FuncToolBase):
