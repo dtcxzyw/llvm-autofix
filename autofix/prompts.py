@@ -68,7 +68,7 @@ You may use the logs supplied, and you may request or \
 infer any additional context you find necessary using the available tools.
 
 Once you identify the issue and the corresponding fix,\
-use the `stop` tool to specify the *edit point(s)* along with detailed reasoning. Follow this structure:
+use the `report` tool to specify the *edit point(s)* along with detailed reasoning. Follow this structure:
 
 1. **Understanding the Issue**: Explain what the problem is and why it manifests.
 2. **Analyzing `opt`'s Log**: Highlight any relevant transformations, analysis results, or unexpected behavior observed in the `opt` output.
