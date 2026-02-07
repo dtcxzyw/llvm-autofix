@@ -26,6 +26,7 @@ from autofix.llvm.llvm_helper import (
   reset as reset_llvm,
 )
 from autofix.lms.agent import AgentBase
+from autofix.lms.tool import FuncToolBase, FuncToolCallException, FuncToolSpec
 from autofix.tools.code import CodeTool
 from autofix.tools.debug import DebugTool
 from autofix.tools.docs import DocsTool
@@ -34,11 +35,11 @@ from autofix.tools.eval import EvalTool
 from autofix.tools.findn import FindNTool
 from autofix.tools.langref import LangRefTool
 from autofix.tools.listn import ListNTool
+from autofix.tools.llvm_mixins import LlvmDirMixin
 from autofix.tools.preview import PreviewTool
 from autofix.tools.readn import ReadNTool
 from autofix.tools.reset import ResetTool
 from autofix.tools.ripgrepn import RipgrepNTool
-from autofix.tools.stop import StopTool
 from autofix.tools.test import TestTool
 
 # - ===============================================
@@ -357,6 +358,88 @@ def patch_and_fix(
   )
 
 
+class ReportRootCauseTool(FuncToolBase, LlvmDirMixin):
+  def __init__(self, llvm_dir: str, min_edit_point_lines: int):
+    self.llvm_dir = Path(llvm_dir).resolve().absolute()
+    self.min_edit_point_lines = min_edit_point_lines
+
+  def spec(self) -> FuncToolSpec:
+    return FuncToolSpec(
+      "report",
+      "Stop process and report the found edit points for fixing the issue",
+      [
+        FuncToolSpec.Param(
+          "edit_points",
+          "list[tuple[int,int,string]]",
+          True,
+          "A list of edit points with each being a tuple of the one-indexed starting line number (included)"
+          ", the ending line number (included), and the relative path of the file to edit (starting with llvm/).",
+        ),
+        FuncToolSpec.Param(
+          "thoughts",
+          "string",
+          True,
+          'The detailed thoughts for diagnosing the issue including step-by-step "'
+          '1. Understanding the Issue", '
+          '2. "Analyzing `opt`\'s Log", '
+          '3. "Root Cause Analysis", '
+          '4. "Proposed Edit Points(s)", and '
+          '5. "Conclusion".',
+        ),
+      ],
+    )
+
+  def _call(self, *, edit_points: list[tuple[int, int, str]], thoughts: str) -> str:
+    # Check and fix the model-provided edit points
+    fixed_edit_points = []
+    for ind, edit in enumerate(edit_points):
+      if len(edit) != 3:
+        raise FuncToolCallException(
+          f"Each edit point must be a tuple of 3 elements (starting line number, ending line number, and the relative path of the file to edit): {edit}"
+        )
+      fixed_edit = []
+      try:
+        start_line = int(edit[0])
+      except Exception:
+        raise FuncToolCallException(
+          f"The starting line number must be an integer, got {edit[0]} at edit_points[{ind}]: {edit}"
+        )
+      if start_line < 1:
+        raise FuncToolCallException(
+          f"The starting line number must be an one-indexed integer, got {start_line} at edit_points[{ind}]: {edit}"
+        )
+      fixed_edit.append(start_line)
+      try:
+        end_line = int(edit[1])
+      except Exception:
+        raise FuncToolCallException(
+          f"The ending line number must be an integer, got {edit[1]} at edit_points[{ind}]: {edit}"
+        )
+      if end_line < 1:
+        raise FuncToolCallException(
+          f"The ending line number must be an one-indexed integer, got {end_line} at edit_points[{ind}]: {edit}"
+        )
+      if end_line - start_line + 1 < self.min_edit_point_lines:
+        raise FuncToolCallException(
+          f"An edit point must be at least 5 lines long, got {end_line - start_line + 1} lines at edit_points[{ind}]: {edit}"
+        )
+      fixed_edit.append(end_line)
+      try:
+        fixed_edit.append(str(self.check_llvm_file(edit[2]).relative_to(self.llvm_dir)))
+      except FuncToolCallException as e:
+        raise FuncToolCallException(
+          f"Invalid file path for detected at edit_points[{ind}]: {edit}. {e}"
+        )
+      fixed_edit_points.append(tuple(fixed_edit))
+    return json.dumps(
+      {
+        "edit_points": fixed_edit_points,
+        "thoughts": thoughts,
+      },
+      indent=2,
+    )
+
+
 def run_mini_agent(
   rep: Reproducer,
   *,
@@ -401,21 +484,21 @@ def run_mini_agent(
   )
 
   def response_handler(_: str) -> Tuple[bool, str]:
-    ensure_tools_available(agent, ["stop"])
+    ensure_tools_available(agent, ["report"])
     return True, (
       "Error: You are not calling any tool or your tool call format is incorrect. "
       "You should always continue with tool calling and correct tool call format. "
       "Please continue."
-      " If you are done, call the `stop` tool with the edit points."
-      " If you already called the `stop` tool, please check the format and try again."
+      " If you are done, call the `report` tool with the edit points."
+      " If you already called the `report` tool, please check the format and try again."
     )
 
   def tool_call_handler(name: str, _: str, res: str) -> Tuple[bool, str]:
-    ensure_tools_available(agent, ["stop"])
-    if name != "stop":
+    ensure_tools_available(agent, ["report"])
+    if name != "report":
       return True, res  # Continue the process
     try:
-      # The stop tool returns a parseable JSON string
+      # The report tool returns a parseable JSON string
       json.loads(res)
     except Exception:
       return (True, res)  # Continue the process with an error message
@@ -436,8 +519,8 @@ def run_mini_agent(
       # Debugging tools
       "debug",
       "eval",
-      # Stop tool to finish the analysis
-      "stop",
+      # Report tool to finish the analysis
+      "report",
     ],
     response_handler=response_handler,
     tool_call_handler=tool_call_handler,
@@ -605,8 +688,8 @@ def get_tool_list(fixenv: Environment, llvm: LLVM, debugger: DebuggerBase):
     # Debugging tools
     (DebugTool(debugger), MAX_TCS_GET_CONTEXT),
     (EvalTool(debugger), MAX_TCS_GET_CONTEXT),
-    # Stop the agent process
-    (StopTool(llvm_dir, MIN_EDIT_POINT_LINES), MAX_TCS_GET_CONTEXT),
+    # Stop the agent process and report
+    (ReportRootCauseTool(llvm_dir, MIN_EDIT_POINT_LINES), MAX_TCS_GET_CONTEXT),
   ]
 
 
