@@ -45,8 +45,8 @@ while [[ $# -gt 0 ]]; do
         -B|--benchmark)
             BENCH_NAME="$2"
             shift 2
-            if [[ "$BENCH_NAME" != "live" && "$BENCH_NAME" != "full" ]]; then
-                echo "Error: Benchmark name must be either 'live' or 'full'"
+            if [[ ! "$BENCH_NAME" =~ ^live- && "$BENCH_NAME" != "full" ]]; then
+                echo "Error: Benchmark name must be either 'full' or 'live-yymmdd'"
                 exit 1
             fi
             ;;
@@ -90,8 +90,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+BENCH_DATASET_DIR="$BENCH_DIR/$BENCH_NAME"
+if [ ! -d "$BENCH_DATASET_DIR" ]; then
+    echo "Error: Benchmark dataset directory $BENCH_DATASET_DIR does not exist."
+    exit 1
+fi
+
 # Get the list of issues to process from the benchmark directory
-mapfile -t ISSUE_LIST < <(find "$BENCH_DIR/$BENCH_NAME" -name "*.json" -exec basename {} .json \;)
+mapfile -t ISSUE_LIST < <(find "$BENCH_DATASET_DIR" -name "*.json" -exec basename {} .json \;)
 
 PROCESSED_ISSUES_FILE="$LOGGING_DIR/processed_issues"
 SUCCESS_DIR="$LOGGING_DIR/success"
