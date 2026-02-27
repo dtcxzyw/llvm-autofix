@@ -64,7 +64,7 @@ for event in timeline:
     commit_id = event["commit_id"]
     if commit_id is not None:
       fix_commit = commit_id
-    break
+      break
   if event["event"] == "referenced" and fix_commit is None:
     commit = event["commit_id"]
     if llvm_helper.is_valid_fix(commit):
