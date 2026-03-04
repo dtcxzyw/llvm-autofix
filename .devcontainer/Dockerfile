@@ -24,6 +24,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         python3-pip \
         vim \
         tmux \
+        zstd \
     # We use Ollama for development and testing.
     && curl -fsSL https://ollama.com/install.sh | sh \
     && apt autoremove -y && apt clean -y \

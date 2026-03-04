@@ -69,7 +69,8 @@ sudo ninja -C ${DEP_RE2C_BUILD_DIR} install
 # alive2
 
 mkdir -p ${DEP_ALIVE2_DIR}
-git clone -b ${DEP_ALIVE2_VERSION} --depth 1 https://github.com/AliveToolkit/alive2 ${DEP_ALIVE2_SOURCE_DIR}
+git clone https://github.com/AliveToolkit/alive2 ${DEP_ALIVE2_SOURCE_DIR}
+git -C ${DEP_ALIVE2_SOURCE_DIR} checkout ${DEP_ALIVE2_VERSION}
 cmake -S ${DEP_ALIVE2_SOURCE_DIR} -B ${DEP_ALIVE2_BUILD_DIR} -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C ${DEP_ALIVE2_BUILD_DIR}
 cmake -S ${DEP_ALIVE2_SOURCE_DIR} -B ${DEP_ALIVE2_BUILD_DIR} -G Ninja -DCMAKE_BUILD_TYPE=Release \
