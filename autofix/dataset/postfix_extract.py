@@ -148,6 +148,7 @@ def remove_target_suffix(path):
     "AMDGPU",
     "SystemZ",
     "Hexagon",
+    "NVPTX",
   ]
   for target in targets:
     path = path.removesuffix("/" + target)

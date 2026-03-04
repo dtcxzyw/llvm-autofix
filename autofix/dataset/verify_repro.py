@@ -45,7 +45,7 @@ def verify_issue(issue):
   print("Stage 2 lit check")
   res, log = llvm_helper.verify_lit(
     test_commit=data.get("test_commit", data["hints"]["fix_commit"]),
-    dirs=data["lit_test_dir"],
+    dirs=["llvm/test/Transforms", "llvm/test/Analysis"],
     max_test_jobs=max_build_jobs,
     test_commit_checkout_changed_files_only=data.get(
       "test_commit_checkout_changed_files_only", False
