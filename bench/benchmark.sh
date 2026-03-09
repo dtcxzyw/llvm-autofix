@@ -13,11 +13,11 @@ cd $LLVM_AUTOFIX_HOME_DIR
 BENCH_DIR=$LLVM_AUTOFIX_HOME_DIR/bench
 
 show_usage() {
-    echo "Usage: $0 [-A <agent_name>] [-B <bench_name>] [-m <model_name>] [-D <model_driver>] [-o <logs_dir>] [-R] [-C] [-h]"
+    echo "Usage: $0 -B <bench_name> [-A <agent_name>] [-m <model_name>] [-D <model_driver>] [-o <logs_dir>] [-R] [-C] [-h]"
+    echo "  -B    Specify the benchmark name (live-XXXXXX or full; required)"
+    echo "  -A    Specify the agent name (autofix.mini or autofix.mswe; default: autofix.mini)"
     echo "  -m    Specify the model name (default: gpt-5)"
     echo "  -D    Specify the model API driver (openai or anthropic; default: openai)"
-    echo "  -A    Specify the agent name (autofix.mini or autofix.mswe)"
-    echo "  -B    Specify the benchmark name (live or full; default: live)"
     echo "  -o    Specify directory saving logs (default: benchout)"
     echo "  -R    Reset everything otherwise continue from last benchmarking state (default: false)"
     echo "  -C    Clean build directories after running each issue (default: false)"
@@ -27,7 +27,7 @@ show_usage() {
 AGENT_NAME="autofix.mini"
 MODEL_DRIVER="openai"
 MODEL_NAME="gpt-5"
-BENCH_NAME="live"
+BENCH_NAME=""
 LOGGING_DIR="$USER_WORKING_DIR/benchout"
 RESET_FLAG="0"
 CLEAN_FLAG="0"
@@ -89,6 +89,13 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Check if benchmark name is provided
+if [ -z "$BENCH_NAME" ]; then
+    echo "Error: Benchmark name is required. Use -B or --benchmark to specify it."
+    show_usage
+    exit 1
+fi
 
 BENCH_DATASET_DIR="$BENCH_DIR/$BENCH_NAME"
 if [ ! -d "$BENCH_DATASET_DIR" ]; then
@@ -244,9 +251,6 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     echo "Benchmark aborted by user."
     exit 0
 fi
-
-echo "yes"
-exit 1
 
 success_count=0
 failure_count=0
