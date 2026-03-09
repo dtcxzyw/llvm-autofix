@@ -793,7 +793,7 @@ def main():
   elif args.driver == "anthropic":
     from autofix.lms.anthropic_generic import ClaudeGenericAgent
 
-    agent = ClaudeGenericAgent
+    agent_class = ClaudeGenericAgent
   else:
     panic(f"Unsupported LLM API driver: {args.driver}")
 
