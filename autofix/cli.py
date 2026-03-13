@@ -6,6 +6,7 @@ from autofix.llvm.lab_env import Environment as FixEnvironment
 from autofix.llvm.llvm_helper import (
   get_first_failed_test,
   get_llvm_build_dir,
+  llvm_alive_tv,
   llvm_dir,
   pretty_render_log,
   set_llvm_build_dir,
@@ -38,6 +39,7 @@ After fixing the issue, please generate two files under the directory of this ma
 
 The root directory of the LLVM project is: {workdir}
 The build directory is: {builddir}
+For miscompilation bugs, you are allowed to use alive2, a translation verification tool, which is available at: {llvm_alive_tv}.
 
 **DO NOT**
 + Accessing the Internet or any external resources. You should only rely on the information provided in the issue description and your existing knowledge to solve the issue.
@@ -118,6 +120,7 @@ def main():
     issue_symptom=reprod_log,
     workdir=llvm_dir,
     builddir=get_llvm_build_dir(),
+    llvm_alive_tv=llvm_alive_tv,
   )
   Path(args.output).write_text(prompt)
   print(f"Prompt generated and saved to {args.output}.")
