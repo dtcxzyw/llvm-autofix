@@ -22,7 +22,7 @@ class Skill:
   parameters: List[FuncToolSpec.Param]
   tools: List[str]  # Tool names available in the sub-loop
   budget: int  # Max rounds for the sub-loop
-  prompt_template: str  # Markdown body with {{ param }} placeholders
+  instructions: str  # Markdown body with {{ param }} placeholders
   path: Path = field(default_factory=lambda: Path("."))  # Skill directory
   references: List[Path] = field(default_factory=list)  # Extra files in skill dir
   scripts: List[Path] = field(default_factory=list)  # Executable scripts in skill dir
@@ -65,7 +65,7 @@ class SkillTool(FuncToolBase):
 
   def _call(self, **kwargs) -> str:
     # Render the prompt template with the provided arguments
-    prompt = self.skill.prompt_template
+    prompt = self.skill.instructions
     for key, value in kwargs.items():
       prompt = prompt.replace("{{ " + key + " }}", str(value))
 
@@ -122,24 +122,28 @@ def load_skill(path: Path) -> Skill:
       )
     )
 
-  # Discover references and scripts in the skill directory
+  # Discover references and scripts from subdirectories
   references = []
+  refs_dir = skill_dir / "references"
+  if refs_dir.exists() and refs_dir.is_dir():
+    for child in sorted(refs_dir.iterdir()):
+      if child.is_file():
+        references.append(child)
+
   scripts = []
-  for child in sorted(skill_dir.iterdir()):
-    if child.name == SKILL_FILE:
-      continue
-    if child.is_file() and child.suffix in (".md", ".txt", ".rst"):
-      references.append(child)
-    elif child.is_file() and child.stat().st_mode & 0o111:
-      scripts.append(child)
+  scripts_dir = skill_dir / "scripts"
+  if scripts_dir.exists() and scripts_dir.is_dir():
+    for child in sorted(scripts_dir.iterdir()):
+      if child.is_file() and child.stat().st_mode & 0o111:
+        scripts.append(child)
 
   return Skill(
     name=header["name"],
     description=header["description"],
     parameters=params,
-    tools=header.get("tools", []),
-    budget=header.get("budget", sys.maxsize),
-    prompt_template=body,
+    tools=header.get("allowed-tools", []),
+    budget=header.get("tool-budget", sys.maxsize),
+    instructions=body,
     path=skill_dir,
     references=references,
     scripts=scripts,

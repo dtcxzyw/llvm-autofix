@@ -163,8 +163,8 @@ parameters:
     type: string
     required: true
     description: The date in YYYY-mm-dd format
-tools: [get_weather]
-budget: 20
+allowed-tools: [get_weather]
+tool-budget: 20
 ---
 
 You are a weather analyst. Your task is to produce a summary weather report.
