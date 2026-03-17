@@ -1,5 +1,8 @@
 import random
+import tempfile
+from pathlib import Path
 
+from autofix.lms.skill import SKILL_FILE
 from autofix.lms.tool import FuncToolBase, FuncToolCallException, FuncToolSpec
 
 
@@ -121,6 +124,7 @@ class FinishTask(FuncToolBase):
 
 
 def test_weather(agent_class, model: str):
+  """Demo: tools only — agent uses get_weather + get_average directly."""
   lm = agent_class(model=model, debug_mode=True)
   lm.console.print(f"Using model: {lm.model}")
 
@@ -145,7 +149,78 @@ def test_weather(agent_class, model: str):
   )
 
 
+def test_skill(agent_class, model: str):
+  weather_report = """\
+---
+name: weather_report
+description: Fetch weather for all cities in a given region and produce a summary report
+parameters:
+  - name: region
+    type: string
+    required: true
+    description: The region name (e.g. "European", "Asian") to filter cities
+  - name: date
+    type: string
+    required: true
+    description: The date in YYYY-mm-dd format
+tools: [get_weather]
+budget: 20
+---
+
+You are a weather analyst. Your task is to produce a summary weather report.
+
+**Region**: {{ region }}
+**Date**: {{ date }}
+
+Steps:
+1. Use the `get_weather` tool to fetch weather for each city in the requested region (use Celsius).
+2. After collecting all data, compile a brief report listing each city's weather, temperature, and conditions.
+3. Include the average temperature across all cities.
+4. Call `skill_done` with the full report text.
+"""
+  # Write weather_report skill into a temperary directory for loading
+  with tempfile.TemporaryDirectory() as tmpdir:
+    skill_dir = Path(tmpdir) / "weather_report"
+    skill_dir.mkdir()
+    (skill_dir / SKILL_FILE).write_text(weather_report)
+
+    """Demo: skills — agent delegates to weather_report skill."""
+    lm = agent_class(model=model, debug_mode=True)
+    lm.console.print(f"Using model: {lm.model}")
+
+    # Register the base tools that skills can use
+    lm.register_tool(GetWeather(), 100)
+    lm.register_tool(FinishTask(), 1)
+
+    # Load and register skills
+    sk_name = lm.register_skill(skill_dir, 10)
+
+    lm.append_user_message(
+      "Give me a weather report for all European cities for 2026-03-17."
+    )
+
+    lm.run(
+      [sk_name] + ["finish"],
+      lambda x: (
+        True,
+        "Error: You're NOT calling any tool or you called with an INCORRECT format. Always select a tool to call with correct Tool Call Format. If you're done with the task, call the 'finish' tool with the result.",
+      ),
+      lambda tool, args, res: (
+        tool != "finish",
+        f"Good. The model gives the result: {res}" if tool == "finish" else res,
+      ),
+    )
+
+
 if __name__ == "__main__":
+  import sys
+
   from autofix.lms.openai_generic import GPTGenericAgent
 
-  test_weather(GPTGenericAgent, "gpt-5-mini")
+  demo = sys.argv[1] if len(sys.argv) > 1 else "skill"
+  if demo == "weather":
+    test_weather(GPTGenericAgent, "gpt-5-mini")
+  elif demo == "skill":
+    test_skill(GPTGenericAgent, "gpt-5-mini")
+  else:
+    print(f"Unknown demo: {demo}. Use 'weather' or 'skill'.")

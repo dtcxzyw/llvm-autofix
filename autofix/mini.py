@@ -706,6 +706,12 @@ def get_tool_list(fixenv: Environment, llvm: LLVM, debugger: DebuggerBase):
   ]
 
 
+def get_skill_list():
+  # The list of our skills and their call limits. 0 means allowing unlimited call.
+  skills_dir = Path(__file__).parent / "skills"
+  return [(sk.resolve().absolute(), 0) for sk in skills_dir.iterdir() if sk.is_dir()]
+
+
 def autofix(
   rep: Reproducer,
   *,
@@ -729,6 +735,14 @@ def autofix(
   tools = get_tool_list(fixenv, llvm, debugger)
   for to, th in tools:
     agent.register_tool(to, th)
+
+  # Load and register skills as callable tools
+  skills = get_skill_list()
+  for sk, th in skills:
+    assert agent.tools.get_remaining_budget("bash") > 0, (
+      "Skills require the bash tool to be enabled"
+    )
+    agent.register_skill(sk, th)
 
   # Run the agent with all required information and tools
   return run_mini_agent(

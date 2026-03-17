@@ -1,6 +1,7 @@
 import sys
 from abc import abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, List, Literal, Tuple, Union
 
 from tenacity import (
@@ -10,6 +11,7 @@ from tenacity import (
 )  # for exponential backoff
 
 from autofix.llvm.llvm_helper import remove_path_from_output
+from autofix.lms.skill import SkillTool, load_skill
 from autofix.lms.tool import FuncToolBase, ToolRegistry
 from autofix.utils.console import get_boxed_console
 
@@ -130,6 +132,15 @@ class AgentBase:
       "Registering tool: " + tool.name() + " (budget=" + str(budget) + ")"
     )
     self.tools.register(tool, budget)
+    return tool.name()
+
+  def register_skill(self, path: Path, budget: int = sys.maxsize) -> str:
+    self.console.print(
+      "Registering skill: " + path.name + " (budget=" + str(budget) + ")"
+    )
+    skill = load_skill(path)
+    self.register_tool(SkillTool(skill, self), budget)
+    return skill.name
 
   @abstractmethod
   def run(
@@ -207,6 +218,61 @@ class AgentBase:
       )
     )
     return remaining
+
+  def run_skill(self, prompt: str, tool_names: List[str], tool_budget: int) -> str:
+    """Run a skill sub-loop with a specialized prompt and tool subset.
+
+    Saves the outer agent state, runs a sub-loop with the given prompt and
+    tools, then restores the outer state and returns the skill's result.
+    """
+    from autofix.lms.skill import DoneTool
+
+    # Save outer state
+    saved_history = self.history
+    saved_tools = self.tools
+
+    # Setup sub-loop state
+    self.history = []
+    self.tools = ToolRegistry()
+
+    # Register only the skill's tool subset from the outer registry
+    for name in tool_names:
+      if name in saved_tools.tools:
+        tool_obj = saved_tools.get(name)
+        self.tools.register(tool_obj, tool_budget)
+
+    # Register the done tool
+    self.tools.register(DoneTool(), 1)
+
+    # Inject the skill prompt
+    self.append_user_message(prompt)
+
+    activated_tools = self.tools.list()
+    done_result = [None]
+
+    def response_handler(_: str):
+      return True, "Please continue. Call the `done` tool when finished."
+
+    def tool_call_handler(name: str, _: str, result: str):
+      if name == "skill_done":
+        done_result[0] = result
+        return False, result
+      return True, result
+
+    try:
+      self.run(activated_tools, response_handler, tool_call_handler)
+    except (ReachRoundLimit, ReachTokenLimit):
+      pass  # Budget exhausted
+
+    result = done_result[0]
+    if result is None:
+      result = "(Skill exhausted budget without producing a result)"
+
+    # Restore outer state
+    self.history = saved_history
+    self.tools = saved_tools
+
+    return result
 
   @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(3))
   def _completion_api_with_backoff(self, **kwargs):
