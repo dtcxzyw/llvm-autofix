@@ -7,7 +7,8 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import List, Optional, Tuple
 
-from autofix import prompts
+import yaml
+
 from autofix.llvm.debugger import DebuggerBase, StackTrace
 from autofix.llvm.gdb_support import GDB
 from autofix.llvm.lab_env import Environment
@@ -41,6 +42,18 @@ from autofix.tools.reset import ResetTool
 from autofix.tools.ripgrepn import RipgrepNTool
 from autofix.tools.test import TestTool
 from autofix.utils.console import get_boxed_console
+
+# - ===============================================
+# - Prompts
+# - ===============================================
+
+_PROMPTS = yaml.safe_load(
+  Path(
+    os.path.join(os.environ.get("LLVM_AUTOFIX_HOME_DIR", "."), "autofix", "mini.yaml")
+  ).read_text()
+)["prompts"]
+PROMPT_REASON = _PROMPTS["reason"]
+PROMPT_REPAIR = _PROMPTS["repair"]
 
 # - ===============================================
 # - Agent configurations
@@ -306,7 +319,7 @@ def patch_and_fix(
 
   # Generate the patch according to the information and proposed edit points
   agent.append_user_message(
-    prompts.PROMPT_REPAIR.format(
+    PROMPT_REPAIR.format(
       reprod_code=rep.file_path.read_text(),
       issue_symptom=rep.symptom,
       reason_info=reason_info,
@@ -469,7 +482,7 @@ def run_mini_agent(
   # Reason about the root cause and propose potential edit points
   console.print("Analyzing the issue to gather required information ...")
   agent.append_user_message(
-    prompts.PROMPT_REASON.format(
+    PROMPT_REASON.format(
       pass_name=opt_pass,
       reprod_code=rep.file_path.read_text(),
       issue_symptom=rep.symptom,
