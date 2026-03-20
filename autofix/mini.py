@@ -679,7 +679,7 @@ def run_opt(rep: Reproducer, *, llvm: LLVM, fixenv: Environment, backtrace: Stac
 
 
 def get_tool_list(fixenv: Environment, llvm: LLVM, debugger: DebuggerBase):
-  # The list of our tools and their call limits. 0 means allowing unlimited call.
+  # The list of our tools and their call limits.
   # TODO: Manage all tools with a ToolRegistry. Don't share budget across agents.
   return [
     # General tools
@@ -707,9 +707,13 @@ def get_tool_list(fixenv: Environment, llvm: LLVM, debugger: DebuggerBase):
 
 
 def get_skill_list():
-  # The list of our skills and their call limits. 0 means allowing unlimited call.
+  # The list of our skills and their call limits.
   skills_dir = Path(__file__).parent / "skills"
-  return [(sk.resolve().absolute(), 0) for sk in skills_dir.iterdir() if sk.is_dir()]
+  return [
+    (sk.resolve().absolute(), MAX_TCS_GET_CONTEXT)
+    for sk in skills_dir.iterdir()
+    if sk.is_dir()
+  ]
 
 
 def autofix(
