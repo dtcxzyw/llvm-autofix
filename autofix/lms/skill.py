@@ -103,7 +103,7 @@ def load_skill(path: Path) -> Skill:
   skill_dir = path
   skill_file = skill_dir / SKILL_FILE
 
-  content = skill_file.read_text()
+  content = skill_file.read_text().strip()
 
   if not content.startswith("---"):
     raise ValueError(f"Skill file {skill_file} must start with YAML frontmatter (---)")
