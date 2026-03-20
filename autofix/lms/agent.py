@@ -231,48 +231,49 @@ class AgentBase:
     saved_history = self.history
     saved_tools = self.tools
 
-    # Setup sub-loop state
-    self.history = []
-    self.tools = ToolRegistry()
-
-    # Register only the skill's tool subset from the outer registry
-    for name in tool_names:
-      if name in saved_tools.tools:
-        tool_obj = saved_tools.get(name)
-        self.tools.register(tool_obj, tool_budget)
-
-    # Register the done tool
-    self.tools.register(DoneTool(), 1)
-
-    # Inject the skill prompt
-    self.append_user_message(prompt)
-
-    activated_tools = self.tools.list()
-    done_result = [None]
-
-    def response_handler(_: str):
-      return True, "Please continue. Call the `skill_done` tool when finished."
-
-    def tool_call_handler(name: str, _: str, result: str):
-      if name == "skill_done":
-        done_result[0] = result
-        return False, result
-      return True, result
-
     try:
-      self.run(activated_tools, response_handler, tool_call_handler)
-    except (ReachRoundLimit, ReachTokenLimit):
-      pass  # Budget exhausted
+      # Setup sub-loop state
+      self.history = []
+      self.tools = ToolRegistry()
 
-    result = done_result[0]
-    if result is None:
-      result = "(Skill exhausted budget without producing a result)"
+      # Register only the skill's tool subset from the outer registry
+      for name in tool_names:
+        if name in saved_tools.tools:
+          tool_obj = saved_tools.get(name)
+          self.tools.register(tool_obj, tool_budget)
 
-    # Restore outer state
-    self.history = saved_history
-    self.tools = saved_tools
+      # Register the done tool
+      self.tools.register(DoneTool(), 1)
 
-    return result
+      # Inject the skill prompt
+      self.append_user_message(prompt)
+
+      activated_tools = self.tools.list()
+      done_result = [None]
+
+      def response_handler(_: str):
+        return True, "Please continue. Call the `skill_done` tool when finished."
+
+      def tool_call_handler(name: str, _: str, result: str):
+        if name == "skill_done":
+          done_result[0] = result
+          return False, result
+        return True, result
+
+      try:
+        self.run(activated_tools, response_handler, tool_call_handler)
+      except (ReachRoundLimit, ReachTokenLimit):
+        pass  # Budget exhausted
+
+      result = done_result[0]
+      if result is None:
+        result = "Error: budget exhausted without producing a result"
+
+      return result
+    finally:
+      # Restore outer state
+      self.history = saved_history
+      self.tools = saved_tools
 
   @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(3))
   def _completion_api_with_backoff(self, **kwargs):
