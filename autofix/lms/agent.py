@@ -219,10 +219,12 @@ class AgentBase:
     )
     return remaining
 
-  def run_skill(self, prompt: str, tool_names: List[str], tool_budget: int) -> str:
-    """Run a skill sub-loop with a specialized prompt and tool subset.
+  def run_skill(
+    self, skill_name: str, skill_inst: str, tool_names: List[str], tool_budget: int
+  ) -> str:
+    """Run a skill sub-loop with a specialized instruction and tool subset.
 
-    Saves the outer agent state, runs a sub-loop with the given prompt and
+    Saves the outer agent state, runs a sub-loop with the given instruction and
     tools, then restores the outer state and returns the skill's result.
     """
     from autofix.lms.skill import DoneTool
@@ -237,16 +239,25 @@ class AgentBase:
       self.tools = ToolRegistry()
 
       # Register only the skill's tool subset from the outer registry
+      missing_tools = []
       for name in tool_names:
         if name in saved_tools.tools:
           tool_obj = saved_tools.get(name)
           self.tools.register(tool_obj, tool_budget)
+        else:
+          missing_tools.append(name)
+
+      if missing_tools:
+        self.console.print(
+          f"Warning: The following tools required by the skill {skill_name} are "
+          f"not registered in the outer agent and won't be available in the skill sub-loop: {missing_tools}"
+        )
 
       # Register the done tool
       self.tools.register(DoneTool(), 1)
 
-      # Inject the skill prompt
-      self.append_user_message(prompt)
+      # Inject the skill instruction
+      self.append_user_message(skill_inst)
 
       activated_tools = self.tools.list()
       done_result = [None]

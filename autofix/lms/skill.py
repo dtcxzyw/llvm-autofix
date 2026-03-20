@@ -89,7 +89,8 @@ class SkillTool(FuncToolBase):
       tool_names.append("bash")
 
     return self.agent.run_skill(
-      prompt=prompt,
+      skill_name=self.skill.name,
+      skill_inst=prompt,
       tool_names=tool_names,
       tool_budget=self.skill.budget,
     )
