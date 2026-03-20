@@ -55,7 +55,7 @@ def panic(msg: str):
 
 
 def parse_args():
-  parser = ArgumentParser(description="cli-agent (llvm-autofix)")
+  parser = ArgumentParser(description="Wrapper of XXX CLI/Agent (llvm-autofix)")
   parser.add_argument(
     "--issue",
     type=str,
