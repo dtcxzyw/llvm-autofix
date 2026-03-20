@@ -178,7 +178,7 @@ Steps:
 3. Include the average temperature across all cities.
 4. Call `skill_done` with the full report text.
 """
-  # Write weather_report skill into a temperary directory for loading
+  # Write weather_report skill into a temporary directory for loading
   with tempfile.TemporaryDirectory() as tmpdir:
     skill_dir = Path(tmpdir) / "weather_report"
     skill_dir.mkdir()

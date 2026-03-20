@@ -21,7 +21,7 @@ class Skill:
   description: str
   parameters: List[FuncToolSpec.Param]
   tools: List[str]  # Tool names available in the sub-loop
-  budget: int  # Max rounds for the sub-loop
+  budget: int  # Max number of calls per tool allowed in the sub-loop
   instructions: str  # Markdown body with {{ param }} placeholders
   path: Path = field(default_factory=lambda: Path("."))  # Skill directory
   references: List[Path] = field(default_factory=list)  # Extra files in skill dir
