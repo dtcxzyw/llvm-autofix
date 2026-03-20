@@ -150,6 +150,8 @@ def test_weather(agent_class, model: str):
 
 
 def test_skill(agent_class, model: str):
+  """Demo: skills — agent delegates to weather_report skill."""
+
   weather_report = """\
 ---
 name: weather_report
@@ -184,7 +186,6 @@ Steps:
     skill_dir.mkdir()
     (skill_dir / SKILL_FILE).write_text(weather_report)
 
-    """Demo: skills — agent delegates to weather_report skill."""
     lm = agent_class(model=model, debug_mode=True)
     lm.console.print(f"Using model: {lm.model}")
 
