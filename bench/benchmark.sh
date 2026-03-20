@@ -15,7 +15,8 @@ BENCH_DIR=$LLVM_AUTOFIX_HOME_DIR/bench
 show_usage() {
     echo "Usage: $0 -B <bench_name> [-A <agent_name>] [-m <model_name>] [-D <model_driver>] [-o <logs_dir>] [-R] [-C] [-h]"
     echo "  -B    Specify the benchmark name (live-XXXXXX or full; required)"
-    echo "  -A    Specify the agent name (autofix.mini or autofix.mswe; default: autofix.mini)"
+    echo "  -A    Specify the agent name (autofix.mini or autofix.mswe or autofix.xcli; default: autofix.mini)"
+    echo "  -c    Specify the XX CLI/Agent for autofix.xcli (required if agent is autofix.xcli)"
     echo "  -m    Specify the model name (default: gpt-5)"
     echo "  -D    Specify the model API driver (openai or anthropic; default: openai)"
     echo "  -o    Specify directory saving logs (default: benchout)"
@@ -27,6 +28,7 @@ show_usage() {
 AGENT_NAME="autofix.mini"
 MODEL_DRIVER="openai"
 MODEL_NAME="gpt-5"
+XCLI_NAME=""
 BENCH_NAME=""
 LOGGING_DIR="$USER_WORKING_DIR/benchout"
 RESET_FLAG="0"
@@ -36,8 +38,16 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -A|--agent)
             AGENT_NAME="$2"
-            if [[ "$AGENT_NAME" != "autofix.mini" && "$AGENT_NAME" != "autofix.mswe" ]]; then
-                echo "Error: Agent name must be either 'autofix.mini' or 'autofix.mswe'"
+            if [[ "$AGENT_NAME" != "autofix.mini" && "$AGENT_NAME" != "autofix.mswe" && "$AGENT_NAME" != "autofix.xcli" ]]; then
+                echo "Error: Agent name must be either 'autofix.mini', 'autofix.mswe', or 'autofix.xcli'"
+                exit 1
+            fi
+            shift 2
+            ;;
+        -c|--xcli)
+            XCLI_NAME="$2"
+            if [[ -z "$XCLI_NAME" ]]; then
+                echo "Error: -c requires a CLI/Agent name for autofix.xcli"
                 exit 1
             fi
             shift 2
@@ -89,6 +99,12 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Check if xcli name is provided when agent is autofix.xcli
+if [ "$AGENT_NAME" = "autofix.xcli" ] && [ -z "$XCLI_NAME" ]; then
+    echo "Error: When agent is 'autofix.xcli', you must specify the CLI/Agent name using -c or --xcli option"
+    exit 1
+fi
 
 # Check if benchmark name is provided
 if [ -z "$BENCH_NAME" ]; then
@@ -183,6 +199,8 @@ run_agent() {
         python -m autofix.mini --debug --model "$MODEL_NAME" --driver "$MODEL_DRIVER" --issue "$issue_id" --stats "$stats_file"
     elif [ "$AGENT_NAME" = "autofix.mswe" ]; then
         python -m autofix.mswe --debug --model "$MODEL_NAME" --issue "$issue_id" --stats "$stats_file"
+    elif [ "$AGENT_NAME" = "autofix.xcli" ]; then
+        python -m autofix.xcli --xcli "$XCLI_NAME" --model "$MODEL_NAME" --issue "$issue_id" --stats "$stats_file"
     else
         echo "Error: Unknown agent name $AGENT_NAME"
         exit 1
@@ -198,9 +216,11 @@ fix_issue() {
     local json_name="${base_name}.json"
     local log_name="${base_name}.log"
     local traj_name="${base_name}.traj.json"
+    local sum_name="${base_name}.summary.json"
     local temp_json="/tmp/${json_name}"
     local temp_log="/tmp/${log_name}"
     local temp_traj="/tmp/${traj_name}"
+    local temp_sum="/tmp/${sum_name}"
 
     echo "Running issue $issue_id..."
 
@@ -210,6 +230,7 @@ fix_issue() {
         mv "$temp_json" "$SUCCESS_DIR/$json_name"
         mv "$temp_log" "$SUCCESS_DIR/$log_name"
         [ -f "$temp_traj" ] && mv "$temp_traj" "$SUCCESS_DIR/$traj_name"
+        [ -f "$temp_sum" ] && mv "$temp_sum" "$SUCCESS_DIR/$sum_name"
         echo "✓ Issue $issue_id completed successfully - log saved to $SUCCESS_DIR/$base_name.*"
         mark_issue_processed "$issue_id" "success"
         return 0
@@ -218,6 +239,7 @@ fix_issue() {
         [ -f "$temp_json" ] && mv "$temp_json" "$FAILURE_DIR/$json_name"
         [ -f "$temp_log" ] && mv "$temp_log" "$FAILURE_DIR/$log_name"
         [ -f "$temp_traj" ] && mv "$temp_traj" "$FAILURE_DIR/$traj_name"
+        [ -f "$temp_sum" ] && mv "$temp_sum" "$FAILURE_DIR/$sum_name"
         echo "✗ Issue $issue_id failed - log saved to $FAILURE_DIR/$base_name.*"
         echo "   Last 15 lines of the log:"
         echo "   =========================="
