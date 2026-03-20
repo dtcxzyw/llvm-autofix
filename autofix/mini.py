@@ -739,9 +739,9 @@ def autofix(
   # Load and register skills as callable tools
   skills = get_skill_list()
   for sk, th in skills:
-    assert agent.tools.get_remaining_budget("bash") > 0, (
-      "Skills require the bash tool to be enabled"
-    )
+    assert (
+      "bash" in agent.tools.list() and agent.tools.get_remaining_budget("bash") > 0
+    ), "Skills require the bash tool to be enabled"
     agent.register_skill(sk, th)
 
   # Run the agent with all required information and tools

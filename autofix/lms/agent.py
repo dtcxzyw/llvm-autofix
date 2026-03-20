@@ -251,7 +251,7 @@ class AgentBase:
     done_result = [None]
 
     def response_handler(_: str):
-      return True, "Please continue. Call the `done` tool when finished."
+      return True, "Please continue. Call the `skill_done` tool when finished."
 
     def tool_call_handler(name: str, _: str, result: str):
       if name == "skill_done":
