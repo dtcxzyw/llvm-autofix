@@ -37,11 +37,25 @@ Or follow [BUILD.md](./docs/BUILD.md) to install required dependencies and bring
 
 ## 🚀 Launch
 
-Launch the agent on a specific issue with:
+Launch our agent on a specific issue with:
 
 ```bash
 python -m autofix.mini --issue <issue_id> --model <model_name>
 ```
+
+Or launch mini-SWE-agent on a specific issue:
+
+```bash
+python -m autofix.mini --issue <issue_id> --model <model_name>
+```
+
+Or launch Claude Code—please install it by hand—on a specific issue:
+
+```bash
+python -m autofix.xcli --xcli claudecode --issue <issue_id> --model <model_name> --stats <stats_path>
+```
+
+**NOTICE: The above commands work only with issues from our benchmark at present.** Running them with other issues might also work, yet one needs to coin a `./bench/full/<issue_id>.json` following the format of our collected issues. We are working on a fully automated agent pipeline for such cases. We are also harnessing other coding agents.
 
 ## 📊 Benchmark
 
