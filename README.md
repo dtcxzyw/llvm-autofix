@@ -60,9 +60,15 @@ Please read guidelines in [CONTRIBUTORS.md](./CONTRIBUTORS.md).
 If you found this work helpful, please consider citing our work:
 
 ```bibtex
-@misc{llvm-autofix,
-  title = {Agentic Harness for Real-World Compilers},
-  author = {Yingwei Zheng, Cong Li, Shaohua Li, Yuqun Zhang, and Zhendong Su},
-  year = {2026}
+@misc{zheng2026agenticharnessrealworldcompilers,
+      title={Agentic Harness for Real-World Compilers},
+      author={Yingwei Zheng and Cong Li and Shaohua Li and Yuqun Zhang and Zhendong Su},
+      year={2026},
+      eprint={2603.20075},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2603.20075},
 }
 ```
+
+Artifacts for the arXiv paper are available at the [experiment](https://github.com/dtcxzyw/llvm-autofix/tree/experiment) branch.
