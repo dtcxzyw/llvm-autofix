@@ -46,7 +46,7 @@ python -m autofix.mini --issue <issue_id> --model <model_name>
 Or launch mini-SWE-agent on a specific issue:
 
 ```bash
-python -m autofix.mini --issue <issue_id> --model <model_name>
+python -m autofix.mswe --issue <issue_id> --model <model_name>
 ```
 
 Or launch Claude Code—please install it by hand—on a specific issue:
@@ -74,14 +74,14 @@ Please read guidelines in [CONTRIBUTORS.md](./CONTRIBUTORS.md).
 If you found this work helpful, please consider citing our work:
 
 ```bibtex
-@misc{zheng2026agenticharnessrealworldcompilers,
-      title={Agentic Harness for Real-World Compilers},
-      author={Yingwei Zheng and Cong Li and Shaohua Li and Yuqun Zhang and Zhendong Su},
-      year={2026},
-      eprint={2603.20075},
-      archivePrefix={arXiv},
-      primaryClass={cs.SE},
-      url={https://arxiv.org/abs/2603.20075},
+@misc{llvm-autofix,
+  title={Agentic Harness for Real-World Compilers},
+  author={Yingwei Zheng and Cong Li and Shaohua Li and Yuqun Zhang and Zhendong Su},
+  year={2026},
+  eprint={2603.20075},
+  archivePrefix={arXiv},
+  primaryClass={cs.SE},
+  url={https://arxiv.org/abs/2603.20075},
 }
 ```
 
