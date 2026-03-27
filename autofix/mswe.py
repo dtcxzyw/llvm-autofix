@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+os.environ["LITELLM_ANTHROPIC_DISABLE_URL_SUFFIX"] = (
+  "1"  # Disable the default URL suffix for Anthropic models in litellm
+)
 os.environ["MSWEA_SILENT_STARTUP"] = "1"  # Silent startup
 os.environ["MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT"] = "3"  # Retry 3 times
 import yaml
@@ -80,11 +83,11 @@ class Issue:
 
 
 class MyModel(LitellmModel):
-  def __init__(self, model: str, *, token_limit=-1, round_limit=-1):
+  def __init__(self, model: str, *, provider="openai", token_limit=-1, round_limit=-1):
     super().__init__(
       model_name=model,
       model_kwargs={
-        "custom_llm_provider": "openai",
+        "custom_llm_provider": provider,
         "api_base": os.environ.get("LLVM_AUTOFIX_LM_API_ENDPOINT"),
         "api_key": os.environ.get("LLVM_AUTOFIX_LM_API_KEY"),
         "temperature": 0,
@@ -162,10 +165,13 @@ class MyEnvironment(LocalEnvironment):
 
 
 class MyAgent(DefaultAgent):
-  def __init__(self, model: Model, stats: RunStats, workdir: str) -> None:
+  def __init__(
+    self, model: Model, provider: str, stats: RunStats, workdir: str
+  ) -> None:
     super().__init__(
       model=MyModel(
         model=model,
+        provider=provider,
         token_limit=AGENT_MAX_CONSUMED_TOKENS,
         round_limit=AGENT_MAX_CHAT_ROUNDS,
       ),
@@ -320,6 +326,13 @@ def parse_args():
     help="Path to save the generation statistics as a JSON file (default: None).",
   )
   parser.add_argument(
+    "--driver",
+    type=str,
+    default="openai",
+    help="The LLM API driver to use (default: openai).",
+    choices=["openai", "anthropic"],
+  )
+  parser.add_argument(
     "--debug",
     action="store_true",
     default=False,
@@ -350,7 +363,7 @@ def main():
 
   try:
     stats = RunStats(command=vars(args))
-    agent = MyAgent(args.model, stats, workdir=llvm_dir)
+    agent = MyAgent(args.model, args.driver, stats, workdir=llvm_dir)
     agent.setup_llvm(args.issue, aggressive_testing=args.aggressive_testing)
     issue = agent.setup_issue()
     stats.total_time_sec = time.time()
