@@ -18,7 +18,7 @@ show_usage() {
     echo "  -A    Specify the agent name (autofix.mini or autofix.mswe or autofix.xcli; default: autofix.mini)"
     echo "  -c    Specify the XX CLI/Agent for autofix.xcli (required if agent is autofix.xcli)"
     echo "  -m    Specify the model name (default: gpt-5)"
-    echo "  -D    Specify the model API driver (openai or anthropic; default: openai)"
+    echo "  -D    Specify the model API driver/provider (openai or anthropic; default: openai)"
     echo "  -o    Specify directory saving logs (default: benchout)"
     echo "  -R    Reset everything otherwise continue from last benchmarking state (default: false)"
     echo "  -C    Clean build directories after running each issue (default: false)"
@@ -198,7 +198,7 @@ run_agent() {
     if [ "$AGENT_NAME" = "autofix.mini" ]; then
         python -m autofix.mini --debug --model "$MODEL_NAME" --driver "$MODEL_DRIVER" --issue "$issue_id" --stats "$stats_file"
     elif [ "$AGENT_NAME" = "autofix.mswe" ]; then
-        python -m autofix.mswe --debug --model "$MODEL_NAME" --issue "$issue_id" --stats "$stats_file"
+        python -m autofix.mswe --debug --model "$MODEL_NAME" --driver "$MODEL_DRIVER" --issue "$issue_id" --stats "$stats_file"
     elif [ "$AGENT_NAME" = "autofix.xcli" ]; then
         python -m autofix.xcli --xcli "$XCLI_NAME" --model "$MODEL_NAME" --issue "$issue_id" --stats "$stats_file"
     else
