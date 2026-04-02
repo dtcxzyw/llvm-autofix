@@ -246,12 +246,6 @@ def main():
   if stats_path.exists():
     panic(f"Stats file {args.stats} already exists.")
 
-  model = args.model
-  if model:
-    model = "--model " + model
-  else:
-    model = ""
-
   issue = args.issue
   set_llvm_build_dir(os.path.join(get_llvm_build_dir(), issue))
   fixenv = FixEnvironment(
@@ -331,7 +325,7 @@ def main():
   print("Starting to fix the issue ...")
   stats.total_time_sec = time.time()
   try:
-    summary = cmdline.check_output(command, timeout=1800, env=env)
+    summary = cmdline.check_output(command, timeout=1800, cwd=llvm_dir, env=env)
     save_xcli_trajectory(
       args.xcli, session=session, summary=summary, stats=stats, stats_path=stats_path
     )
