@@ -249,20 +249,26 @@ class AgentBase:
         self.history = []
       self.tools = ToolRegistry()
 
-      # Register only the skill's tool subset from the outer registry
-      missing_tools = []
-      for name in tool_names:
-        if name in saved_tools.tools:
+      if not tool_names:
+        # Register all tools from the outer registry if no specific tool subset is provided
+        for name in saved_tools.list():
           tool_obj = saved_tools.get(name)
           self.tools.register(tool_obj, tool_budget)
-        else:
-          missing_tools.append(name)
-
-      if missing_tools:
-        self.console.print(
-          f"Warning: The following tools required by the skill {skill_name} are "
-          f"not registered in the outer agent and won't be available in the skill sub-loop: {missing_tools}"
-        )
+      else:
+        # Register only the skill's tool subset from the outer registry
+        missing_tools = []
+        for name in tool_names:
+          if name in saved_tools.tools:
+            tool_obj = saved_tools.get(name)
+            self.tools.register(tool_obj, tool_budget)
+          else:
+            missing_tools.append(name)
+        if missing_tools:
+          self.console.print(
+            f"Warning: The following tools required by the skill {skill_name} are "
+            f"not registered in the outer agent and won't be available in the skill sub-loop: {missing_tools}",
+            color="yellow",
+          )
 
       # Register the done tool
       self.tools.register(DoneTool(), 1)
