@@ -237,15 +237,15 @@ class AgentBase:
     from autofix.lms.skill import DoneTool
 
     # Save outer state
-    if not context_aware:
-      saved_history = self.history
-    else:
-      saved_history = None
+    saved_history = self.history
     saved_tools = self.tools
 
     try:
       # Setup sub-loop state
-      if not context_aware:
+      if context_aware:
+        # Inject the context and use a copy of the history to avoid modifying the outer loop's history
+        self.history = saved_history.copy()
+      else:
         self.history = []
       self.tools = ToolRegistry()
 
@@ -294,11 +294,7 @@ class AgentBase:
       return result
     finally:
       # Restore outer state
-      if not context_aware:
-        assert saved_history is not None, (
-          "saved_history should not be None in context unaware mode"
-        )
-        self.history = saved_history
+      self.history = saved_history
       self.tools = saved_tools
 
   @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(3))
